@@ -23,6 +23,7 @@ from indicators import add_indicators
 from strategy import evaluate
 from risk_manager import RiskManager
 from executor import place_entry_order, place_exit_order
+from trade_log import record_trade
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("main")
@@ -59,7 +60,19 @@ def run():
         if past_square_off():
             for symbol, pos in list(open_positions.items()):
                 logger.info(f"Force square-off: {symbol}")
+                token = tokens[symbol]
+                try:
+                    df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=1)
+                    last_price = df_5m.iloc[-1]["close"] if not df_5m.empty else pos["entry"]
+                except Exception:
+                    last_price = pos["entry"]
+
+                pnl_per_share = (last_price - pos["entry"]) if pos["direction"] == "BUY" else (pos["entry"] - last_price)
+                pnl = pnl_per_share * pos["qty"]
                 place_exit_order(kite, symbol, pos["direction"], pos["qty"], cfg)
+                risk.record_trade_result(pnl)
+                record_trade(symbol, pos["direction"], pos["qty"], pos["entry"], last_price, pnl, "square_off")
+                logger.info(f"Force-closed {symbol} P&L={pnl:.2f}")
                 del open_positions[symbol]
             logger.info("Trading day complete. Exiting.")
             break
@@ -81,9 +94,11 @@ def run():
                 if hit_stop or hit_target:
                     pnl_per_share = (last_price - pos["entry"]) if pos["direction"] == "BUY" else (pos["entry"] - last_price)
                     pnl = pnl_per_share * pos["qty"]
+                    result = "target" if hit_target else "stop"
                     place_exit_order(kite, symbol, pos["direction"], pos["qty"], cfg)
                     risk.record_trade_result(pnl)
-                    logger.info(f"Closed {symbol} ({'stop' if hit_stop else 'target'}) P&L={pnl:.2f}")
+                    record_trade(symbol, pos["direction"], pos["qty"], pos["entry"], last_price, pnl, result)
+                    logger.info(f"Closed {symbol} ({result}) P&L={pnl:.2f}")
                     del open_positions[symbol]
                 continue  # don't look for new entries while a position is open in this symbol
 
