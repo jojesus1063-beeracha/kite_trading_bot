@@ -86,3 +86,28 @@ NO_ENTRY_AFTER = "15:00"
 
 # Live vs paper mode. ALWAYS start with PAPER_TRADING = True.
 PAPER_TRADING = True
+
+# ---------------------------------------------------------------------
+# Overrides from the web configuration UI (configure_app.py)
+# ---------------------------------------------------------------------
+# Settings changed via the browser form are saved to user_config.json
+# and applied here, on top of the defaults above. Delete that file to
+# fall back to the hardcoded defaults.
+import json
+
+_USER_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_config.json")
+
+if os.path.exists(_USER_CONFIG_PATH):
+    with open(_USER_CONFIG_PATH) as _f:
+        _overrides = json.load(_f)
+    WATCHLIST = _overrides.get("watchlist", WATCHLIST)
+    CAPITAL = _overrides.get("capital", CAPITAL)
+    RISK_PER_TRADE_PCT = _overrides.get("risk_per_trade_pct", RISK_PER_TRADE_PCT)
+    RISK_REWARD_MIN = _overrides.get("risk_reward_min", RISK_REWARD_MIN)
+    SL_BUFFER_PCT = _overrides.get("sl_buffer_pct", SL_BUFFER_PCT)
+    MAX_TRADES_PER_DAY = _overrides.get("max_trades_per_day", MAX_TRADES_PER_DAY)
+    MAX_DAILY_LOSS_PCT = _overrides.get("max_daily_loss_pct", MAX_DAILY_LOSS_PCT)
+    TREND_EMA_FAST = _overrides.get("trend_ema_fast", TREND_EMA_FAST)
+    TREND_EMA_SLOW = _overrides.get("trend_ema_slow", TREND_EMA_SLOW)
+    ENTRY_EMA = _overrides.get("entry_ema", ENTRY_EMA)
+    PAPER_TRADING = _overrides.get("paper_trading", PAPER_TRADING)
