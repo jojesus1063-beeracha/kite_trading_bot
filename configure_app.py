@@ -1,8 +1,9 @@
 """
-Simple browser-based configuration form for the trading bot.
+Browser-based dashboard for the trading bot: configure settings,
+pick your watchlist from a dropdown, and see live price/trend info
+for whatever's currently selected.
 
-Run this, then visit http://YOUR_SERVER_IP:5000 in any browser to view
-and edit the bot's settings — no file editing required.
+Run this, then visit http://YOUR_SERVER_IP:5000 in any browser.
 
 IMPORTANT — set a password before running this on a public server:
     export CONFIG_UI_PASSWORD="something only you know"
@@ -10,16 +11,18 @@ Without this set, the app refuses to start, since this form would
 otherwise be reachable by anyone who finds your server's IP.
 
 This does NOT restart main.py automatically — if the bot is already
-running, stop and restart it after saving changes for them to apply
-(main.py reads config.py fresh each time it starts).
+running, stop and restart it after saving changes for them to apply.
 """
 
 import json
 import os
+from datetime import datetime, timedelta
 
 from flask import Flask, request, redirect, session, render_template_string
 
 import config as cfg
+from auth import get_kite_client
+from stocks import STOCK_UNIVERSE
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("CONFIG_UI_SECRET", os.urandom(24).hex())
@@ -33,6 +36,8 @@ if not PASSWORD:
     )
 
 USER_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_config.json")
+INSTRUMENTS_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instruments_cache.json")
+INSTRUMENTS_CACHE_MAX_AGE_DAYS = 7
 
 LOGIN_PAGE = """
 <!doctype html>
@@ -50,12 +55,20 @@ LOGIN_PAGE = """
 FORM_PAGE = """
 <!doctype html>
 <title>Bot Configuration</title>
-<body style="font-family: sans-serif; max-width: 600px; margin: 40px auto;">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<body style="font-family: sans-serif; max-width: 800px; margin: 40px auto; padding: 0 16px;">
   <h2>Trading Bot Configuration</h2>
   {% if saved %}<p style="color: green;">Saved. Restart the bot for changes to take effect.</p>{% endif %}
   <form method="post">
-    <label>Watchlist (comma-separated symbols)</label><br>
-    <input type="text" name="watchlist" value="{{ watchlist }}" style="width: 100%; padding: 6px;"><br><br>
+    <label><strong>Stocks to trade</strong> (hold Ctrl / Cmd to select more than one)</label><br>
+    <select name="watchlist" multiple size="12" style="width: 100%; padding: 6px; font-size: 15px;">
+      {% for sym in stock_universe %}
+        <option value="{{ sym }}" {{ 'selected' if sym in selected_watchlist else '' }}>{{ sym }}</option>
+      {% endfor %}
+    </select><br><br>
+
+    <label>Add another symbol not in the list above (comma-separated)</label><br>
+    <input type="text" name="extra_symbols" placeholder="e.g. IRCTC, ZOMATO" style="width: 100%; padding: 6px;"><br><br>
 
     <label>Trading capital (INR)</label><br>
     <input type="number" name="capital" value="{{ capital }}" style="width: 100%; padding: 6px;"><br><br>
@@ -92,6 +105,62 @@ FORM_PAGE = """
     <button type="submit" style="padding: 10px 20px; font-size: 16px;">Save</button>
   </form>
   <p><a href="/logout">Log out</a></p>
+
+  <hr style="margin: 40px 0;">
+
+  <h2>Live Dashboard</h2>
+  {% if dashboard_error %}
+    <p style="color: #a00; background: #fee; padding: 12px; border-radius: 4px;">
+      Couldn't load live prices: {{ dashboard_error }}<br>
+      Make sure you've run <code>python3 auth.py</code> today to connect to Kite.
+    </p>
+  {% elif not selected_watchlist %}
+    <p>No stocks selected above yet.</p>
+  {% else %}
+    <div style="display: flex; flex-wrap: wrap; gap: 16px;">
+      {% for stock in dashboard_data %}
+        <div style="border: 1px solid #ccc; border-radius: 6px; padding: 12px; width: 220px;">
+          <strong>{{ stock.symbol }}</strong><br>
+          {% if stock.error %}
+            <span style="color: #a00;">{{ stock.error }}</span>
+          {% else %}
+            <span style="font-size: 20px;">₹{{ "%.2f"|format(stock.ltp) }}</span><br>
+            <span style="color: {{ 'green' if stock.change_pct >= 0 else '#a00' }};">
+              {{ "%.2f"|format(stock.change_pct) }}%
+            </span>
+            <canvas id="chart-{{ stock.symbol }}" width="200" height="60"></canvas>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+    <p style="color: #777; font-size: 13px;">Reload the page to refresh prices.</p>
+  {% endif %}
+
+  <script>
+    const sparkData = {{ spark_json|safe }};
+    for (const symbol in sparkData) {
+      const canvas = document.getElementById("chart-" + symbol);
+      if (!canvas) continue;
+      new Chart(canvas, {
+        type: 'line',
+        data: {
+          labels: sparkData[symbol].map((_, i) => i),
+          datasets: [{
+            data: sparkData[symbol],
+            borderColor: '#3366cc',
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.2,
+          }]
+        },
+        options: {
+          responsive: false,
+          plugins: { legend: { display: false } },
+          scales: { x: { display: false }, y: { display: false } }
+        }
+      });
+    }
+  </script>
 </body>
 """
 
@@ -103,7 +172,7 @@ def load_current():
     else:
         saved = {}
     return {
-        "watchlist": ", ".join(saved.get("watchlist", cfg.WATCHLIST)),
+        "watchlist": saved.get("watchlist", cfg.WATCHLIST),
         "capital": saved.get("capital", cfg.CAPITAL),
         "risk_per_trade_pct": saved.get("risk_per_trade_pct", cfg.RISK_PER_TRADE_PCT),
         "sl_buffer_pct": saved.get("sl_buffer_pct", cfg.SL_BUFFER_PCT),
@@ -115,6 +184,72 @@ def load_current():
         "entry_ema": saved.get("entry_ema", cfg.ENTRY_EMA),
         "paper_trading": saved.get("paper_trading", cfg.PAPER_TRADING),
     }
+
+
+def get_instrument_map(kite):
+    """Cache NSE instrument tokens on disk — refetching the full list
+    (thousands of rows) on every page load would be slow and wasteful."""
+    if os.path.exists(INSTRUMENTS_CACHE_PATH):
+        age_days = (datetime.now().timestamp() - os.path.getmtime(INSTRUMENTS_CACHE_PATH)) / 86400
+        if age_days < INSTRUMENTS_CACHE_MAX_AGE_DAYS:
+            with open(INSTRUMENTS_CACHE_PATH) as f:
+                return json.load(f)
+
+    instruments = kite.instruments("NSE")
+    mapping = {i["tradingsymbol"]: i["instrument_token"] for i in instruments}
+    with open(INSTRUMENTS_CACHE_PATH, "w") as f:
+        json.dump(mapping, f)
+    return mapping
+
+
+def get_dashboard_data(symbols):
+    """Returns (data, error). data is a list of dicts per symbol;
+    error is a user-facing string if the whole fetch failed (e.g. no
+    valid access token yet today)."""
+    if not symbols:
+        return [], None
+
+    try:
+        kite = get_kite_client()
+    except Exception as e:
+        return None, f"not connected to Kite ({e})"
+
+    try:
+        quote_keys = [f"NSE:{s}" for s in symbols]
+        quotes = kite.quote(quote_keys)
+    except Exception as e:
+        return None, str(e)
+
+    try:
+        instrument_map = get_instrument_map(kite)
+    except Exception:
+        instrument_map = {}
+
+    results = []
+    for s in symbols:
+        q = quotes.get(f"NSE:{s}")
+        if not q:
+            results.append({"symbol": s, "error": "No data returned"})
+            continue
+
+        ltp = q["last_price"]
+        prev_close = q.get("ohlc", {}).get("close") or ltp
+        change_pct = ((ltp - prev_close) / prev_close * 100) if prev_close else 0.0
+
+        spark = []
+        token = instrument_map.get(s)
+        if token:
+            try:
+                to_date = datetime.now()
+                from_date = to_date - timedelta(days=45)
+                candles = kite.historical_data(token, from_date, to_date, "day")
+                spark = [c["close"] for c in candles[-30:]]
+            except Exception:
+                spark = []
+
+        results.append({"symbol": s, "ltp": ltp, "change_pct": change_pct, "spark": spark})
+
+    return results, None
 
 
 def require_login():
@@ -145,8 +280,12 @@ def index():
 
     saved = False
     if request.method == "POST":
+        selected = request.form.getlist("watchlist")
+        extra = [s.strip().upper() for s in request.form.get("extra_symbols", "").split(",") if s.strip()]
+        watchlist = list(dict.fromkeys(selected + extra))  # dedup, keep order
+
         data = {
-            "watchlist": [s.strip().upper() for s in request.form["watchlist"].split(",") if s.strip()],
+            "watchlist": watchlist,
             "capital": float(request.form["capital"]),
             "risk_per_trade_pct": float(request.form["risk_per_trade_pct"]),
             "sl_buffer_pct": float(request.form["sl_buffer_pct"]),
@@ -163,7 +302,23 @@ def index():
         saved = True
 
     current = load_current()
-    return render_template_string(FORM_PAGE, saved=saved, **current)
+    universe = sorted(set(STOCK_UNIVERSE) | set(current["watchlist"]))
+
+    dashboard_data, dashboard_error = get_dashboard_data(current["watchlist"])
+    spark_json = json.dumps({
+        d["symbol"]: d["spark"] for d in (dashboard_data or []) if not d.get("error")
+    })
+
+    return render_template_string(
+        FORM_PAGE,
+        saved=saved,
+        stock_universe=universe,
+        selected_watchlist=current["watchlist"],
+        dashboard_data=dashboard_data,
+        dashboard_error=dashboard_error,
+        spark_json=spark_json,
+        **{k: v for k, v in current.items() if k != "watchlist"},
+    )
 
 
 if __name__ == "__main__":
