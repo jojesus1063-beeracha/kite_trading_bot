@@ -1,7 +1,7 @@
 """
 Browser-based dashboard for the trading bot: configure settings,
-pick your watchlist from a dropdown, and see live price/trend info
-for whatever's currently selected.
+pick your watchlist from a dropdown, see live price/trend info for
+whatever's selected, and review trade history.
 
 Run this, then visit http://YOUR_SERVER_IP:5000 in any browser.
 
@@ -23,6 +23,7 @@ from flask import Flask, request, redirect, session, render_template_string
 import config as cfg
 from auth import get_kite_client
 from stocks import STOCK_UNIVERSE
+from trade_log import get_trade_history, get_today_summary
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("CONFIG_UI_SECRET", os.urandom(24).hex())
@@ -161,6 +162,47 @@ FORM_PAGE = """
       });
     }
   </script>
+
+  <hr style="margin: 40px 0;">
+
+  <h2>Trade History</h2>
+  <p>
+    Today: {{ today_summary.count }} trade(s),
+    total P&L:
+    <span style="color: {{ 'green' if today_summary.total_pnl >= 0 else '#a00' }};">
+      ₹{{ "%.2f"|format(today_summary.total_pnl) }}
+    </span>
+  </p>
+  {% if trade_history %}
+    <table style="width: 100%; border-collapse: collapse;">
+      <tr style="border-bottom: 2px solid #333; text-align: left;">
+        <th style="padding: 6px;">Date</th>
+        <th style="padding: 6px;">Time</th>
+        <th style="padding: 6px;">Symbol</th>
+        <th style="padding: 6px;">Dir</th>
+        <th style="padding: 6px;">Qty</th>
+        <th style="padding: 6px;">Entry</th>
+        <th style="padding: 6px;">Exit</th>
+        <th style="padding: 6px;">P&L</th>
+        <th style="padding: 6px;">Result</th>
+      </tr>
+      {% for t in trade_history %}
+        <tr style="border-bottom: 1px solid #ddd;">
+          <td style="padding: 6px;">{{ t.date }}</td>
+          <td style="padding: 6px;">{{ t.time }}</td>
+          <td style="padding: 6px;">{{ t.symbol }}</td>
+          <td style="padding: 6px;">{{ t.direction }}</td>
+          <td style="padding: 6px;">{{ t.qty }}</td>
+          <td style="padding: 6px;">{{ "%.2f"|format(t.entry) }}</td>
+          <td style="padding: 6px;">{{ "%.2f"|format(t.exit) }}</td>
+          <td style="padding: 6px; color: {{ 'green' if t.pnl >= 0 else '#a00' }};">{{ "%.2f"|format(t.pnl) }}</td>
+          <td style="padding: 6px;">{{ t.result }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p>No trades recorded yet — this fills in once the bot runs and closes its first position.</p>
+  {% endif %}
 </body>
 """
 
@@ -309,6 +351,9 @@ def index():
         d["symbol"]: d["spark"] for d in (dashboard_data or []) if not d.get("error")
     })
 
+    trade_history = get_trade_history(limit=50)
+    today_summary = get_today_summary()
+
     return render_template_string(
         FORM_PAGE,
         saved=saved,
@@ -317,6 +362,8 @@ def index():
         dashboard_data=dashboard_data,
         dashboard_error=dashboard_error,
         spark_json=spark_json,
+        trade_history=trade_history,
+        today_summary=today_summary,
         **{k: v for k, v in current.items() if k != "watchlist"},
     )
 
