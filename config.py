@@ -24,13 +24,14 @@ ACCESS_TOKEN_FILE = "access_token.txt"
 # ---------------------------------------------------------------------
 # Instruments to trade (cash intraday / MIS)
 # ---------------------------------------------------------------------
+# Each entry has its own exchange, so you can mix NSE and BSE stocks
+# in the same watchlist.
 WATCHLIST = [
-    "RELIANCE",
-    "TCS",
-    "HDFCBANK",
-    "INFY",
+    {"symbol": "RELIANCE", "exchange": "NSE"},
+    {"symbol": "TCS", "exchange": "NSE"},
+    {"symbol": "HDFCBANK", "exchange": "NSE"},
+    {"symbol": "INFY", "exchange": "NSE"},
 ]
-EXCHANGE = "NSE"
 
 # ---------------------------------------------------------------------
 # Strategy timeframes
@@ -46,6 +47,16 @@ TREND_EMA_SLOW = 50     # on 15-min chart
 ENTRY_EMA = 20          # on 5-min chart
 VOLUME_LOOKBACK = 20    # bars, for average-volume comparison on 5-min chart
 VOLUME_MULTIPLIER = 1.2  # entry candle volume must exceed avg volume * this
+
+# ADX (Average Directional Index) — measures trend STRENGTH (0-100),
+# used as an optional filter on top of the existing EMA/VWAP trend
+# check. When enabled, a 15-min candle only counts as trending if ADX
+# is above the threshold — filters out choppy periods where price
+# happens to sit above/below the EMAs without a real trend behind it.
+# Toggle this to False to compare strategy performance with/without.
+USE_ADX_FILTER = False
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25  # Wilder's original suggested threshold for "trending"
 
 # ---------------------------------------------------------------------
 # Risk management
@@ -100,7 +111,16 @@ _USER_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "us
 if os.path.exists(_USER_CONFIG_PATH):
     with open(_USER_CONFIG_PATH) as _f:
         _overrides = json.load(_f)
-    WATCHLIST = _overrides.get("watchlist", WATCHLIST)
+
+    _saved_watchlist = _overrides.get("watchlist")
+    if _saved_watchlist is not None:
+        # Support both the old format (plain symbol strings, all NSE)
+        # and the new format (dicts with an exchange per symbol).
+        WATCHLIST = [
+            {"symbol": w, "exchange": "NSE"} if isinstance(w, str) else w
+            for w in _saved_watchlist
+        ]
+
     CAPITAL = _overrides.get("capital", CAPITAL)
     RISK_PER_TRADE_PCT = _overrides.get("risk_per_trade_pct", RISK_PER_TRADE_PCT)
     RISK_REWARD_MIN = _overrides.get("risk_reward_min", RISK_REWARD_MIN)
@@ -111,3 +131,5 @@ if os.path.exists(_USER_CONFIG_PATH):
     TREND_EMA_SLOW = _overrides.get("trend_ema_slow", TREND_EMA_SLOW)
     ENTRY_EMA = _overrides.get("entry_ema", ENTRY_EMA)
     PAPER_TRADING = _overrides.get("paper_trading", PAPER_TRADING)
+    USE_ADX_FILTER = _overrides.get("use_adx_filter", USE_ADX_FILTER)
+    ADX_THRESHOLD = _overrides.get("adx_threshold", ADX_THRESHOLD)

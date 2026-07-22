@@ -4,6 +4,10 @@ Strategy engine.
 Trend filter (15-min):
   Uptrend   -> close > ema_fast > ema_slow AND close > vwap
   Downtrend -> close < ema_fast < ema_slow AND close < vwap
+  If cfg.USE_ADX_FILTER is True, the trend is only considered valid
+  when ADX (14) is above cfg.ADX_THRESHOLD — i.e. there's an actual
+  trend happening, not just price drifting above/below the EMAs in a
+  choppy market. This can be toggled off to compare with/without.
 
 Entry trigger (5-min), only taken in the direction of the current
 15-min trend:
@@ -34,9 +38,15 @@ class Signal:
     reason: str
 
 
-def get_trend(row_15m: pd.Series) -> Optional[str]:
+def get_trend(row_15m: pd.Series, cfg=None) -> Optional[str]:
     if pd.isna(row_15m["ema_slow"]) or pd.isna(row_15m["vwap"]):
         return None
+
+    if cfg is not None and getattr(cfg, "USE_ADX_FILTER", False):
+        adx_value = row_15m.get("adx")
+        if pd.isna(adx_value) or adx_value < getattr(cfg, "ADX_THRESHOLD", 25):
+            return None  # market isn't trending strongly enough right now
+
     if row_15m["close"] > row_15m["ema_fast"] > row_15m["ema_slow"] and row_15m["close"] > row_15m["vwap"]:
         return "UP"
     if row_15m["close"] < row_15m["ema_fast"] < row_15m["ema_slow"] and row_15m["close"] < row_15m["vwap"]:
@@ -44,12 +54,12 @@ def get_trend(row_15m: pd.Series) -> Optional[str]:
     return None
 
 
-def latest_completed_15m_trend(df_15m: pd.DataFrame, as_of: pd.Timestamp) -> Optional[str]:
+def latest_completed_15m_trend(df_15m: pd.DataFrame, as_of: pd.Timestamp, cfg=None) -> Optional[str]:
     """Trend as of the most recently completed 15-min candle at or before `as_of`."""
     completed = df_15m[df_15m["date"] <= as_of]
     if completed.empty:
         return None
-    return get_trend(completed.iloc[-1])
+    return get_trend(completed.iloc[-1], cfg)
 
 
 def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Optional[Signal]:
@@ -63,7 +73,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
     df_5m = label_engulfing_patterns(df_5m)
     curr = df_5m.iloc[-1]
 
-    trend = latest_completed_15m_trend(df_15m, curr["date"])
+    trend = latest_completed_15m_trend(df_15m, curr["date"], cfg)
     if trend is None:
         return None
     if pd.isna(curr["avg_volume"]) or pd.isna(curr["ema_entry"]):
@@ -78,8 +88,10 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         if risk <= 0:
             return None
         target = entry + risk * cfg.RISK_REWARD_MIN
-        return Signal(symbol, "BUY", entry, stop, target, curr["date"],
-                       "15m uptrend + 5m bullish engulfing above EMA20 on above-avg volume")
+        reason = "15m uptrend + 5m bullish engulfing above EMA20 on above-avg volume"
+        if getattr(cfg, "USE_ADX_FILTER", False):
+            reason += " (ADX-confirmed trend)"
+        return Signal(symbol, "BUY", entry, stop, target, curr["date"], reason)
 
     if trend == "DOWN" and curr["bearish_engulfing"] and curr["close"] < curr["ema_entry"] and volume_ok:
         entry = curr["close"]
@@ -88,7 +100,9 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         if risk <= 0:
             return None
         target = entry - risk * cfg.RISK_REWARD_MIN
-        return Signal(symbol, "SELL", entry, stop, target, curr["date"],
-                       "15m downtrend + 5m bearish engulfing below EMA20 on above-avg volume")
+        reason = "15m downtrend + 5m bearish engulfing below EMA20 on above-avg volume"
+        if getattr(cfg, "USE_ADX_FILTER", False):
+            reason += " (ADX-confirmed trend)"
+        return Signal(symbol, "SELL", entry, stop, target, curr["date"], reason)
 
     return None

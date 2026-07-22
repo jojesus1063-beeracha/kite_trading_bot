@@ -10,12 +10,13 @@ from datetime import datetime
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_history.jsonl")
 
 
-def record_trade(symbol, direction, qty, entry, exit_price, pnl, result):
+def record_trade(symbol, direction, qty, entry, exit_price, pnl, result, exchange="NSE"):
     """result should be 'target', 'stop', or 'square_off'."""
     record = {
         "date": datetime.now().strftime("%Y-%m-%d"),
         "time": datetime.now().strftime("%H:%M:%S"),
         "symbol": symbol,
+        "exchange": exchange,
         "direction": direction,
         "qty": qty,
         "entry": entry,

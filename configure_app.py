@@ -1,7 +1,8 @@
 """
 Browser-based dashboard for the trading bot: configure settings,
-pick your watchlist with tappable stock chips, see live price/trend
-info for whatever's selected, and review trade history.
+pick your watchlist with tappable stock chips (each with its own
+NSE/BSE choice), see live price/trend info for whatever's selected,
+and review trade history.
 
 Run this, then visit http://YOUR_SERVER_IP:5000 in any browser.
 
@@ -24,6 +25,7 @@ import config as cfg
 from auth import get_kite_client
 from stocks import STOCK_UNIVERSE
 from trade_log import get_trade_history, get_today_summary
+from backtest import run_backtest_data
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("CONFIG_UI_SECRET", os.urandom(24).hex())
@@ -37,7 +39,7 @@ if not PASSWORD:
     )
 
 USER_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_config.json")
-INSTRUMENTS_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instruments_cache.json")
+INSTRUMENTS_CACHE_DIR = os.path.dirname(os.path.abspath(__file__))
 INSTRUMENTS_CACHE_MAX_AGE_DAYS = 7
 
 BASE_STYLE = """
@@ -134,6 +136,12 @@ BASE_STYLE = """
     color: white;
     border-color: var(--accent);
   }
+  .exchange-table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
+  .exchange-table td { padding: 8px 4px; border-bottom: 1px solid var(--border); }
+  .exchange-table .sym { font-weight: 700; }
+  .radio-pair { display: flex; gap: 16px; }
+  .radio-pair label { display: inline-flex; align-items: center; gap: 4px; font-weight: 500; color: var(--text); margin: 0; }
+  .radio-pair input { width: auto; }
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -146,6 +154,7 @@ BASE_STYLE = """
     background: #fafbfc;
   }
   .stock-symbol { font-weight: 700; font-size: 14px; }
+  .stock-exchange { font-size: 11px; color: var(--text-muted); font-weight: 600; }
   .stock-price { font-size: 22px; font-weight: 700; margin: 4px 0; }
   .pill {
     display: inline-block;
@@ -156,9 +165,9 @@ BASE_STYLE = """
   }
   .pill.up { background: #e3f9f0; color: var(--accent); }
   .pill.down { background: #fdeceb; color: var(--loss); }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 8px; border-bottom: 2px solid var(--border); }
-  td { padding: 8px; border-bottom: 1px solid var(--border); }
+  table.history { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.history th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 8px; border-bottom: 2px solid var(--border); }
+  table.history td { padding: 8px; border-bottom: 1px solid var(--border); }
   .banner {
     background: #fdeceb;
     color: var(--loss);
@@ -208,7 +217,7 @@ FORM_PAGE = BASE_STYLE + """
         <div class="chip-grid">
           {% for sym in stock_universe %}
             <input type="checkbox" id="chip-{{ sym }}" name="watchlist" value="{{ sym }}"
-                   class="chip-input" {{ 'checked' if sym in selected_watchlist else '' }}>
+                   class="chip-input" {{ 'checked' if sym in selected_symbols else '' }}>
             <label for="chip-{{ sym }}" class="chip-label">{{ sym }}</label>
           {% endfor %}
         </div>
@@ -216,7 +225,33 @@ FORM_PAGE = BASE_STYLE + """
         <label>Add another symbol not listed above (comma-separated)</label>
         <input type="text" name="extra_symbols" placeholder="e.g. IRCTC, ZOMATO">
 
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+        {% if selected_symbols %}
+          <label>Exchange for each selected stock</label>
+          <table class="exchange-table">
+            {% for sym in selected_symbols %}
+              <tr>
+                <td class="sym">{{ sym }}</td>
+                <td>
+                  <div class="radio-pair">
+                    <label>
+                      <input type="radio" name="exchange_{{ sym }}" value="NSE"
+                             {{ 'checked' if exchange_map.get(sym, 'NSE') == 'NSE' else '' }}> NSE
+                    </label>
+                    <label>
+                      <input type="radio" name="exchange_{{ sym }}" value="BSE"
+                             {{ 'checked' if exchange_map.get(sym, 'NSE') == 'BSE' else '' }}> BSE
+                    </label>
+                  </div>
+                </td>
+              </tr>
+            {% endfor %}
+          </table>
+          <p style="font-size: 12px; color: var(--text-muted); margin-top: 8px;">
+            Any symbol you add via the text field above defaults to NSE — save once, then set its exchange here.
+          </p>
+        {% endif %}
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px;">
           <div>
             <label>Trading capital (INR)</label>
             <input type="number" name="capital" value="{{ capital }}">
@@ -253,6 +288,17 @@ FORM_PAGE = BASE_STYLE + """
             <label>Entry EMA (5-min)</label>
             <input type="number" name="entry_ema" value="{{ entry_ema }}">
           </div>
+          <div>
+            <label>ADX threshold (trend-strength filter)</label>
+            <input type="number" name="adx_threshold" value="{{ adx_threshold }}">
+          </div>
+        </div>
+
+        <div class="checkbox-row">
+          <input type="checkbox" name="use_adx_filter" id="use_adx_filter" {{ 'checked' if use_adx_filter else '' }}>
+          <label for="use_adx_filter" style="margin:0;">
+            Require ADX trend-strength confirmation (filters out choppy false trends — see backtest before enabling live)
+          </label>
         </div>
 
         <div class="checkbox-row">
@@ -271,13 +317,14 @@ FORM_PAGE = BASE_STYLE + """
           Couldn't load live prices: {{ dashboard_error }}<br>
           Make sure you've run <code>python3 auth.py</code> today to connect to Kite.
         </div>
-      {% elif not selected_watchlist %}
+      {% elif not selected_symbols %}
         <p style="color: var(--text-muted);">No stocks selected above yet.</p>
       {% else %}
         <div class="grid">
           {% for stock in dashboard_data %}
             <div class="stock-card">
               <div class="stock-symbol">{{ stock.symbol }}</div>
+              <div class="stock-exchange">{{ stock.exchange }}</div>
               {% if stock.error %}
                 <span style="color: var(--loss); font-size: 13px;">{{ stock.error }}</span>
               {% else %}
@@ -285,12 +332,83 @@ FORM_PAGE = BASE_STYLE + """
                 <span class="pill {{ 'up' if stock.change_pct >= 0 else 'down' }}">
                   {{ "%.2f"|format(stock.change_pct) }}%
                 </span>
-                <canvas id="chart-{{ stock.symbol }}" width="150" height="50" style="margin-top:8px;"></canvas>
+                <canvas id="chart-{{ stock.symbol }}-{{ stock.exchange }}" width="150" height="50" style="margin-top:8px;"></canvas>
               {% endif %}
             </div>
           {% endfor %}
         </div>
         <p style="color: var(--text-muted); font-size: 12px; margin-top: 12px;">Reload the page to refresh prices.</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>Strategy Backtest Comparison</h2>
+      <p style="color: var(--text-muted); font-size: 13px;">
+        Runs the same period twice — once with the ADX filter off, once on — so you can see whether it actually helps before flipping it on live.
+      </p>
+      <form method="post" action="/backtest">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+          <div>
+            <label>Symbol</label>
+            <input type="text" name="bt_symbol" placeholder="e.g. RELIANCE" value="{{ bt_symbol or '' }}">
+          </div>
+          <div>
+            <label>Exchange</label>
+            <div class="radio-pair" style="margin-top: 10px;">
+              <label><input type="radio" name="bt_exchange" value="NSE" checked> NSE</label>
+              <label><input type="radio" name="bt_exchange" value="BSE"> BSE</label>
+            </div>
+          </div>
+          <div>
+            <label>From date</label>
+            <input type="date" name="bt_from_date" value="{{ bt_from_date or '' }}">
+          </div>
+          <div>
+            <label>To date</label>
+            <input type="date" name="bt_to_date" value="{{ bt_to_date or '' }}">
+          </div>
+        </div>
+        <button type="submit" class="btn">Run Comparison</button>
+      </form>
+
+      {% if backtest_result %}
+        {% if backtest_result.error %}
+          <div class="banner" style="margin-top: 20px;">
+            Couldn't run backtest: {{ backtest_result.error }}<br>
+            Make sure you've run <code>python3 auth.py</code> today, and that the symbol/exchange/dates are valid.
+          </div>
+        {% else %}
+          <p style="margin-top: 20px; color: var(--text-muted);">
+            {{ backtest_result.exchange }}:{{ backtest_result.symbol }},
+            {{ backtest_result.from_date }} to {{ backtest_result.to_date }}
+          </p>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+            <div class="stock-card">
+              <div class="stock-symbol">ADX filter OFF</div>
+              {% set r = backtest_result.off %}
+              {% if r.total_trades == 0 %}
+                <p style="color: var(--text-muted); font-size: 13px;">No trades in this period.</p>
+              {% else %}
+                <p>Trades: {{ r.total_trades }}</p>
+                <p>Win rate: {{ "%.1f"|format(r.win_rate) }}%</p>
+                <p>Total P&amp;L: <span class="pill {{ 'up' if r.total_pnl >= 0 else 'down' }}">₹{{ "%.2f"|format(r.total_pnl) }}</span></p>
+                <p>Avg P&amp;L/trade: ₹{{ "%.2f"|format(r.avg_pnl) }}</p>
+              {% endif %}
+            </div>
+            <div class="stock-card">
+              <div class="stock-symbol">ADX filter ON</div>
+              {% set r = backtest_result.on %}
+              {% if r.total_trades == 0 %}
+                <p style="color: var(--text-muted); font-size: 13px;">No trades in this period.</p>
+              {% else %}
+                <p>Trades: {{ r.total_trades }}</p>
+                <p>Win rate: {{ "%.1f"|format(r.win_rate) }}%</p>
+                <p>Total P&amp;L: <span class="pill {{ 'up' if r.total_pnl >= 0 else 'down' }}">₹{{ "%.2f"|format(r.total_pnl) }}</span></p>
+                <p>Avg P&amp;L/trade: ₹{{ "%.2f"|format(r.avg_pnl) }}</p>
+              {% endif %}
+            </div>
+          </div>
+        {% endif %}
       {% endif %}
     </div>
 
@@ -303,9 +421,9 @@ FORM_PAGE = BASE_STYLE + """
         </span>
       </p>
       {% if trade_history %}
-        <table>
+        <table class="history">
           <tr>
-            <th>Date</th><th>Time</th><th>Symbol</th><th>Dir</th><th>Qty</th>
+            <th>Date</th><th>Time</th><th>Symbol</th><th>Exch</th><th>Dir</th><th>Qty</th>
             <th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Result</th>
           </tr>
           {% for t in trade_history %}
@@ -313,6 +431,7 @@ FORM_PAGE = BASE_STYLE + """
               <td>{{ t.date }}</td>
               <td>{{ t.time }}</td>
               <td>{{ t.symbol }}</td>
+              <td>{{ t.get('exchange', 'NSE') }}</td>
               <td>{{ t.direction }}</td>
               <td>{{ t.qty }}</td>
               <td>{{ "%.2f"|format(t.entry) }}</td>
@@ -332,15 +451,15 @@ FORM_PAGE = BASE_STYLE + """
 
   <script>
     const sparkData = {{ spark_json|safe }};
-    for (const symbol in sparkData) {
-      const canvas = document.getElementById("chart-" + symbol);
+    for (const key in sparkData) {
+      const canvas = document.getElementById("chart-" + key);
       if (!canvas) continue;
       new Chart(canvas, {
         type: 'line',
         data: {
-          labels: sparkData[symbol].map((_, i) => i),
+          labels: sparkData[key].map((_, i) => i),
           datasets: [{
-            data: sparkData[symbol],
+            data: sparkData[key],
             borderColor: '#00b386',
             borderWidth: 2,
             pointRadius: 0,
@@ -365,8 +484,19 @@ def load_current():
             saved = json.load(f)
     else:
         saved = {}
+
+    saved_watchlist = saved.get("watchlist")
+    if saved_watchlist is None:
+        watchlist = cfg.WATCHLIST
+    else:
+        # Support both plain-string (old) and dict (new) formats.
+        watchlist = [
+            {"symbol": w, "exchange": "NSE"} if isinstance(w, str) else w
+            for w in saved_watchlist
+        ]
+
     return {
-        "watchlist": saved.get("watchlist", cfg.WATCHLIST),
+        "watchlist": watchlist,
         "capital": saved.get("capital", cfg.CAPITAL),
         "risk_per_trade_pct": saved.get("risk_per_trade_pct", cfg.RISK_PER_TRADE_PCT),
         "sl_buffer_pct": saved.get("sl_buffer_pct", cfg.SL_BUFFER_PCT),
@@ -377,25 +507,32 @@ def load_current():
         "trend_ema_slow": saved.get("trend_ema_slow", cfg.TREND_EMA_SLOW),
         "entry_ema": saved.get("entry_ema", cfg.ENTRY_EMA),
         "paper_trading": saved.get("paper_trading", cfg.PAPER_TRADING),
+        "use_adx_filter": saved.get("use_adx_filter", cfg.USE_ADX_FILTER),
+        "adx_threshold": saved.get("adx_threshold", cfg.ADX_THRESHOLD),
     }
 
 
-def get_instrument_map(kite):
-    if os.path.exists(INSTRUMENTS_CACHE_PATH):
-        age_days = (datetime.now().timestamp() - os.path.getmtime(INSTRUMENTS_CACHE_PATH)) / 86400
+def get_instrument_map(kite, exchange):
+    """Cache instrument tokens per exchange on disk — refetching the
+    full list (thousands of rows) on every page load would be slow."""
+    cache_path = os.path.join(INSTRUMENTS_CACHE_DIR, f"instruments_cache_{exchange.lower()}.json")
+    if os.path.exists(cache_path):
+        age_days = (datetime.now().timestamp() - os.path.getmtime(cache_path)) / 86400
         if age_days < INSTRUMENTS_CACHE_MAX_AGE_DAYS:
-            with open(INSTRUMENTS_CACHE_PATH) as f:
+            with open(cache_path) as f:
                 return json.load(f)
 
-    instruments = kite.instruments("NSE")
+    instruments = kite.instruments(exchange)
     mapping = {i["tradingsymbol"]: i["instrument_token"] for i in instruments}
-    with open(INSTRUMENTS_CACHE_PATH, "w") as f:
+    with open(cache_path, "w") as f:
         json.dump(mapping, f)
     return mapping
 
 
-def get_dashboard_data(symbols):
-    if not symbols:
+def get_dashboard_data(watchlist):
+    """watchlist is a list of {"symbol", "exchange"} dicts.
+    Returns (data, error)."""
+    if not watchlist:
         return [], None
 
     try:
@@ -404,29 +541,32 @@ def get_dashboard_data(symbols):
         return None, f"not connected to Kite ({e})"
 
     try:
-        quote_keys = [f"NSE:{s}" for s in symbols]
+        quote_keys = [f"{w['exchange']}:{w['symbol']}" for w in watchlist]
         quotes = kite.quote(quote_keys)
     except Exception as e:
         return None, str(e)
 
-    try:
-        instrument_map = get_instrument_map(kite)
-    except Exception:
-        instrument_map = {}
-
+    instrument_maps = {}
     results = []
-    for s in symbols:
-        q = quotes.get(f"NSE:{s}")
+    for w in watchlist:
+        symbol, exchange = w["symbol"], w["exchange"]
+        q = quotes.get(f"{exchange}:{symbol}")
         if not q:
-            results.append({"symbol": s, "error": "No data returned"})
+            results.append({"symbol": symbol, "exchange": exchange, "error": "No data returned"})
             continue
 
         ltp = q["last_price"]
         prev_close = q.get("ohlc", {}).get("close") or ltp
         change_pct = ((ltp - prev_close) / prev_close * 100) if prev_close else 0.0
 
+        if exchange not in instrument_maps:
+            try:
+                instrument_maps[exchange] = get_instrument_map(kite, exchange)
+            except Exception:
+                instrument_maps[exchange] = {}
+
         spark = []
-        token = instrument_map.get(s)
+        token = instrument_maps[exchange].get(symbol)
         if token:
             try:
                 to_date = datetime.now()
@@ -436,7 +576,8 @@ def get_dashboard_data(symbols):
             except Exception:
                 spark = []
 
-        results.append({"symbol": s, "ltp": ltp, "change_pct": change_pct, "spark": spark})
+        results.append({"symbol": symbol, "exchange": exchange, "ltp": ltp,
+                         "change_pct": change_pct, "spark": spark})
 
     return results, None
 
@@ -462,6 +603,50 @@ def logout():
     return redirect("/login")
 
 
+def _summarize_backtest(result):
+    if result is None:
+        return None
+    return {
+        "total_trades": result["total_trades"],
+        "win_rate": result["win_rate"],
+        "total_pnl": result["total_pnl"],
+        "avg_pnl": result["avg_pnl"],
+    }
+
+
+@app.route("/backtest", methods=["POST"])
+def backtest_comparison():
+    if not require_login():
+        return redirect("/login")
+
+    symbol = request.form.get("bt_symbol", "").strip().upper()
+    exchange = request.form.get("bt_exchange", "NSE")
+    from_date = request.form.get("bt_from_date")
+    to_date = request.form.get("bt_to_date")
+
+    result = {"symbol": symbol, "exchange": exchange, "from_date": from_date, "to_date": to_date}
+
+    if not symbol or not from_date or not to_date:
+        result["error"] = "Please fill in symbol and both dates."
+    else:
+        original_use_adx = cfg.USE_ADX_FILTER
+        try:
+            cfg.USE_ADX_FILTER = False
+            off_result = run_backtest_data(symbol, from_date, to_date, exchange)
+            cfg.USE_ADX_FILTER = True
+            on_result = run_backtest_data(symbol, from_date, to_date, exchange)
+            result["off"] = _summarize_backtest(off_result)
+            result["on"] = _summarize_backtest(on_result)
+            result["error"] = None
+        except Exception as e:
+            result["error"] = str(e)
+        finally:
+            cfg.USE_ADX_FILTER = original_use_adx
+
+    session["backtest_result"] = result
+    return redirect("/")
+
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     if not require_login():
@@ -471,7 +656,12 @@ def index():
     if request.method == "POST":
         selected = request.form.getlist("watchlist")
         extra = [s.strip().upper() for s in request.form.get("extra_symbols", "").split(",") if s.strip()]
-        watchlist = list(dict.fromkeys(selected + extra))
+        all_symbols = list(dict.fromkeys(selected + extra))
+
+        watchlist = [
+            {"symbol": s, "exchange": request.form.get(f"exchange_{s}", "NSE")}
+            for s in all_symbols
+        ]
 
         data = {
             "watchlist": watchlist,
@@ -485,32 +675,42 @@ def index():
             "trend_ema_slow": int(request.form["trend_ema_slow"]),
             "entry_ema": int(request.form["entry_ema"]),
             "paper_trading": "paper_trading" in request.form,
+            "use_adx_filter": "use_adx_filter" in request.form,
+            "adx_threshold": float(request.form["adx_threshold"]),
         }
         with open(USER_CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
         saved = True
 
     current = load_current()
-    universe = sorted(set(STOCK_UNIVERSE) | set(current["watchlist"]))
+    selected_symbols = [w["symbol"] for w in current["watchlist"]]
+    exchange_map = {w["symbol"]: w["exchange"] for w in current["watchlist"]}
+    universe = sorted(set(STOCK_UNIVERSE) | set(selected_symbols))
 
     dashboard_data, dashboard_error = get_dashboard_data(current["watchlist"])
     spark_json = json.dumps({
-        d["symbol"]: d["spark"] for d in (dashboard_data or []) if not d.get("error")
+        f"{d['symbol']}-{d['exchange']}": d["spark"] for d in (dashboard_data or []) if not d.get("error")
     })
 
     trade_history = get_trade_history(limit=50)
     today_summary = get_today_summary()
+    backtest_result = session.pop("backtest_result", None)
 
     return render_template_string(
         FORM_PAGE,
         saved=saved,
         stock_universe=universe,
-        selected_watchlist=current["watchlist"],
+        selected_symbols=selected_symbols,
+        exchange_map=exchange_map,
         dashboard_data=dashboard_data,
         dashboard_error=dashboard_error,
         spark_json=spark_json,
         trade_history=trade_history,
         today_summary=today_summary,
+        backtest_result=backtest_result,
+        bt_symbol=backtest_result["symbol"] if backtest_result else None,
+        bt_from_date=backtest_result["from_date"] if backtest_result else None,
+        bt_to_date=backtest_result["to_date"] if backtest_result else None,
         **{k: v for k, v in current.items() if k != "watchlist"},
     )
 
