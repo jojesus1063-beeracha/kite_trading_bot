@@ -32,6 +32,18 @@ def average_volume(df: pd.DataFrame, period: int, column: str = "volume") -> pd.
     return df[column].rolling(window=period).mean()
 
 
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Average True Range (v1, simple rolling mean of true range)."""
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
+
+
 def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """
     Average Directional Index (Wilder's original method) — measures

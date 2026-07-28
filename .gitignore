@@ -1,0 +1,23 @@
+# Secrets / live credentials
+access_token.txt
+totp_config.json
+totp_qrcode.png
+
+# Runtime state (production data, not code)
+day_state.json
+open_positions.json
+user_config.json
+bot_status.json
+trade_history.jsonl
+
+# Databases (research.db, production.db — created in later sessions)
+*.db
+*.db-wal
+*.db-shm
+
+# Python hygiene
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+instruments_cache*.json

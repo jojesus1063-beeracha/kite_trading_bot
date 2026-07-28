@@ -25,6 +25,7 @@ from typing import Optional
 import pandas as pd
 
 from patterns import label_engulfing_patterns
+from adx_confidence import resolve_adx_mode, adx_confidence
 
 
 @dataclass
@@ -36,13 +37,14 @@ class Signal:
     target: float
     timestamp: pd.Timestamp
     reason: str
+    confidence: Optional[str] = None  # ADX dynamic-mode tier, or None if not applicable
 
 
 def get_trend(row_15m: pd.Series, cfg=None) -> Optional[str]:
     if pd.isna(row_15m["ema_slow"]) or pd.isna(row_15m["vwap"]):
         return None
 
-    if cfg is not None and getattr(cfg, "USE_ADX_FILTER", False):
+    if cfg is not None and resolve_adx_mode(cfg) == "binary":
         adx_value = row_15m.get("adx")
         if pd.isna(adx_value) or adx_value < getattr(cfg, "ADX_THRESHOLD", 25):
             return None  # market isn't trending strongly enough right now
@@ -62,6 +64,27 @@ def latest_completed_15m_trend(df_15m: pd.DataFrame, as_of: pd.Timestamp, cfg=No
     return get_trend(completed.iloc[-1], cfg)
 
 
+def get_trend_confidence(row_15m: pd.Series, cfg=None) -> Optional[str]:
+    """
+    Returns the ADX confidence tier for this row, independent of the
+    existing binary USE_ADX_FILTER check in get_trend(). Does not
+    affect get_trend()'s own decision -- purely additive/informational
+    unless the caller (evaluate()) explicitly acts on "dynamic" mode.
+    """
+    if cfg is None:
+        return None
+    adx_value = row_15m.get("adx")
+    return adx_confidence(adx_value, cfg)
+
+
+def latest_completed_15m_confidence(df_15m: pd.DataFrame, as_of: pd.Timestamp, cfg=None) -> Optional[str]:
+    """Companion to latest_completed_15m_trend() -- same row, confidence tier instead of direction."""
+    completed = df_15m[df_15m["date"] <= as_of]
+    if completed.empty:
+        return None
+    return get_trend_confidence(completed.iloc[-1], cfg)
+
+
 def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Optional[Signal]:
     """
     Evaluate the strategy on the latest completed 5-min candle.
@@ -79,6 +102,15 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
     if pd.isna(curr["avg_volume"]) or pd.isna(curr["ema_entry"]):
         return None
 
+    # Additive: only affects behavior when cfg.ADX_MODE == "dynamic".
+    # In "off"/"binary" mode (today's default), confidence is computed
+    # for visibility/labeling only and never blocks a trade here --
+    # the existing get_trend() ADX check above already handles binary
+    # mode's pass/fail entirely on its own, unchanged.
+    confidence = latest_completed_15m_confidence(df_15m, curr["date"], cfg)
+    if resolve_adx_mode(cfg) == "dynamic" and confidence == "REJECTED":
+        return None
+
     volume_ok = curr["volume"] > curr["avg_volume"] * cfg.VOLUME_MULTIPLIER
 
     if trend == "UP" and curr["bullish_engulfing"] and curr["close"] > curr["ema_entry"] and volume_ok:
@@ -91,7 +123,9 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         reason = "15m uptrend + 5m bullish engulfing above EMA20 on above-avg volume"
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
-        return Signal(symbol, "BUY", entry, stop, target, curr["date"], reason)
+        if confidence:
+            reason += f" [ADX confidence: {confidence}]"
+        return Signal(symbol, "BUY", entry, stop, target, curr["date"], reason, confidence=confidence)
 
     if trend == "DOWN" and curr["bearish_engulfing"] and curr["close"] < curr["ema_entry"] and volume_ok:
         entry = curr["close"]
@@ -103,6 +137,8 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         reason = "15m downtrend + 5m bearish engulfing below EMA20 on above-avg volume"
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
-        return Signal(symbol, "SELL", entry, stop, target, curr["date"], reason)
+        if confidence:
+            reason += f" [ADX confidence: {confidence}]"
+        return Signal(symbol, "SELL", entry, stop, target, curr["date"], reason, confidence=confidence)
 
     return None

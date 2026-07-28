@@ -48,3 +48,19 @@ def get_today_summary():
     today = datetime.now().strftime("%Y-%m-%d")
     todays = [r for r in get_trade_history(limit=10000) if r["date"] == today]
     return {"count": len(todays), "total_pnl": sum(r["pnl"] for r in todays)}
+
+STATUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_status.json")
+
+def save_bot_status(status_list):
+    data = {
+        "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbols": status_list,
+    }
+    with open(STATUS_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+def load_bot_status():
+    if not os.path.exists(STATUS_PATH):
+        return None
+    with open(STATUS_PATH) as f:
+        return json.load(f)

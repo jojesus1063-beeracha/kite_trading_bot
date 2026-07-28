@@ -12,6 +12,7 @@ Usage:
 """
 
 import sys
+import time
 
 import pandas as pd
 
@@ -24,13 +25,21 @@ from risk_manager import RiskManager
 from costs import net_pnl_for_trade
 
 
-def fetch_range(kite, token, interval, from_date, to_date):
-    data = kite.historical_data(token, from_date, to_date, interval)
-    df = pd.DataFrame(data)
-    if df.empty:
-        return df
-    df["date"] = pd.to_datetime(df["date"])
-    return df[["date", "open", "high", "low", "close", "volume"]]
+def fetch_range(kite, token, interval, from_date, to_date, max_retries=3):
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            data = kite.historical_data(token, from_date, to_date, interval)
+            df = pd.DataFrame(data)
+            if df.empty:
+                return df
+            df["date"] = pd.to_datetime(df["date"])
+            return df[["date", "open", "high", "low", "close", "volume"]]
+        except Exception as e:
+            last_exc = e
+            time.sleep(2 ** attempt)  # 1s, 2s, 4s
+    print(f"fetch_range: giving up after {max_retries} attempts: {last_exc}")
+    return pd.DataFrame()
 
 
 def run_backtest_data(symbol: str, from_date: str, to_date: str, exchange: str = "NSE"):
@@ -48,7 +57,7 @@ def run_backtest_data(symbol: str, from_date: str, to_date: str, exchange: str =
     full_5m = fetch_range(kite, token, cfg.ENTRY_TIMEFRAME, from_date, to_date)
     full_15m, full_5m = add_indicators(full_15m, full_5m, cfg)
 
-    risk = RiskManager(cfg)
+    risk = RiskManager(cfg, persist=False)  # never touch live day_state.json
     trades = []
     position = None
 
@@ -94,16 +103,39 @@ def run_backtest_data(symbol: str, from_date: str, to_date: str, exchange: str =
                 "trades": []}
 
     wins = trades_df[trades_df["pnl"] > 0]
+    losses = trades_df[trades_df["pnl"] < 0]
+
+    gross_profit = wins["pnl"].sum() if not wins.empty else 0.0
+    gross_loss = abs(losses["pnl"].sum()) if not losses.empty else 0.0
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else None
+
+    avg_winner = wins["pnl"].mean() if not wins.empty else None
+    avg_loser = losses["pnl"].mean() if not losses.empty else None
+
+    win_rate_frac = len(wins) / len(trades_df)
+    expectancy = (win_rate_frac * (avg_winner or 0)) + ((1 - win_rate_frac) * (avg_loser or 0))
+
+    # Max drawdown on the cumulative equity curve (in currency, not %)
+    equity_curve = trades_df["pnl"].cumsum()
+    running_max = equity_curve.cummax()
+    drawdown = equity_curve - running_max
+    max_drawdown = drawdown.min() if not drawdown.empty else 0.0
+
     return {
         "symbol": symbol,
         "from_date": from_date,
         "to_date": to_date,
         "total_trades": len(trades_df),
-        "win_rate": len(wins) / len(trades_df) * 100,
+        "win_rate": win_rate_frac * 100,
         "total_pnl": trades_df["pnl"].sum(),              # NET (after estimated costs) -- what actually matters
         "avg_pnl": trades_df["pnl"].mean(),
         "total_gross_pnl": trades_df["gross_pnl"].sum(),   # before costs, for comparison
         "total_costs": trades_df["costs"].sum(),
+        "profit_factor": profit_factor,                   # gross profit / gross loss; None if no losses
+        "avg_winner": avg_winner,
+        "avg_loser": avg_loser,
+        "expectancy": expectancy,                          # expected net P&L per trade
+        "max_drawdown": max_drawdown,                       # most negative point of cumulative P&L (currency)
         "trades": trades_df.to_dict("records"),
     }
 
@@ -123,6 +155,14 @@ def run_backtest(symbol: str, from_date: str, to_date: str, exchange: str = "NSE
     print(f"Estimated trading costs:  -{result['total_costs']:.2f}")
     print(f"Net P&L (after costs):    {result['total_pnl']:.2f}")
     print(f"Avg NET P&L per trade: {result['avg_pnl']:.2f}")
+    pf = result['profit_factor']
+    print(f"Profit factor: {pf:.2f}" if pf is not None else "Profit factor: N/A (no losing trades)")
+    aw = result['avg_winner']
+    al = result['avg_loser']
+    print(f"Avg winner: {aw:.2f}" if aw is not None else "Avg winner: N/A")
+    print(f"Avg loser: {al:.2f}" if al is not None else "Avg loser: N/A")
+    print(f"Expectancy per trade: {result['expectancy']:.2f}")
+    print(f"Max drawdown: {result['max_drawdown']:.2f}")
     return result
 
 

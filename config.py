@@ -58,12 +58,27 @@ USE_ADX_FILTER = False
 ADX_PERIOD = 14
 ADX_THRESHOLD = 25  # Wilder's original suggested threshold for "trending"
 
+# Additive, opt-in alternative to the binary USE_ADX_FILTER above.
+# "" (empty/unset) -> mirrors USE_ADX_FILTER exactly (off or binary).
+# "off"     -> no ADX gating at all, regardless of USE_ADX_FILTER
+# "binary"  -> same pass/fail behavior as USE_ADX_FILTER=True
+# "dynamic" -> tiered confidence (REJECTED/MEDIUM/HIGH/VERY_STRONG),
+#              all tiers except REJECTED allow the trade
+# Does NOT change position sizing or existing BUY/SELL logic either way.
+ADX_MODE = ""
+ADX_DYNAMIC_MIN = 20     # below this -> REJECTED
+# ADX_THRESHOLD above doubles as the MEDIUM/HIGH boundary in dynamic mode
+ADX_DYNAMIC_STRONG = 35  # at/above this -> VERY_STRONG
+
 # ---------------------------------------------------------------------
 # Risk management
 # ---------------------------------------------------------------------
 RISK_REWARD_MIN = 2.0          # minimum reward:risk ratio (1:2)
 RISK_PER_TRADE_PCT = 1.0       # % of capital risked per trade
 MAX_TRADES_PER_DAY = 4
+MAX_OPEN_POSITIONS = 5          # cap on simultaneous different-symbol positions
+MAX_POSITION_SIZE_PCT = 20.0     # no single position's notional value (qty * entry) exceeds this % of CAPITAL
+CHECK_MARGIN_BEFORE_ENTRY = True # verify real Zerodha margin via order_margins() before placing a live entry order
 MAX_DAILY_LOSS_PCT = 3.0       # kill-switch: stop trading if daily loss exceeds this %
 CAPITAL = float(os.environ.get("TRADING_CAPITAL", "100000"))  # your intraday capital, INR
 
@@ -99,6 +114,35 @@ NO_ENTRY_AFTER = "15:00"
 PAPER_TRADING = True
 
 # ---------------------------------------------------------------------
+# Candle-aligned scheduler (opt-in infrastructure change)
+# ---------------------------------------------------------------------
+# When False (default): main.py runs its original loop exactly as
+# before -- full watchlist scan + position checks together, every
+# POLL_SECONDS. Nothing about this section has any effect.
+#
+# When True: main.py uses scheduler.py instead. Full scans (fetch +
+# indicators + signal evaluation, unchanged) only run once per newly
+# completed ENTRY_TIMEFRAME candle. Between scans, only open positions
+# are checked (stop-loss/target), on a much shorter interval, without
+# fetching/evaluating the rest of the watchlist. Trading logic itself
+# is byte-for-byte identical either way.
+ENABLE_CANDLE_ALIGNED_POLLING = False
+POSITION_CHECK_SECONDS = 25   # how often to check open positions between scans
+SCAN_BUFFER_SECONDS = 8       # wait this long after a candle closes before scanning
+
+# Sanity-check thresholds -- purely observational, log-only. Never skip
+# or alter any trading action based on these; they just surface timing
+# problems (slow network, API degradation, an overloaded watchlist)
+# early via WARNING/CRITICAL log lines instead of requiring someone to
+# notice by eye. Only meaningful when ENABLE_CANDLE_ALIGNED_POLLING=True.
+SCHEDULER_WARNING_SCAN_SECONDS = 90     # full scan taking longer than this -> WARNING
+SCHEDULER_CRITICAL_SCAN_SECONDS = 120   # full scan taking longer than this -> CRITICAL
+POSITION_CHECK_WARNING_SECONDS = 40     # one position-check pass taking longer than this -> WARNING
+POSITION_CHECK_CRITICAL_SECONDS = 60    # one position-check pass taking longer than this -> CRITICAL
+SCAN_DELAY_WARNING_SECONDS = 30         # scan starting this late vs its target time -> WARNING
+SCAN_DELAY_CRITICAL_SECONDS = 60        # scan starting this late vs its target time -> CRITICAL
+
+# ---------------------------------------------------------------------
 # Overrides from the web configuration UI (configure_app.py)
 # ---------------------------------------------------------------------
 # Settings changed via the browser form are saved to user_config.json
@@ -126,6 +170,9 @@ if os.path.exists(_USER_CONFIG_PATH):
     RISK_REWARD_MIN = _overrides.get("risk_reward_min", RISK_REWARD_MIN)
     SL_BUFFER_PCT = _overrides.get("sl_buffer_pct", SL_BUFFER_PCT)
     MAX_TRADES_PER_DAY = _overrides.get("max_trades_per_day", MAX_TRADES_PER_DAY)
+    MAX_OPEN_POSITIONS = _overrides.get("max_open_positions", MAX_OPEN_POSITIONS)
+    MAX_POSITION_SIZE_PCT = _overrides.get("max_position_size_pct", MAX_POSITION_SIZE_PCT)
+    CHECK_MARGIN_BEFORE_ENTRY = _overrides.get("check_margin_before_entry", CHECK_MARGIN_BEFORE_ENTRY)
     MAX_DAILY_LOSS_PCT = _overrides.get("max_daily_loss_pct", MAX_DAILY_LOSS_PCT)
     TREND_EMA_FAST = _overrides.get("trend_ema_fast", TREND_EMA_FAST)
     TREND_EMA_SLOW = _overrides.get("trend_ema_slow", TREND_EMA_SLOW)
@@ -133,3 +180,15 @@ if os.path.exists(_USER_CONFIG_PATH):
     PAPER_TRADING = _overrides.get("paper_trading", PAPER_TRADING)
     USE_ADX_FILTER = _overrides.get("use_adx_filter", USE_ADX_FILTER)
     ADX_THRESHOLD = _overrides.get("adx_threshold", ADX_THRESHOLD)
+    ADX_MODE = _overrides.get("adx_mode", ADX_MODE)
+    ADX_DYNAMIC_MIN = _overrides.get("adx_dynamic_min", ADX_DYNAMIC_MIN)
+    ADX_DYNAMIC_STRONG = _overrides.get("adx_dynamic_strong", ADX_DYNAMIC_STRONG)
+    ENABLE_CANDLE_ALIGNED_POLLING = _overrides.get("enable_candle_aligned_polling", ENABLE_CANDLE_ALIGNED_POLLING)
+    POSITION_CHECK_SECONDS = _overrides.get("position_check_seconds", POSITION_CHECK_SECONDS)
+    SCAN_BUFFER_SECONDS = _overrides.get("scan_buffer_seconds", SCAN_BUFFER_SECONDS)
+    SCHEDULER_WARNING_SCAN_SECONDS = _overrides.get("scheduler_warning_scan_seconds", SCHEDULER_WARNING_SCAN_SECONDS)
+    SCHEDULER_CRITICAL_SCAN_SECONDS = _overrides.get("scheduler_critical_scan_seconds", SCHEDULER_CRITICAL_SCAN_SECONDS)
+    POSITION_CHECK_WARNING_SECONDS = _overrides.get("position_check_warning_seconds", POSITION_CHECK_WARNING_SECONDS)
+    POSITION_CHECK_CRITICAL_SECONDS = _overrides.get("position_check_critical_seconds", POSITION_CHECK_CRITICAL_SECONDS)
+    SCAN_DELAY_WARNING_SECONDS = _overrides.get("scan_delay_warning_seconds", SCAN_DELAY_WARNING_SECONDS)
+    SCAN_DELAY_CRITICAL_SECONDS = _overrides.get("scan_delay_critical_seconds", SCAN_DELAY_CRITICAL_SECONDS)
