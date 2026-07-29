@@ -130,7 +130,8 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
 
     if trend == "DOWN" and curr["bearish_engulfing"] and curr["close"] < curr["ema_entry"] and volume_ok:
         entry = curr["close"]
-        stop = curr["high"] * (1 + cfg.SL_BUFFER_PCT / 100)
+        sell_buffer = getattr(cfg, "SL_BUFFER_PCT_SELL", None) or cfg.SL_BUFFER_PCT
+        stop = curr["high"] * (1 + sell_buffer / 100)
         risk = stop - entry
         if risk <= 0:
             return None

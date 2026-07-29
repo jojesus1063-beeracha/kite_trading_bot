@@ -86,6 +86,10 @@ CAPITAL = float(os.environ.get("TRADING_CAPITAL", "100000"))  # your intraday ca
 # candle, minus/plus a small buffer to avoid getting stopped out by
 # noise.
 SL_BUFFER_PCT = 0.05  # 0.05% buffer beyond the signal candle's extreme
+SL_BUFFER_PCT_SELL = None  # if set, overrides SL_BUFFER_PCT for SELL trades only.
+                            # None (default) = use SL_BUFFER_PCT for both directions,
+                            # fully backward compatible. Set wider for SELL to account
+                            # for sharper short-squeeze risk vs typical long drawdowns.
 
 # ---------------------------------------------------------------------
 # Execution
@@ -169,6 +173,7 @@ if os.path.exists(_USER_CONFIG_PATH):
     RISK_PER_TRADE_PCT = _overrides.get("risk_per_trade_pct", RISK_PER_TRADE_PCT)
     RISK_REWARD_MIN = _overrides.get("risk_reward_min", RISK_REWARD_MIN)
     SL_BUFFER_PCT = _overrides.get("sl_buffer_pct", SL_BUFFER_PCT)
+    SL_BUFFER_PCT_SELL = _overrides.get("sl_buffer_pct_sell", SL_BUFFER_PCT_SELL)
     MAX_TRADES_PER_DAY = _overrides.get("max_trades_per_day", MAX_TRADES_PER_DAY)
     MAX_OPEN_POSITIONS = _overrides.get("max_open_positions", MAX_OPEN_POSITIONS)
     MAX_POSITION_SIZE_PCT = _overrides.get("max_position_size_pct", MAX_POSITION_SIZE_PCT)
