@@ -131,7 +131,7 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             if qty > 0 and not cfg.PAPER_TRADING:
                 qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
             result = place_entry_order(kite, symbol, signal.direction, qty, exchange, cfg)
-            if result:
+            if result["success"]:
                 open_positions[symbol] = {
                     "direction": signal.direction,
                     "qty": qty,
@@ -167,6 +167,7 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "market_trend": market_trend, "sector": sector_for_symbol(symbol),
                     "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
                     "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
+                    "rejection_reason": result["reason"],
                     "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
                 })
         else:

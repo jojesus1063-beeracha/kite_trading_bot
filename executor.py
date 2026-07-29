@@ -139,19 +139,26 @@ def cap_quantity_by_margin(kite, symbol: str, direction: str, quantity: int, exc
 
 
 def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange: str, cfg):
+    """
+    ALWAYS returns a dict: {"success": bool, "order_id": str|None,
+    "status": str, "reason": str|None}. "reason" is populated only on
+    failure, identifying WHICH check rejected the order.
+    """
     if quantity <= 0:
-        logger.warning(f"Skipping order for {symbol} ({direction}): computed quantity is 0")
-        return None
+        reason = "computed quantity is 0"
+        logger.warning(f"Skipping order for {symbol} ({direction}): {reason}")
+        return {"success": False, "order_id": None, "status": "REJECTED", "reason": reason}
 
     if cfg.PAPER_TRADING:
         logger.info(f"[PAPER] {direction} {quantity} {exchange}:{symbol} @ MARKET")
-        return {"order_id": "PAPER", "status": "PAPER_FILLED"}
+        return {"success": True, "order_id": "PAPER", "status": "PAPER_FILLED", "reason": None}
 
     if getattr(cfg, "CHECK_MARGIN_BEFORE_ENTRY", True):
-        ok, reason = _check_sufficient_margin(kite, symbol, direction, quantity, exchange, cfg)
+        ok, margin_reason = _check_sufficient_margin(kite, symbol, direction, quantity, exchange, cfg)
         if not ok:
-            logger.warning(f"Skipping order for {symbol} ({direction}): insufficient margin -- {reason}")
-            return None
+            reason = f"insufficient margin -- {margin_reason}"
+            logger.warning(f"Skipping order for {symbol} ({direction}): {reason}")
+            return {"success": False, "order_id": None, "status": "REJECTED", "reason": reason}
 
     if getattr(cfg, "CIRCUIT_PROXIMITY_PCT", None) is not None:
         from risk_manager import is_near_circuit_limit
@@ -162,9 +169,10 @@ def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange
             lower_limit = q.get("lower_circuit_limit")
             upper_limit = q.get("upper_circuit_limit")
             if is_near_circuit_limit(direction, last_price, lower_limit, upper_limit, cfg.CIRCUIT_PROXIMITY_PCT):
-                logger.warning(f"Skipping order for {symbol} ({direction}): within {cfg.CIRCUIT_PROXIMITY_PCT}% "
-                                f"of circuit limit (price={last_price}, lower={lower_limit}, upper={upper_limit})")
-                return None
+                reason = (f"within {cfg.CIRCUIT_PROXIMITY_PCT}% of circuit limit "
+                          f"(price={last_price}, lower={lower_limit}, upper={upper_limit})")
+                logger.warning(f"Skipping order for {symbol} ({direction}): {reason}")
+                return {"success": False, "order_id": None, "status": "REJECTED", "reason": reason}
         except Exception as e:
             logger.warning(f"Circuit-proximity check for {symbol} failed ({e}), proceeding without check")
 
@@ -177,11 +185,10 @@ def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange
         quantity=quantity,
         product=cfg.PRODUCT,
         order_type=cfg.ORDER_TYPE_ENTRY,
-        market_protection=cfg.MARKET_PROTECTION,  # required on MARKET/SL-M orders since Apr 2026
-        # tag="<your registered algo/strategy tag if required>",
+        market_protection=cfg.MARKET_PROTECTION,
     )
     logger.info(f"[LIVE] Placed {direction} order {order_id} for {quantity} {exchange}:{symbol}")
-    return {"order_id": order_id, "status": "SUBMITTED"}
+    return {"success": True, "order_id": order_id, "status": "SUBMITTED", "reason": None}
 
 
 def place_exit_order(kite, symbol: str, direction: str, quantity: int, exchange: str, cfg):

@@ -31,7 +31,7 @@ main_module.fetch_candles = lambda *a, **kw: pd.DataFrame({
     "date": pd.date_range("2026-07-29 09:15", periods=60, freq="15min"),
     "open": [100]*60, "high": [101]*60, "low": [99]*60, "close": [100]*60, "volume": [1000]*60,
 })
-main_module.place_entry_order = lambda *a, **kw: None  # order "fails" so we don't need open_positions bookkeeping
+main_module.place_entry_order = lambda *a, **kw: {"success": False, "order_id": None, "status": "REJECTED", "reason": "test mock"}  # matches new contract; order intentionally "fails" so we do not need open_positions bookkeeping
 main_module.risk_manager_within_trading_window = None
 
 mock_kite = MagicMock()
