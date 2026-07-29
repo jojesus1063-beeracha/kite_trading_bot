@@ -47,6 +47,7 @@ def fake_get_sector_trend(kite, symbol, cfg_arg):
     return "Bullish"
 
 main_module.get_market_trend = fake_get_market_trend
+main_module.log_signal = lambda record: True  # isolate from real signal_logs/ during tests
 main_module.get_sector_trend = fake_get_sector_trend
 
 # 3 bank stocks (share ONE sector) + 1 IT stock (separate sector)

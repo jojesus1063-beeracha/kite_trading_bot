@@ -23,6 +23,7 @@ from data_feed import get_instrument_token, fetch_candles
 from indicators import add_indicators, atr as atr_indicator
 from strategy import evaluate, latest_completed_15m_trend
 from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
+from signal_log import log_signal
 from risk_manager import RiskManager
 from executor import place_entry_order, place_exit_order, cap_quantity_by_margin
 from trade_log import record_trade, save_bot_status
@@ -151,8 +152,20 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "confidence": signal.confidence,
                     "market_alignment": signal.market_alignment,
                 })
+                log_signal({
+                    "timestamp": str(signal.timestamp), "symbol": symbol,
+                    "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                    "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
+                    "entry_price": signal.entry_price, "direction": signal.direction, "executed": True,
+                })
             else:
                 status_this_cycle.append({"symbol": symbol, "status": "signal found, order failed"})
+                log_signal({
+                    "timestamp": str(signal.timestamp), "symbol": symbol,
+                    "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                    "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
+                    "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
+                })
         else:
             status_this_cycle.append({"symbol": symbol, "status": "no signal"})
 
