@@ -18,7 +18,8 @@ import pandas as pd
 
 import config as cfg
 from auth import get_kite_client
-from data_feed import get_instrument_token
+from data_feed import get_instrument_token, trim_incomplete_candles
+from scheduler import candle_interval_minutes
 from indicators import add_indicators
 from strategy import evaluate
 from risk_manager import RiskManager
@@ -34,7 +35,8 @@ def fetch_range(kite, token, interval, from_date, to_date, max_retries=3):
             if df.empty:
                 return df
             df["date"] = pd.to_datetime(df["date"])
-            return df[["date", "open", "high", "low", "close", "volume"]]
+            df = df[["date", "open", "high", "low", "close", "volume"]]
+            return trim_incomplete_candles(df, candle_interval_minutes(interval))
         except Exception as e:
             last_exc = e
             time.sleep(2 ** attempt)  # 1s, 2s, 4s
