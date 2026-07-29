@@ -129,6 +129,14 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 logger.warning(f"Market alignment computation failed for {symbol}, using UNKNOWN: {e}")
                 signal.market_alignment = "UNKNOWN"
 
+            if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and \
+               signal.market_alignment in ("MISALIGNED", "STRONG_MISALIGNMENT"):
+                logger.info(f"{symbol}: skipped -- market_alignment={signal.market_alignment} "
+                            f"(trading against market/sector trend)")
+                status_this_cycle.append({"symbol": symbol,
+                                          "status": f"skipped, misaligned ({signal.market_alignment})"})
+                continue
+
             qty = risk.position_size(signal.entry_price, signal.stop_loss)
             if qty > 0 and not cfg.PAPER_TRADING:
                 qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)

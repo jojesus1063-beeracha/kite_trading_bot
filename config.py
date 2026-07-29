@@ -96,6 +96,10 @@ CIRCUIT_PROXIMITY_PCT = 2.0  # block entries within this % of the relevant
                               # avoids trades that could get trapped by a
                               # locked circuit with no exit liquidity
 
+ENABLE_MARKET_ALIGNMENT_FILTER = False  # block entries whose market_alignment is
+                                          # MISALIGNED or STRONG_MISALIGNMENT.
+                                          # Default off -- enable explicitly once ready.
+
 # ---------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------
@@ -180,6 +184,7 @@ if os.path.exists(_USER_CONFIG_PATH):
     SL_BUFFER_PCT = _overrides.get("sl_buffer_pct", SL_BUFFER_PCT)
     SL_BUFFER_PCT_SELL = _overrides.get("sl_buffer_pct_sell", SL_BUFFER_PCT_SELL)
     CIRCUIT_PROXIMITY_PCT = _overrides.get("circuit_proximity_pct", CIRCUIT_PROXIMITY_PCT)
+    ENABLE_MARKET_ALIGNMENT_FILTER = _overrides.get("enable_market_alignment_filter", ENABLE_MARKET_ALIGNMENT_FILTER)
     MAX_TRADES_PER_DAY = _overrides.get("max_trades_per_day", MAX_TRADES_PER_DAY)
     MAX_OPEN_POSITIONS = _overrides.get("max_open_positions", MAX_OPEN_POSITIONS)
     MAX_POSITION_SIZE_PCT = _overrides.get("max_position_size_pct", MAX_POSITION_SIZE_PCT)
