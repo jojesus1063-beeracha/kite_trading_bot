@@ -117,5 +117,33 @@ finally:
 print(f"\n{'='*50}")
 print(f"FINAL Results: {passed} passed, {failed} failed")
 print(f"{'='*50}")
+
+# --- Tests for compute_market_alignment() ---
+print("\n--- Market Alignment Scoring Tests ---")
+from market_trend import compute_market_alignment
+
+check("BUY + Bullish market + Bullish sector = STRONG_ALIGNMENT",
+      compute_market_alignment("BUY", "Bullish", "Bullish") == "STRONG_ALIGNMENT")
+check("BUY + Bullish market + Sideways sector = ALIGNED",
+      compute_market_alignment("BUY", "Bullish", "Sideways") == "ALIGNED")
+check("BUY + Sideways market + Sideways sector = NEUTRAL",
+      compute_market_alignment("BUY", "Sideways", "Sideways") == "NEUTRAL")
+check("BUY + Bearish market + Sideways sector = MISALIGNED",
+      compute_market_alignment("BUY", "Bearish", "Sideways") == "MISALIGNED")
+check("BUY + Bearish market + Bearish sector = STRONG_MISALIGNMENT",
+      compute_market_alignment("BUY", "Bearish", "Bearish") == "STRONG_MISALIGNMENT")
+check("BUY + Bullish market + Bearish sector = NEUTRAL (cancels out)",
+      compute_market_alignment("BUY", "Bullish", "Bearish") == "NEUTRAL")
+
+check("SELL + Bearish market + Bearish sector = STRONG_ALIGNMENT",
+      compute_market_alignment("SELL", "Bearish", "Bearish") == "STRONG_ALIGNMENT")
+check("SELL + Bullish market + Bullish sector = STRONG_MISALIGNMENT",
+      compute_market_alignment("SELL", "Bullish", "Bullish") == "STRONG_MISALIGNMENT")
+check("SELL + Bearish market + Sideways sector = ALIGNED",
+      compute_market_alignment("SELL", "Bearish", "Sideways") == "ALIGNED")
+
+print(f"\n{'='*50}")
+print(f"FINAL Results: {passed} passed, {failed} failed")
+print(f"{'='*50}")
 import sys
 sys.exit(1 if failed else 0)

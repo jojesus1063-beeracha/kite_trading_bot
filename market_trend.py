@@ -107,3 +107,63 @@ def get_sector_trend(kite, symbol: str, cfg) -> str:
     if token is None:
         return "Sideways"
     return _fetch_and_classify(kite, token, cfg)
+
+
+def compute_market_alignment(direction: str, market_trend: str, sector_trend: str) -> str:
+    """
+    Pure function: compares the trade's direction against market and
+    sector trend, returns "ALIGNED" / "NEUTRAL" / "OPPOSED".
+
+    ALIGNED: both market AND sector trend match the trade direction
+             (Bullish for BUY, Bearish for SELL).
+    OPPOSED: EITHER market OR sector trend actively contradicts the
+             trade direction (the stronger of two negative signals wins
+             -- any real opposition is treated as OPPOSED, not averaged
+             away by a Sideways reading elsewhere).
+    NEUTRAL: everything else (e.g. one Sideways + one matching, or
+             both Sideways) -- no strong signal either way.
+
+    Used to adjust Signal.confidence -- never to block a trade outright
+    (that decision belongs to the caller, per the "confidence not
+    filter" design principle).
+    """
+    wanted = "Bullish" if direction == "BUY" else "Bearish"
+    opposed_label = "Bearish" if direction == "BUY" else "Bullish"
+
+    if market_trend == opposed_label or sector_trend == opposed_label:
+        return "OPPOSED"
+    if market_trend == wanted and sector_trend == wanted:
+        return "ALIGNED"
+    return "NEUTRAL"
+
+
+def compute_market_alignment(direction: str, market_trend: str, sector_trend: str) -> str:
+    """
+    Pure scoring: how well does a signal's direction align with the
+    broader market and sector trend? Additive, -2..+2 scale, mapped to
+    a label. Separate from ADX confidence -- never merged with it.
+
+    +1 per trend that agrees with the signal's direction, -1 per trend
+    that opposes it, 0 for Sideways.
+    """
+    wanted = "Bullish" if direction == "BUY" else "Bearish"
+    opposed = "Bearish" if direction == "BUY" else "Bullish"
+
+    def score_one(trend):
+        if trend == wanted:
+            return 1
+        if trend == opposed:
+            return -1
+        return 0
+
+    total = score_one(market_trend) + score_one(sector_trend)
+
+    if total == 2:
+        return "STRONG_ALIGNMENT"
+    if total == 1:
+        return "ALIGNED"
+    if total == 0:
+        return "NEUTRAL"
+    if total == -1:
+        return "MISALIGNED"
+    return "STRONG_MISALIGNMENT"
