@@ -176,7 +176,7 @@ flat_5m = make_df_5m(closes=[150,150.2,150.1,150.3,150.2,150.4,150.3,150.5,150.4
 down_15m = make_df_15m_downtrend()
 
 call_count = {"n": 0}
-def fake_fetch(kite, token, interval, lookback_days=1):
+def fake_fetch(kite, token, interval, lookback_days=1, **kwargs):
     call_count["n"] += 1
     if interval == cfg.ENTRY_TIMEFRAME:
         return flat_5m

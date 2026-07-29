@@ -239,7 +239,7 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
     pos = open_positions[symbol]
     exchange = pos.get("exchange", exchange_map.get(symbol, "NSE"))
     token = tokens[symbol]
-    df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=1)
+    df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=1, trim_incomplete=False)  # real-time price needed for stop/trailing-stop monitoring
     time.sleep(0.5)
     if df_5m.empty:
         return f"position open | {pos['direction']} entry {pos['entry']:.2f} (current price unavailable)"
@@ -347,7 +347,7 @@ def run():
                 exchange = pos.get("exchange", exchange_map.get(symbol, "NSE"))
                 token = tokens[symbol]
                 try:
-                    df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=1)
+                    df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=1, trim_incomplete=False)  # real-time price needed for accurate square-off
                     last_price = df_5m.iloc[-1]["close"] if not df_5m.empty else pos["entry"]
                 except Exception:
                     last_price = pos["entry"]
