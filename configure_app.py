@@ -491,7 +491,13 @@ FORM_PAGE = BASE_STYLE + """
       <h2>Watchlist &amp; Settings</h2>
       <form method="post" id="watchlist-form">
         <label>Add another symbol not listed above (comma-separated)</label>
-        <input type="text" name="extra_symbols" placeholder="e.g. IRCTC, ZOMATO">
+        <div style="display: flex; gap: 12px; align-items: center;">
+          <input type="text" name="extra_symbols" placeholder="e.g. IRCTC, ZOMATO" style="flex: 1;">
+          <div class="radio-pair">
+            <label><input type="radio" name="extra_exchange" value="NSE" checked> NSE</label>
+            <label><input type="radio" name="extra_exchange" value="BSE"> BSE</label>
+          </div>
+        </div>
 
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <label style="margin: 16px 0 6px;">Stocks to trade (tap to select)</label>
@@ -1027,10 +1033,12 @@ def index():
     if request.method == "POST":
         selected = request.form.getlist("watchlist")
         extra = [s.strip().upper() for s in request.form.get("extra_symbols", "").split(",") if s.strip()]
+        extra_exchange = request.form.get("extra_exchange", "NSE")
+        extra_set = set(extra)
         all_symbols = list(dict.fromkeys(selected + extra))
 
         watchlist = [
-            {"symbol": s, "exchange": request.form.get(f"exchange_{s}", "NSE")}
+            {"symbol": s, "exchange": extra_exchange if s in extra_set else request.form.get(f"exchange_{s}", "NSE")}
             for s in all_symbols
         ]
 
