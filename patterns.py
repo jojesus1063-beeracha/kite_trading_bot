@@ -61,3 +61,33 @@ def label_engulfing_patterns(df: pd.DataFrame) -> pd.DataFrame:
     df["bullish_engulfing"] = bullish_engulfing
     df["bearish_engulfing"] = bearish_engulfing
     return df
+
+
+def is_bear_trap(df, lookback=10):
+    """
+    Failed breakdown / bear trap: price broke below a recent support
+    level but the current candle closes back above it -- often
+    precedes a bullish reversal. Uses the last `lookback` COMPLETED
+    candles (excludes the current forming one) as the support
+    reference. No look-ahead: only uses data at or before "now".
+    """
+    if len(df) < lookback + 2:
+        return False
+    ref = df.iloc[-(lookback + 1):-1]
+    support = ref["low"].min()
+    curr = df.iloc[-1]
+    broke_below = curr["low"] < support
+    closed_back_above = curr["close"] > support
+    return bool(broke_below and closed_back_above)
+
+
+def is_bull_trap(df, lookback=10):
+    """Mirror of is_bear_trap: failed breakout above resistance, closing back below it."""
+    if len(df) < lookback + 2:
+        return False
+    ref = df.iloc[-(lookback + 1):-1]
+    resistance = ref["high"].max()
+    curr = df.iloc[-1]
+    broke_above = curr["high"] > resistance
+    closed_back_below = curr["close"] < resistance
+    return bool(broke_above and closed_back_below)
