@@ -24,6 +24,24 @@ def get_instrument_token(kite, symbol: str, exchange: str) -> int:
     raise ValueError(f"Instrument token not found for {exchange}:{symbol}")
 
 
+def get_company_name(kite, symbol: str, exchange: str) -> str:
+    """
+    Returns the full company name for a tradingsymbol, from Kite's own
+    instrument master (the "name" field) -- reused for news lookup,
+    since Marketaux's search endpoint matches on company name, not
+    raw NSE/BSE ticker symbols. Falls back to the symbol itself if
+    not found, rather than raising.
+    """
+    try:
+        instruments = kite.instruments(exchange)
+        for inst in instruments:
+            if inst["tradingsymbol"] == symbol:
+                return inst.get("name") or symbol
+    except Exception:
+        pass
+    return symbol
+
+
 def trim_incomplete_candles(df, interval_minutes, buffer_seconds=10, now=None):
     """
     Removes any trailing candle(s) that have NOT fully finished forming

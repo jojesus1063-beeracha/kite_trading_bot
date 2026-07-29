@@ -19,10 +19,11 @@ from datetime import datetime
 
 import config as cfg
 from auth import get_kite_client
-from data_feed import get_instrument_token, fetch_candles
+from data_feed import get_instrument_token, fetch_candles, get_company_name
 from indicators import add_indicators, atr as atr_indicator
 from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_row
 from patterns import is_bear_trap, is_bull_trap
+from news_filter import evaluate_news, get_news_confidence
 from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
 from signal_log import log_signal
 from risk_manager import RiskManager
@@ -137,6 +138,41 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                                           "status": f"skipped, misaligned ({signal.market_alignment})"})
                 continue
 
+            # News filter: additional risk layer only -- never generates
+            # BUY/SELL signals, only evaluates whether this existing signal
+            # should proceed. Confidence tier mapped to a numeric base score.
+            _CONF_TO_SCORE = {"REJECTED": 0, "MEDIUM": 50, "HIGH": 75, "VERY_STRONG": 90}
+            _base_score = _CONF_TO_SCORE.get(signal.confidence, 70)
+            if getattr(cfg, "ENABLE_NEWS_FILTER", False):
+                try:
+                    company_name = get_company_name(kite, symbol, exchange)
+                    news_result = evaluate_news(symbol, company_name, cfg)
+                except Exception as e:
+                    logger.warning(f"News filter failed for {symbol}, treating as UNKNOWN: {e}")
+                    news_result = {"sentiment": "UNKNOWN", "headline": None, "published_at": None}
+                news_score, news_decision, news_reason = get_news_confidence(
+                    signal.direction, news_result["sentiment"], _base_score, cfg)
+                signal.news_sentiment = news_result["sentiment"]
+                signal.news_headline = news_result["headline"]
+                signal.news_confidence_score = news_score
+                if news_decision == "REJECT":
+                    logger.info(f"{symbol}: skipped -- news={signal.news_sentiment} ({news_reason}) "
+                                f"headline: {signal.news_headline}")
+                    status_this_cycle.append({"symbol": symbol,
+                                              "status": f"skipped, negative news ({signal.news_headline})"})
+                    log_signal({
+                        "timestamp": str(signal.timestamp), "symbol": symbol,
+                        "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                        "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
+                        "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
+                        "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
+                        "rejection_reason": news_reason,
+                        "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
+                        "news_confidence_score": signal.news_confidence_score,
+                    })
+                    continue
+
+
             qty = risk.position_size(signal.entry_price, signal.stop_loss)
             if qty > 0 and not cfg.PAPER_TRADING:
                 qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
@@ -174,6 +210,8 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
                     "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
                     "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
+                    "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
+                    "news_confidence_score": signal.news_confidence_score,
                 })
             else:
                 status_this_cycle.append({"symbol": symbol, "status": "signal found, order failed"})
@@ -189,6 +227,8 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
                     "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
                     "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
+                    "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
+                    "news_confidence_score": signal.news_confidence_score,
                 })
         else:
             status_this_cycle.append({"symbol": symbol, "status": "no signal"})

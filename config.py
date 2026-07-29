@@ -100,6 +100,17 @@ ENABLE_MARKET_ALIGNMENT_FILTER = False  # block entries whose market_alignment i
                                           # MISALIGNED or STRONG_MISALIGNMENT.
                                           # Default off -- enable explicitly once ready.
 
+MARKETAUX_API_KEY = os.environ.get("MARKETAUX_API_KEY", "")  # required for the news filter
+ENABLE_NEWS_FILTER = False  # additional risk layer, purely additive -- never generates
+                             # BUY/SELL signals, only evaluates whether an existing
+                             # technical signal should proceed (see news_filter.py)
+NEWS_LOOKBACK_HOURS = 24
+NEWS_CACHE_MINUTES = 5
+NEWS_TIMEOUT_SECONDS = 2
+NEGATIVE_NEWS_BLOCK = True
+POSITIVE_NEWS_CONFIDENCE_BONUS = 5
+NEGATIVE_NEWS_CONFIDENCE_PENALTY = 25
+
 # ---------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------
@@ -185,6 +196,13 @@ if os.path.exists(_USER_CONFIG_PATH):
     SL_BUFFER_PCT_SELL = _overrides.get("sl_buffer_pct_sell", SL_BUFFER_PCT_SELL)
     CIRCUIT_PROXIMITY_PCT = _overrides.get("circuit_proximity_pct", CIRCUIT_PROXIMITY_PCT)
     ENABLE_MARKET_ALIGNMENT_FILTER = _overrides.get("enable_market_alignment_filter", ENABLE_MARKET_ALIGNMENT_FILTER)
+    ENABLE_NEWS_FILTER = _overrides.get("enable_news_filter", ENABLE_NEWS_FILTER)
+    NEWS_LOOKBACK_HOURS = _overrides.get("news_lookback_hours", NEWS_LOOKBACK_HOURS)
+    NEWS_CACHE_MINUTES = _overrides.get("news_cache_minutes", NEWS_CACHE_MINUTES)
+    NEWS_TIMEOUT_SECONDS = _overrides.get("news_timeout_seconds", NEWS_TIMEOUT_SECONDS)
+    NEGATIVE_NEWS_BLOCK = _overrides.get("negative_news_block", NEGATIVE_NEWS_BLOCK)
+    POSITIVE_NEWS_CONFIDENCE_BONUS = _overrides.get("positive_news_confidence_bonus", POSITIVE_NEWS_CONFIDENCE_BONUS)
+    NEGATIVE_NEWS_CONFIDENCE_PENALTY = _overrides.get("negative_news_confidence_penalty", NEGATIVE_NEWS_CONFIDENCE_PENALTY)
     MAX_TRADES_PER_DAY = _overrides.get("max_trades_per_day", MAX_TRADES_PER_DAY)
     MAX_OPEN_POSITIONS = _overrides.get("max_open_positions", MAX_OPEN_POSITIONS)
     MAX_POSITION_SIZE_PCT = _overrides.get("max_position_size_pct", MAX_POSITION_SIZE_PCT)

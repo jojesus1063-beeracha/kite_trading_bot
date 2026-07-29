@@ -39,6 +39,9 @@ class Signal:
     reason: str
     confidence: Optional[str] = None  # ADX dynamic-mode tier, or None if not applicable
     market_alignment: Optional[str] = None  # market_trend.compute_market_alignment() result, or None if not set
+    news_sentiment: Optional[str] = None  # POSITIVE/NEGATIVE/NEUTRAL/UNKNOWN from news_filter.py, or None if not set
+    news_headline: Optional[str] = None
+    news_confidence_score: Optional[float] = None  # numeric 0-100, technical base + news modifier
 
 
 def get_trend(row_15m: pd.Series, cfg=None, require_vwap: bool = True) -> Optional[str]:
