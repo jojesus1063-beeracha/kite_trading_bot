@@ -85,5 +85,37 @@ finally:
 print(f"\n{'='*50}")
 print(f"FINAL Results: {passed} passed, {failed} failed")
 print(f"{'='*50}")
+
+# --- Tests for sector mapping and get_sector_trend() ---
+print("\n--- Sector Trend Tests ---")
+
+from market_trend import sector_for_symbol, get_sector_trend, SECTOR_MAP
+
+check("HDFCBANK maps to NIFTY BANK", sector_for_symbol("HDFCBANK") == "NIFTY BANK")
+check("TCS maps to NIFTY IT", sector_for_symbol("TCS") == "NIFTY IT")
+check("Unmapped symbol returns None", sector_for_symbol("SOMERANDOMSTOCK") == None)
+check("SECTOR_MAP is non-empty", len(SECTOR_MAP) > 0)
+
+# Unmapped symbol -> Sideways, no fetch attempted at all
+data_feed.fetch_candles = lambda *a, **kw: (_ for _ in ()).throw(Exception("should not be called"))
+try:
+    result = get_sector_trend(mock_kite, "SOMERANDOMSTOCK", cfg)
+    check("get_sector_trend fails safe to Sideways for unmapped symbol (no fetch attempted)",
+          result == "Sideways")
+finally:
+    data_feed.fetch_candles = original_fetch
+
+# Mapped symbol, fetch error -> Sideways
+data_feed.fetch_candles = lambda *a, **kw: (_ for _ in ()).throw(Exception("API down"))
+try:
+    result = get_sector_trend(mock_kite, "HDFCBANK", cfg)
+    check("get_sector_trend fails safe to Sideways on fetch error for mapped symbol",
+          result == "Sideways")
+finally:
+    data_feed.fetch_candles = original_fetch
+
+print(f"\n{'='*50}")
+print(f"FINAL Results: {passed} passed, {failed} failed")
+print(f"{'='*50}")
 import sys
 sys.exit(1 if failed else 0)
