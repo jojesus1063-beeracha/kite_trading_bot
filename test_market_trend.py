@@ -54,5 +54,36 @@ check("NaN EMA (insufficient warm-up) returns Sideways, no crash",
 print(f"\n{'='*50}")
 print(f"Results: {passed} passed, {failed} failed")
 print(f"{'='*50}")
+
+# --- Tests for get_market_trend() (live-fetch wrapper, mocked) ---
+print("\n--- get_market_trend() Tests (mocked) ---")
+
+from unittest.mock import MagicMock
+import market_trend as market_trend_module
+
+mock_kite = MagicMock()
+
+# Case 1: fetch fails entirely -- should fail safe to Sideways, not raise
+market_trend_module.fetch_candles = None  # will be patched via data_feed import inside function
+import data_feed
+original_fetch = data_feed.fetch_candles
+data_feed.fetch_candles = lambda *a, **kw: (_ for _ in ()).throw(Exception("API down"))
+try:
+    result = market_trend_module.get_market_trend(mock_kite, cfg)
+    check("get_market_trend fails safe to Sideways on fetch error", result == "Sideways")
+finally:
+    data_feed.fetch_candles = original_fetch
+
+# Case 2: empty data returned -- should fail safe to Sideways
+data_feed.fetch_candles = lambda *a, **kw: pd.DataFrame()
+try:
+    result = market_trend_module.get_market_trend(mock_kite, cfg)
+    check("get_market_trend fails safe to Sideways on empty data", result == "Sideways")
+finally:
+    data_feed.fetch_candles = original_fetch
+
+print(f"\n{'='*50}")
+print(f"FINAL Results: {passed} passed, {failed} failed")
+print(f"{'='*50}")
 import sys
 sys.exit(1 if failed else 0)
