@@ -1035,10 +1035,15 @@ def index():
         extra = [s.strip().upper() for s in request.form.get("extra_symbols", "").split(",") if s.strip()]
         extra_exchange = request.form.get("extra_exchange", "NSE")
         extra_set = set(extra)
+        # Preserve each symbol's PREVIOUSLY-SAVED exchange for anything
+        # not freshly typed into extra_symbols this save -- otherwise
+        # every resave silently reverts existing BSE symbols to NSE.
+        _prior_watchlist = load_current().get("watchlist", [])
+        _prior_exchange_map = {w["symbol"]: w["exchange"] for w in _prior_watchlist}
         all_symbols = list(dict.fromkeys(selected + extra))
 
         watchlist = [
-            {"symbol": s, "exchange": extra_exchange if s in extra_set else request.form.get(f"exchange_{s}", "NSE")}
+            {"symbol": s, "exchange": extra_exchange if s in extra_set else _prior_exchange_map.get(s, "NSE")}
             for s in all_symbols
         ]
 
