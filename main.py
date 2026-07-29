@@ -22,6 +22,7 @@ from auth import get_kite_client
 from data_feed import get_instrument_token, fetch_candles
 from indicators import add_indicators, atr as atr_indicator
 from strategy import evaluate, latest_completed_15m_trend
+from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
 from risk_manager import RiskManager
 from executor import place_entry_order, place_exit_order, cap_quantity_by_margin
 from trade_log import record_trade, save_bot_status
@@ -62,6 +63,19 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
     symbols_to_check = list(dict.fromkeys(symbols + list(open_positions.keys())))
     status_this_cycle = []
 
+
+    # Step 4c: market/sector trend, fetched/cached ONCE per scan cycle.
+    nifty_fetches = 0
+    sector_fetches = 0
+    sector_cache_hits = 0
+    sector_cache = {}
+    try:
+        market_trend = get_market_trend(kite, cfg)
+        nifty_fetches = 1
+    except Exception as e:
+        logger.warning(f"Market trend fetch failed, using UNKNOWN: {e}")
+        market_trend = "UNKNOWN"
+
     for symbol in symbols_to_check:
         if symbol not in tokens:
             continue
@@ -95,6 +109,22 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
         signal = evaluate(symbol, df_15m, df_5m, cfg)
 
         if signal:
+            try:
+                sector = sector_for_symbol(symbol)
+                if sector is None:
+                    sector_trend = "Sideways"
+                elif sector in sector_cache:
+                    sector_trend = sector_cache[sector]
+                    sector_cache_hits += 1
+                else:
+                    sector_trend = get_sector_trend(kite, symbol, cfg)
+                    sector_cache[sector] = sector_trend
+                    sector_fetches += 1
+                signal.market_alignment = compute_market_alignment(signal.direction, market_trend, sector_trend)
+            except Exception as e:
+                logger.warning(f"Market alignment computation failed for {symbol}, using UNKNOWN: {e}")
+                signal.market_alignment = "UNKNOWN"
+
             qty = risk.position_size(signal.entry_price, signal.stop_loss)
             if qty > 0 and not cfg.PAPER_TRADING:
                 qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
@@ -113,17 +143,22 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 save_positions(open_positions)
                 logger.info(f"ENTRY {signal.direction} {exchange}:{symbol} qty={qty} "
                             f"entry={signal.entry_price:.2f} stop={signal.stop_loss:.2f} "
-                            f"target={signal.target:.2f} | {signal.reason}")
+                            f"target={signal.target:.2f} | {signal.reason} "
+                            f"[market_alignment: {signal.market_alignment}]")
                 status_this_cycle.append({
                     "symbol": symbol,
                     "status": f"ENTRY {signal.direction} @ {signal.entry_price:.2f}",
                     "confidence": signal.confidence,
+                    "market_alignment": signal.market_alignment,
                 })
             else:
                 status_this_cycle.append({"symbol": symbol, "status": "signal found, order failed"})
         else:
             status_this_cycle.append({"symbol": symbol, "status": "no signal"})
 
+    logger.info(f"Scan Summary\n------------\nNifty fetches: {nifty_fetches}\n"
+                f"Sector fetches: {sector_fetches}\nSector cache hits: {sector_cache_hits}\n"
+                f"Symbols scanned: {len(symbols_to_check)}\nMarket trend: {market_trend}")
     return status_this_cycle
 
 
