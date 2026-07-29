@@ -10,8 +10,13 @@ from datetime import datetime
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_history.jsonl")
 
 
-def record_trade(symbol, direction, qty, entry, exit_price, pnl, result, exchange="NSE"):
-    """result should be 'target', 'stop', or 'square_off'."""
+def record_trade(symbol, direction, qty, entry, exit_price, pnl, result, exchange="NSE",
+                  gross_pnl=None, costs=None):
+    """
+    pnl is the TRUE NET result (costs deducted) -- the authoritative
+    field kill-switch/dashboard/stats should use. gross_pnl/costs are
+    optional extra detail (default to pnl/0 for backward compat).
+    """
     record = {
         "date": datetime.now().strftime("%Y-%m-%d"),
         "time": datetime.now().strftime("%H:%M:%S"),
@@ -22,6 +27,8 @@ def record_trade(symbol, direction, qty, entry, exit_price, pnl, result, exchang
         "entry": entry,
         "exit": exit_price,
         "pnl": pnl,
+        "gross_pnl": gross_pnl if gross_pnl is not None else pnl,
+        "costs": costs if costs is not None else 0.0,
         "result": result,
     }
     with open(LOG_PATH, "a") as f:

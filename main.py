@@ -28,6 +28,7 @@ from signal_log import log_signal
 from risk_manager import RiskManager
 from executor import place_entry_order, place_exit_order, cap_quantity_by_margin
 from trade_log import record_trade, save_bot_status
+from costs import net_pnl_for_trade
 from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
 
@@ -278,8 +279,10 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         save_positions(open_positions)
 
     if hit_hard_stop or hit_trailing_stop or structure_broken or trend_reversed:
-        pnl_per_share = (last_price - pos["entry"]) if direction == "BUY" else (pos["entry"] - last_price)
-        pnl = pnl_per_share * pos["qty"]
+        cost_result = net_pnl_for_trade(direction, pos["qty"], pos["entry"], last_price)
+        gross_pnl = cost_result["gross_pnl"]
+        costs = cost_result["costs"]
+        pnl = cost_result["net_pnl"]  # TRUE NET -- used for kill-switch and logging
         if hit_hard_stop:
             result = "stop"
         elif hit_trailing_stop:
@@ -291,8 +294,8 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         place_exit_order(kite, symbol, direction, pos["qty"], exchange, cfg)
         risk.record_trade_result(pnl)
         record_trade(symbol, direction, pos["qty"], pos["entry"], last_price, pnl,
-                     result, exchange=exchange)
-        logger.info(f"Closed {exchange}:{symbol} ({result}) P&L={pnl:.2f}")
+                     result, exchange=exchange, gross_pnl=gross_pnl, costs=costs)
+        logger.info(f"Closed {exchange}:{symbol} ({result}) net P&L={pnl:.2f} (gross={gross_pnl:.2f}, costs={costs:.2f})")
         del open_positions[symbol]
         save_positions(open_positions)
         return f"CLOSED ({result}) @ {last_price:.2f} | P&L {pnl:+.2f}"
@@ -352,13 +355,15 @@ def run():
                 except Exception:
                     last_price = pos["entry"]
 
-                pnl_per_share = (last_price - pos["entry"]) if pos["direction"] == "BUY" else (pos["entry"] - last_price)
-                pnl = pnl_per_share * pos["qty"]
+                cost_result = net_pnl_for_trade(pos["direction"], pos["qty"], pos["entry"], last_price)
+                gross_pnl = cost_result["gross_pnl"]
+                costs = cost_result["costs"]
+                pnl = cost_result["net_pnl"]
                 place_exit_order(kite, symbol, pos["direction"], pos["qty"], exchange, cfg)
                 risk.record_trade_result(pnl)
                 record_trade(symbol, pos["direction"], pos["qty"], pos["entry"], last_price, pnl,
-                             "square_off", exchange=exchange)
-                logger.info(f"Force-closed {exchange}:{symbol} P&L={pnl:.2f}")
+                             "square_off", exchange=exchange, gross_pnl=gross_pnl, costs=costs)
+                logger.info(f"Force-closed {exchange}:{symbol} net P&L={pnl:.2f} (gross={gross_pnl:.2f}, costs={costs:.2f})")
                 del open_positions[symbol]
                 save_positions(open_positions)
             clear_positions()
