@@ -57,6 +57,16 @@ def get_trend(row_15m: pd.Series, cfg=None) -> Optional[str]:
     return None
 
 
+def latest_completed_15m_row(df_15m: pd.DataFrame, as_of: pd.Timestamp):
+    """Returns the exact row latest_completed_15m_trend() would use to
+    derive its decision -- lets callers log the RAW indicator snapshot
+    behind a trend/signal, not just the derived label, for auditability."""
+    completed = df_15m[df_15m["date"] <= as_of]
+    if completed.empty:
+        return None
+    return completed.iloc[-1]
+
+
 def latest_completed_15m_trend(df_15m: pd.DataFrame, as_of: pd.Timestamp, cfg=None) -> Optional[str]:
     """Trend as of the most recently completed 15-min candle at or before `as_of`."""
     completed = df_15m[df_15m["date"] <= as_of]

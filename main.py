@@ -21,7 +21,7 @@ import config as cfg
 from auth import get_kite_client
 from data_feed import get_instrument_token, fetch_candles
 from indicators import add_indicators, atr as atr_indicator
-from strategy import evaluate, latest_completed_15m_trend
+from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_row
 from patterns import is_bear_trap, is_bull_trap
 from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
 from signal_log import log_signal
@@ -111,6 +111,7 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
         signal = evaluate(symbol, df_15m, df_5m, cfg)
 
         if signal:
+            _snapshot_row = latest_completed_15m_row(df_15m, signal.timestamp)
             try:
                 sector = sector_for_symbol(symbol)
                 if sector is None:
@@ -159,6 +160,11 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
                     "entry_price": signal.entry_price, "direction": signal.direction, "executed": True,
                     "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
+                    "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
+                    "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
+                    "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
+                    "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
+                    "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
                 })
             else:
                 status_this_cycle.append({"symbol": symbol, "status": "signal found, order failed"})
@@ -169,6 +175,11 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
                     "rejection_reason": result["reason"],
                     "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
+                    "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
+                    "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
+                    "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
+                    "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
+                    "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
                 })
         else:
             status_this_cycle.append({"symbol": symbol, "status": "no signal"})
