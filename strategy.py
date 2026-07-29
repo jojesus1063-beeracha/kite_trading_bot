@@ -38,6 +38,7 @@ class Signal:
     timestamp: pd.Timestamp
     reason: str
     confidence: Optional[str] = None  # ADX dynamic-mode tier, or None if not applicable
+    market_alignment: Optional[str] = None  # market_trend.compute_market_alignment() result, or None if not set
 
 
 def get_trend(row_15m: pd.Series, cfg=None) -> Optional[str]:
