@@ -118,3 +118,34 @@ class RiskManager:
     def reset_for_new_day(self):
         self.day = DayState()
         _save_day_state(self.day)
+
+
+def circuit_proximity_pct(direction, last_price, lower_limit, upper_limit):
+    """
+    Distance (as %) from current price to the circuit limit that would
+    matter for this trade's exit: upper limit for BUY (can't sell into
+    a locked-up circuit going further up), lower limit for SELL
+    (downside exit liquidity dries up near the lower circuit).
+    Returns None if circuit data is missing/invalid.
+    """
+    if last_price is None or last_price <= 0:
+        return None
+    if direction == "BUY":
+        if upper_limit is None or upper_limit <= 0:
+            return None
+        return (upper_limit - last_price) / last_price * 100
+    else:
+        if lower_limit is None or lower_limit <= 0:
+            return None
+        return (last_price - lower_limit) / last_price * 100
+
+
+def is_near_circuit_limit(direction, last_price, lower_limit, upper_limit, threshold_pct):
+    """True if within `threshold_pct` of the relevant circuit limit --
+    fails safe to False (don't block) if circuit data is unavailable,
+    since blocking on missing data would be a worse failure mode than
+    proceeding without this specific check."""
+    distance = circuit_proximity_pct(direction, last_price, lower_limit, upper_limit)
+    if distance is None:
+        return False
+    return distance < threshold_pct

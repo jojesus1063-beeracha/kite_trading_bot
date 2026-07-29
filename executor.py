@@ -153,6 +153,21 @@ def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange
             logger.warning(f"Skipping order for {symbol} ({direction}): insufficient margin -- {reason}")
             return None
 
+    if getattr(cfg, "CIRCUIT_PROXIMITY_PCT", None) is not None:
+        from risk_manager import is_near_circuit_limit
+        try:
+            quote = kite.quote([f"{exchange}:{symbol}"])
+            q = quote.get(f"{exchange}:{symbol}", {})
+            last_price = q.get("last_price")
+            lower_limit = q.get("lower_circuit_limit")
+            upper_limit = q.get("upper_circuit_limit")
+            if is_near_circuit_limit(direction, last_price, lower_limit, upper_limit, cfg.CIRCUIT_PROXIMITY_PCT):
+                logger.warning(f"Skipping order for {symbol} ({direction}): within {cfg.CIRCUIT_PROXIMITY_PCT}% "
+                                f"of circuit limit (price={last_price}, lower={lower_limit}, upper={upper_limit})")
+                return None
+        except Exception as e:
+            logger.warning(f"Circuit-proximity check for {symbol} failed ({e}), proceeding without check")
+
     transaction_type = kite.TRANSACTION_TYPE_BUY if direction == "BUY" else kite.TRANSACTION_TYPE_SELL
     order_id = kite.place_order(
         variety=cfg.VARIETY,

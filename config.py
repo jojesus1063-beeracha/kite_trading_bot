@@ -91,6 +91,11 @@ SL_BUFFER_PCT_SELL = None  # if set, overrides SL_BUFFER_PCT for SELL trades onl
                             # fully backward compatible. Set wider for SELL to account
                             # for sharper short-squeeze risk vs typical long drawdowns.
 
+CIRCUIT_PROXIMITY_PCT = 2.0  # block entries within this % of the relevant
+                              # circuit limit (upper for BUY, lower for SELL) --
+                              # avoids trades that could get trapped by a
+                              # locked circuit with no exit liquidity
+
 # ---------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------
@@ -174,6 +179,7 @@ if os.path.exists(_USER_CONFIG_PATH):
     RISK_REWARD_MIN = _overrides.get("risk_reward_min", RISK_REWARD_MIN)
     SL_BUFFER_PCT = _overrides.get("sl_buffer_pct", SL_BUFFER_PCT)
     SL_BUFFER_PCT_SELL = _overrides.get("sl_buffer_pct_sell", SL_BUFFER_PCT_SELL)
+    CIRCUIT_PROXIMITY_PCT = _overrides.get("circuit_proximity_pct", CIRCUIT_PROXIMITY_PCT)
     MAX_TRADES_PER_DAY = _overrides.get("max_trades_per_day", MAX_TRADES_PER_DAY)
     MAX_OPEN_POSITIONS = _overrides.get("max_open_positions", MAX_OPEN_POSITIONS)
     MAX_POSITION_SIZE_PCT = _overrides.get("max_position_size_pct", MAX_POSITION_SIZE_PCT)
