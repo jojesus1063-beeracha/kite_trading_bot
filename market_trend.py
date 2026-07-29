@@ -60,7 +60,7 @@ def classify_trend(df_15m: pd.DataFrame, cfg=None) -> str:
     if df_15m is None or df_15m.empty:
         return "Sideways"
     latest = df_15m.iloc[-1]
-    trend = get_trend(latest, cfg)
+    trend = get_trend(latest, cfg, require_vwap=False)  # indices have no real volume, VWAP is always NaN
     return TREND_LABELS[trend]
 
 

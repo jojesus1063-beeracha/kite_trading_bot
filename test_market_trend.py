@@ -36,10 +36,30 @@ check("Clear downtrend classifies as Bearish", classify_trend(df_bearish, cfg) =
 df_sideways = make_row(close=25000, ema_fast=25010, ema_slow=25005, vwap=25050)
 check("Non-aligned EMAs classify as Sideways", classify_trend(df_sideways, cfg) == "Sideways")
 
-# Sideways: price above EMAs but below VWAP (mixed signal, no clean trend)
+# classify_trend() is instrument-aware: VWAP is intentionally NOT
+# required (indices have no real traded volume, so VWAP is always NaN
+# for them -- this is the real bug fixed today, see commit history).
+# EMA-up + price below VWAP now correctly classifies Bullish for
+# index-style trend detection.
 df_mixed = make_row(close=25060, ema_fast=25050, ema_slow=25000, vwap=25100)
-check("Mixed signal (EMA up, price below VWAP) classifies as Sideways",
-      classify_trend(df_mixed, cfg) == "Sideways")
+check("EMA-up classifies Bullish regardless of VWAP (index-style, VWAP not required)",
+      classify_trend(df_mixed, cfg) == "Bullish")
+
+# Explicitly verify STOCK-level get_trend() (require_vwap=True, the
+# default) is completely UNCHANGED -- still requires VWAP confirmation,
+# this exact same mixed case still returns None for stocks.
+from strategy import get_trend
+row_mixed = df_mixed.iloc[0]
+check("Stock-level get_trend() (require_vwap=True) still requires VWAP -- unaffected by the index fix",
+      get_trend(row_mixed, cfg) is None)
+
+# Verify the NaN-VWAP case that was the actual bug: EMA shows a clear
+# uptrend, VWAP is NaN (as it always is for indices) -- must classify
+# Bullish now, not silently fall through to Sideways.
+df_index_style = make_row(close=24264, ema_fast=24204, ema_slow=24125, vwap=None)
+df_index_style.loc[0, "vwap"] = float("nan")
+check("Index-style data (NaN VWAP, clear EMA uptrend) classifies Bullish -- the actual bug fix",
+      classify_trend(df_index_style, cfg) == "Bullish")
 
 # Empty DataFrame -- fail-safe, should not crash
 df_empty = pd.DataFrame()

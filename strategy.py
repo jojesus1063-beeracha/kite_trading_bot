@@ -41,8 +41,22 @@ class Signal:
     market_alignment: Optional[str] = None  # market_trend.compute_market_alignment() result, or None if not set
 
 
-def get_trend(row_15m: pd.Series, cfg=None) -> Optional[str]:
-    if pd.isna(row_15m["ema_slow"]) or pd.isna(row_15m["vwap"]):
+def get_trend(row_15m: pd.Series, cfg=None, require_vwap: bool = True) -> Optional[str]:
+    """
+    require_vwap=True (default): exact original behavior for stocks --
+    VWAP confirmation required, returns None if VWAP is NaN.
+
+    require_vwap=False: for instruments where VWAP is not meaningful
+    (indices like Nifty 50 / sector indices have no real traded volume,
+    so VWAP = cumulative(price*volume)/cumulative(volume) is always NaN
+    for them -- meaning get_trend() could previously NEVER classify an
+    index as UP/DOWN, always silently falling through to None/Sideways
+    regardless of real price action). When False, trend is determined
+    from EMA alignment alone, skipping the VWAP requirement entirely.
+    """
+    if pd.isna(row_15m["ema_slow"]):
+        return None
+    if require_vwap and pd.isna(row_15m["vwap"]):
         return None
 
     if cfg is not None and resolve_adx_mode(cfg) == "binary":
@@ -50,9 +64,12 @@ def get_trend(row_15m: pd.Series, cfg=None) -> Optional[str]:
         if pd.isna(adx_value) or adx_value < getattr(cfg, "ADX_THRESHOLD", 25):
             return None  # market isn't trending strongly enough right now
 
-    if row_15m["close"] > row_15m["ema_fast"] > row_15m["ema_slow"] and row_15m["close"] > row_15m["vwap"]:
+    vwap_up_ok = True if not require_vwap else (row_15m["close"] > row_15m["vwap"])
+    vwap_down_ok = True if not require_vwap else (row_15m["close"] < row_15m["vwap"])
+
+    if row_15m["close"] > row_15m["ema_fast"] > row_15m["ema_slow"] and vwap_up_ok:
         return "UP"
-    if row_15m["close"] < row_15m["ema_fast"] < row_15m["ema_slow"] and row_15m["close"] < row_15m["vwap"]:
+    if row_15m["close"] < row_15m["ema_fast"] < row_15m["ema_slow"] and vwap_down_ok:
         return "DOWN"
     return None
 
