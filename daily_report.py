@@ -39,9 +39,20 @@ def load_signals(iso_date):
 
 def match_trade_to_signal(trade, signals):
     """Best-effort match by symbol + entry price -- signal logging predates
-    a fully reliable join key, so this is approximate, not guaranteed exact."""
-    candidates = [s for s in signals if s["symbol"] == trade["symbol"]
-                  and abs(s.get("entry_price", -1e9) - trade["entry"]) < 0.5]
+    a fully reliable join key, so this is approximate, not guaranteed exact.
+    Defensively skips any signal whose entry_price isn'''t numeric (a real
+    stale-data artifact existed briefly before the json_safe fix, where a
+    numpy value got stringified instead of converted -- treat as no match
+    rather than crash)."""
+    candidates = []
+    for s in signals:
+        if s["symbol"] != trade["symbol"]:
+            continue
+        ep = s.get("entry_price", -1e9)
+        if not isinstance(ep, (int, float)):
+            continue
+        if abs(ep - trade["entry"]) < 0.5:
+            candidates.append(s)
     return candidates[0] if candidates else None
 
 

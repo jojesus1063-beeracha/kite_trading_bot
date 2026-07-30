@@ -27,6 +27,14 @@ cfg.ENABLE_FIXED_TARGET = True
 cfg.PROFIT_TARGET_PERCENT = 1.5
 mock_kite = MagicMock()
 
+# CRITICAL: mock every function that writes to real production files --
+# record_trade()/save_positions() write to the actual trade_history.jsonl
+# and open_positions.json on disk, not a sandbox. An earlier run of this
+# file polluted both real files with fake TEST/TEST2/TEST4 data before
+# this was added -- never call the real ones in a test.
+main_module.record_trade = lambda *a, **kw: None
+main_module.save_positions = lambda *a, **kw: None
+
 # --- BUY exits exactly at +1.5% ---
 entry = 1000.0
 target = entry * 1.015  # 1015.0

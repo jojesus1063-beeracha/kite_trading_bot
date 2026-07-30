@@ -236,6 +236,8 @@ if os.path.exists(_USER_CONFIG_PATH):
     SUPPORT_RESISTANCE_LOOKBACK = _overrides.get("support_resistance_lookback", SUPPORT_RESISTANCE_LOOKBACK)
     MIN_DISTANCE_TO_SR_PERCENT = _overrides.get("min_distance_to_sr_percent", MIN_DISTANCE_TO_SR_PERCENT)
     PROFIT_TARGET_PERCENT = _overrides.get("profit_target_percent", PROFIT_TARGET_PERCENT)
+    NO_ENTRY_BEFORE = _overrides.get("no_entry_before", NO_ENTRY_BEFORE)
+    NO_ENTRY_AFTER = _overrides.get("no_entry_after", NO_ENTRY_AFTER)
     ENABLE_FIXED_TARGET = _overrides.get("enable_fixed_target", ENABLE_FIXED_TARGET)
     ENABLE_TRAILING_STOP = _overrides.get("enable_trailing_stop", ENABLE_TRAILING_STOP)
     EXIT_IMMEDIATELY_AT_TARGET = _overrides.get("exit_immediately_at_target", EXIT_IMMEDIATELY_AT_TARGET)
