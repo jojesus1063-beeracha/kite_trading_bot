@@ -571,6 +571,10 @@ FORM_PAGE = BASE_STYLE + """
             <label>ADX threshold (trend-strength filter)</label>
             <input type="number" name="adx_threshold" value="{{ adx_threshold }}">
           </div>
+          <div>
+            <label>Fixed profit target (%)</label>
+            <input type="number" step="0.1" name="profit_target_percent" value="{{ profit_target_percent }}">
+          </div>
         </div>
 
         <div class="checkbox-row">
@@ -580,6 +584,12 @@ FORM_PAGE = BASE_STYLE + """
           </label>
         </div>
 
+        <div class="checkbox-row">
+          <input type="checkbox" name="enable_fixed_target" id="enable_fixed_target" {{ 'checked' if enable_fixed_target else '' }}>
+          <label for="enable_fixed_target" style="margin:0;">
+            Fixed profit target mode (exits at the target % above instead of trailing — bypasses trailing stop, structure break, and trend reversal while on)
+          </label>
+        </div>
         <div class="checkbox-row">
           <input type="checkbox" name="paper_trading" id="paper_trading" {{ 'checked' if paper_trading else '' }}>
           <label for="paper_trading" style="margin:0;">Paper trading (simulate only — uncheck ONLY when ready to risk real money)</label>
@@ -839,6 +849,8 @@ def load_current():
         "paper_trading": saved.get("paper_trading", cfg.PAPER_TRADING),
         "use_adx_filter": saved.get("use_adx_filter", cfg.USE_ADX_FILTER),
         "adx_threshold": saved.get("adx_threshold", cfg.ADX_THRESHOLD),
+        "profit_target_percent": saved.get("profit_target_percent", cfg.PROFIT_TARGET_PERCENT),
+        "enable_fixed_target": saved.get("enable_fixed_target", cfg.ENABLE_FIXED_TARGET),
     }
 
 
@@ -1073,6 +1085,8 @@ def index():
             "paper_trading": "paper_trading" in request.form,
             "use_adx_filter": "use_adx_filter" in request.form,
             "adx_threshold": float(request.form["adx_threshold"]),
+            "profit_target_percent": float(request.form["profit_target_percent"]),
+            "enable_fixed_target": "enable_fixed_target" in request.form,
         })
         with open(USER_CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
