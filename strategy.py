@@ -42,6 +42,8 @@ class Signal:
     news_sentiment: Optional[str] = None  # POSITIVE/NEGATIVE/NEUTRAL/UNKNOWN from news_filter.py, or None if not set
     news_headline: Optional[str] = None
     news_confidence_score: Optional[float] = None  # numeric 0-100, technical base + news modifier
+    price_action_score: Optional[float] = None
+    price_action_detail: Optional[dict] = None
 
 
 def get_trend(row_15m: pd.Series, cfg=None, require_vwap: bool = True) -> Optional[str]:

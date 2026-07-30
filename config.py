@@ -111,6 +111,19 @@ NEGATIVE_NEWS_BLOCK = True
 POSITIVE_NEWS_CONFIDENCE_BONUS = 5
 NEGATIVE_NEWS_CONFIDENCE_PENALTY = 25
 
+ENABLE_PRICE_ACTION = False  # additional confirmation layer, pure confidence
+                              # modifier -- never independently rejects a trade
+USE_MARKET_STRUCTURE = True
+USE_SUPPORT_RESISTANCE = True
+USE_BREAKOUT_CONFIRMATION = True
+USE_PULLBACK_ENTRY = True
+USE_REJECTION_CANDLES = True
+USE_RANGE_FILTER = True
+USE_BOS = True
+USE_CHOCH = True
+SUPPORT_RESISTANCE_LOOKBACK = 30
+MIN_DISTANCE_TO_SR_PERCENT = 0.5
+
 # ---------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------
@@ -203,6 +216,17 @@ if os.path.exists(_USER_CONFIG_PATH):
     NEGATIVE_NEWS_BLOCK = _overrides.get("negative_news_block", NEGATIVE_NEWS_BLOCK)
     POSITIVE_NEWS_CONFIDENCE_BONUS = _overrides.get("positive_news_confidence_bonus", POSITIVE_NEWS_CONFIDENCE_BONUS)
     NEGATIVE_NEWS_CONFIDENCE_PENALTY = _overrides.get("negative_news_confidence_penalty", NEGATIVE_NEWS_CONFIDENCE_PENALTY)
+    ENABLE_PRICE_ACTION = _overrides.get("enable_price_action", ENABLE_PRICE_ACTION)
+    USE_MARKET_STRUCTURE = _overrides.get("use_market_structure", USE_MARKET_STRUCTURE)
+    USE_SUPPORT_RESISTANCE = _overrides.get("use_support_resistance", USE_SUPPORT_RESISTANCE)
+    USE_BREAKOUT_CONFIRMATION = _overrides.get("use_breakout_confirmation", USE_BREAKOUT_CONFIRMATION)
+    USE_PULLBACK_ENTRY = _overrides.get("use_pullback_entry", USE_PULLBACK_ENTRY)
+    USE_REJECTION_CANDLES = _overrides.get("use_rejection_candles", USE_REJECTION_CANDLES)
+    USE_RANGE_FILTER = _overrides.get("use_range_filter", USE_RANGE_FILTER)
+    USE_BOS = _overrides.get("use_bos", USE_BOS)
+    USE_CHOCH = _overrides.get("use_choch", USE_CHOCH)
+    SUPPORT_RESISTANCE_LOOKBACK = _overrides.get("support_resistance_lookback", SUPPORT_RESISTANCE_LOOKBACK)
+    MIN_DISTANCE_TO_SR_PERCENT = _overrides.get("min_distance_to_sr_percent", MIN_DISTANCE_TO_SR_PERCENT)
     MAX_TRADES_PER_DAY = _overrides.get("max_trades_per_day", MAX_TRADES_PER_DAY)
     MAX_OPEN_POSITIONS = _overrides.get("max_open_positions", MAX_OPEN_POSITIONS)
     MAX_POSITION_SIZE_PCT = _overrides.get("max_position_size_pct", MAX_POSITION_SIZE_PCT)

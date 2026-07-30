@@ -24,6 +24,7 @@ from indicators import add_indicators, atr as atr_indicator
 from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_row
 from patterns import is_bear_trap, is_bull_trap
 from news_filter import evaluate_news, get_news_confidence
+from price_action import evaluate_price_action
 from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
 from signal_log import log_signal
 from risk_manager import RiskManager
@@ -143,6 +144,10 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             # should proceed. Confidence tier mapped to a numeric base score.
             _CONF_TO_SCORE = {"REJECTED": 0, "MEDIUM": 50, "HIGH": 75, "VERY_STRONG": 90}
             _base_score = _CONF_TO_SCORE.get(signal.confidence, 70)
+            pa_score, pa_detail = evaluate_price_action(df_5m, signal.direction, cfg)
+            _base_score += pa_score
+            signal.price_action_score = pa_score
+            signal.price_action_detail = pa_detail
             if getattr(cfg, "ENABLE_NEWS_FILTER", False):
                 try:
                     company_name = get_company_name(kite, symbol, exchange)
@@ -169,6 +174,14 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                         "rejection_reason": news_reason,
                         "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
                         "news_confidence_score": signal.news_confidence_score,
+                        "price_action_score": signal.price_action_score,
+                        "market_structure": (signal.price_action_detail or {}).get("market_structure"),
+                        "support": (signal.price_action_detail or {}).get("support"),
+                        "resistance": (signal.price_action_detail or {}).get("resistance"),
+                        "breakout": (signal.price_action_detail or {}).get("breakout"),
+                        "pullback": (signal.price_action_detail or {}).get("pullback"),
+                        "bos": (signal.price_action_detail or {}).get("bos"),
+                        "choch": (signal.price_action_detail or {}).get("choch"),
                     })
                     continue
 
@@ -212,6 +225,14 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
                     "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
                     "news_confidence_score": signal.news_confidence_score,
+                    "price_action_score": signal.price_action_score,
+                    "market_structure": (signal.price_action_detail or {}).get("market_structure"),
+                    "support": (signal.price_action_detail or {}).get("support"),
+                    "resistance": (signal.price_action_detail or {}).get("resistance"),
+                    "breakout": (signal.price_action_detail or {}).get("breakout"),
+                    "pullback": (signal.price_action_detail or {}).get("pullback"),
+                    "bos": (signal.price_action_detail or {}).get("bos"),
+                    "choch": (signal.price_action_detail or {}).get("choch"),
                 })
             else:
                 status_this_cycle.append({"symbol": symbol, "status": "signal found, order failed"})
@@ -229,6 +250,14 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
                     "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
                     "news_confidence_score": signal.news_confidence_score,
+                    "price_action_score": signal.price_action_score,
+                    "market_structure": (signal.price_action_detail or {}).get("market_structure"),
+                    "support": (signal.price_action_detail or {}).get("support"),
+                    "resistance": (signal.price_action_detail or {}).get("resistance"),
+                    "breakout": (signal.price_action_detail or {}).get("breakout"),
+                    "pullback": (signal.price_action_detail or {}).get("pullback"),
+                    "bos": (signal.price_action_detail or {}).get("bos"),
+                    "choch": (signal.price_action_detail or {}).get("choch"),
                 })
         else:
             status_this_cycle.append({"symbol": symbol, "status": "no signal"})
