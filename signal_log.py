@@ -1,4 +1,5 @@
 import json
+from json_safe import json_safe
 import os
 from datetime import date
 
@@ -11,7 +12,7 @@ def log_signal(record):
     try:
         os.makedirs(SIGNAL_LOG_DIR, exist_ok=True)
         with open(_log_path_for_today(), "a") as f:
-            f.write(json.dumps(record, default=str) + "\n")
+            f.write(json.dumps(json_safe(record), default=str) + "\n")
         return True
     except Exception:
         return False

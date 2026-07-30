@@ -4,6 +4,7 @@ each closed trade) and configure_app.py (reads it for the dashboard).
 """
 
 import json
+from json_safe import json_safe
 import os
 from datetime import datetime
 
@@ -32,7 +33,7 @@ def record_trade(symbol, direction, qty, entry, exit_price, pnl, result, exchang
         "result": result,
     }
     with open(LOG_PATH, "a") as f:
-        f.write(json.dumps(record) + "\n")
+        f.write(json.dumps(json_safe(record)) + "\n")
 
 
 def get_trade_history(limit=100):
