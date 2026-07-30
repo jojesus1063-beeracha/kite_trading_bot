@@ -6,6 +6,8 @@ Run: python3 test_exit_stack.py
 from unittest.mock import MagicMock
 import pandas as pd
 import config as cfg
+
+cfg.ENABLE_FIXED_TARGET = False  # this file specifically tests the ORIGINAL exit-stack (trailing stop, structure break, trend reversal) -- explicitly opt out of fixed-target mode so those tests keep verifying the pre-existing behavior, per the requirement that it must remain unchanged in normal mode
 from risk_manager import RiskManager
 from main import check_position_exit, _market_structure_broken
 

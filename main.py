@@ -191,15 +191,26 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
             result = place_entry_order(kite, symbol, signal.direction, qty, exchange, cfg)
             if result["success"]:
+                target_price = signal.target
+                if getattr(cfg, "ENABLE_FIXED_TARGET", False):
+                    try:
+                        pct = getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5) / 100
+                        target_price = (signal.entry_price * (1 + pct) if signal.direction == "BUY"
+                                        else signal.entry_price * (1 - pct))
+                    except Exception as e:
+                        logger.warning(f"{symbol}: fixed target calculation failed, "
+                                        f"using strategy-computed target instead: {e}")
+                        target_price = signal.target
                 open_positions[symbol] = {
                     "direction": signal.direction,
                     "qty": qty,
                     "entry": signal.entry_price,
                     "stop": signal.stop_loss,
-                    "target": signal.target,
+                    "target": target_price,
                     "exchange": exchange,
                     "peak_price": signal.entry_price,
                     "tight_mode": False,
+                    "entry_time": str(signal.timestamp),
                 }
                 save_positions(open_positions)
                 logger.info(f"ENTRY {signal.direction} {exchange}:{symbol} qty={qty} "
@@ -323,39 +334,54 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         return f"position open | {pos['direction']} entry {pos['entry']:.2f} (current price unavailable)"
     last_price = df_5m.iloc[-1]["close"]
     direction = pos["direction"]
-
     hit_hard_stop = (last_price <= pos["stop"]) if direction == "BUY" else (last_price >= pos["stop"])
 
-    atr_series = atr_indicator(df_5m, 14)
-    current_atr = atr_series.iloc[-1] if not atr_series.empty else None
-    tight_mode = pos.get("tight_mode", False)
-    multiplier = 1.2 if tight_mode else 2.5
-
     hit_trailing_stop = False
-    if current_atr is None or pd.isna(current_atr):
-        logger.info(f"{symbol}: ATR trailing stop inactive (warming up, needs 14 candles of "
-                    f"history) -- protected only by hard stop-loss and structure-break checks")
-    else:
-        if direction == "BUY":
-            pos["peak_price"] = max(pos.get("peak_price", pos["entry"]), last_price)
-            trailing_stop = pos["peak_price"] - current_atr * multiplier
-            hit_trailing_stop = last_price <= trailing_stop
-        else:
-            pos["peak_price"] = min(pos.get("peak_price", pos["entry"]), last_price)
-            trailing_stop = pos["peak_price"] + current_atr * multiplier
-            hit_trailing_stop = last_price >= trailing_stop
-        save_positions(open_positions)
-
-    structure_broken = _market_structure_broken(df_5m, direction)
-
+    structure_broken = False
     trend_reversed = False
-    if check_trend and not (hit_hard_stop or hit_trailing_stop or structure_broken):
-        trend_reversed, current_adx = _trend_reversed(kite, symbol, token, direction)
-        pos["tight_mode"] = (current_adx is not None and not pd.isna(current_adx)
-                              and current_adx < getattr(cfg, "ADX_THRESHOLD", 25))
-        save_positions(open_positions)
+    hit_target = False
 
-    if hit_hard_stop or hit_trailing_stop or structure_broken or trend_reversed:
+    if getattr(cfg, "ENABLE_FIXED_TARGET", False):
+        # Pure Fixed Target Mode: ONLY hard stop-loss + fixed target are
+        # checked. ATR trailing stop, market structure break, and 15m
+        # trend reversal are intentionally bypassed entirely -- by
+        # explicit design choice, temporary pullbacks and higher-
+        # timeframe trend changes must NOT close the trade early.
+        target_price = pos.get("target")
+        try:
+            if target_price is not None:
+                hit_target = (last_price >= target_price) if direction == "BUY" else (last_price <= target_price)
+        except Exception as e:
+            logger.warning(f"{symbol}: fixed target check failed, falling back to stop-loss only: {e}")
+            hit_target = False
+    else:
+        # ORIGINAL exit-stack logic, completely unchanged from before
+        # fixed-target mode existed.
+        atr_series = atr_indicator(df_5m, 14)
+        current_atr = atr_series.iloc[-1] if not atr_series.empty else None
+        tight_mode = pos.get("tight_mode", False)
+        multiplier = 1.2 if tight_mode else 2.5
+        if current_atr is None or pd.isna(current_atr):
+            logger.info(f"{symbol}: ATR trailing stop inactive (warming up, needs 14 candles of "
+                        f"history) -- protected only by hard stop-loss and structure-break checks")
+        else:
+            if direction == "BUY":
+                pos["peak_price"] = max(pos.get("peak_price", pos["entry"]), last_price)
+                trailing_stop = pos["peak_price"] - current_atr * multiplier
+                hit_trailing_stop = last_price <= trailing_stop
+            else:
+                pos["peak_price"] = min(pos.get("peak_price", pos["entry"]), last_price)
+                trailing_stop = pos["peak_price"] + current_atr * multiplier
+                hit_trailing_stop = last_price >= trailing_stop
+            save_positions(open_positions)
+        structure_broken = _market_structure_broken(df_5m, direction)
+        if check_trend and not (hit_hard_stop or hit_trailing_stop or structure_broken):
+            trend_reversed, current_adx = _trend_reversed(kite, symbol, token, direction)
+            pos["tight_mode"] = (current_adx is not None and not pd.isna(current_adx)
+                                  and current_adx < getattr(cfg, "ADX_THRESHOLD", 25))
+            save_positions(open_positions)
+
+    if hit_hard_stop or hit_trailing_stop or structure_broken or trend_reversed or hit_target:
         cost_result = net_pnl_for_trade(direction, pos["qty"], pos["entry"], last_price)
         gross_pnl = cost_result["gross_pnl"]
         costs = cost_result["costs"]
@@ -366,13 +392,31 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             result = "trailing_stop"
         elif structure_broken:
             result = "structure_break"
+        elif hit_target:
+            result = "fixed_target"
         else:
             result = "trend_reversal"
+
+        gross_pct = ((last_price - pos["entry"]) / pos["entry"] * 100 if direction == "BUY"
+                     else (pos["entry"] - last_price) / pos["entry"] * 100)
+        net_pct = (pnl / (pos["entry"] * pos["qty"]) * 100) if pos["entry"] and pos["qty"] else None
+        time_in_trade_str = "N/A"
+        try:
+            if pos.get("entry_time"):
+                entry_dt = pd.to_datetime(pos["entry_time"])
+                exit_dt = pd.Timestamp.now(tz=entry_dt.tz) if entry_dt.tz is not None else pd.Timestamp.now()
+                minutes = (exit_dt - entry_dt).total_seconds() / 60
+                time_in_trade_str = f"{minutes:.0f} minutes"
+        except Exception:
+            pass
+
         place_exit_order(kite, symbol, direction, pos["qty"], exchange, cfg)
         risk.record_trade_result(pnl)
         record_trade(symbol, direction, pos["qty"], pos["entry"], last_price, pnl,
                      result, exchange=exchange, gross_pnl=gross_pnl, costs=costs)
-        logger.info(f"Closed {exchange}:{symbol} ({result}) net P&L={pnl:.2f} (gross={gross_pnl:.2f}, costs={costs:.2f})")
+        logger.info(f"Closed {exchange}:{symbol} ({result}) net P&L={pnl:.2f} (gross={gross_pnl:.2f}, "
+                    f"costs={costs:.2f}) | target={pos.get('target')} | gross_pct={gross_pct:+.2f}% | "
+                    f"net_pct={net_pct:+.2f}% | time_in_trade={time_in_trade_str}")
         del open_positions[symbol]
         save_positions(open_positions)
         return f"CLOSED ({result}) @ {last_price:.2f} | P&L {pnl:+.2f}"
