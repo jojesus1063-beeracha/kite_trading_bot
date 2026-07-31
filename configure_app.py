@@ -1036,6 +1036,34 @@ def backtest_comparison():
     return redirect("/")
 
 
+from monitor_route import MONITOR_PAGE
+from trade_log import load_bot_status
+
+
+@app.route("/monitor")
+def monitor():
+    if not require_login():
+        return redirect("/login")
+    status = load_bot_status() or {}
+    session_data = status.get("session_summary", {})
+    pf = session_data.get("profit_factor")
+    if pf is None:
+        pf_display = "N/A"
+    elif pf == float("inf"):
+        pf_display = "inf"
+    else:
+        pf_display = f"{pf:.2f}"
+    return render_template_string(
+        MONITOR_PAGE,
+        updated=status.get("updated", "N/A"),
+        positions=status.get("positions", []),
+        portfolio=status.get("portfolio_summary", {}),
+        session=session_data,
+        health=status.get("health", {}),
+        profit_factor_display=pf_display,
+    )
+
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     if not require_login():
