@@ -455,6 +455,40 @@ def run():
     logger.info(f"Starting {'PAPER' if cfg.PAPER_TRADING else 'LIVE'} trading on "
                 f"{[(s, exchange_map[s]) for s in symbols]}")
 
+    # --- Startup health check ---
+    # Real incident this addresses: the systemd-scheduled run on
+    # 2026-07-31 started with an empty watchlist (user_config.json's
+    # watchlist field happened to be empty at that exact moment) and
+    # silently scanned 0 symbols for the entire session without any
+    # clear error -- looked "running" but did nothing. Fail loudly and
+    # exit instead of running all day doing nothing.
+    try:
+        auth_ok = bool(kite.margins())
+    except Exception as e:
+        auth_ok = False
+        logger.error(f"STARTUP HEALTH CHECK: Kite authentication check failed: {e}")
+
+    logger.info(
+        "STARTUP HEALTH CHECK | "
+        f"watchlist_size={len(cfg.WATCHLIST)} | "
+        f"symbols_loaded={len(symbols)} | "
+        f"mode={'PAPER' if cfg.PAPER_TRADING else 'LIVE'} | "
+        f"candle_aligned_polling={cfg.ENABLE_CANDLE_ALIGNED_POLLING} | "
+        f"market_alignment_filter={getattr(cfg, 'ENABLE_MARKET_ALIGNMENT_FILTER', False)} | "
+        f"auth_ok={auth_ok}"
+    )
+
+    if len(symbols) == 0:
+        logger.error("STARTUP HEALTH CHECK FAILED: watchlist is empty (0 symbols loaded). "
+                      "Refusing to start a session that would silently scan nothing all day. "
+                      "Check user_config.json's watchlist and restart.")
+        return
+
+    if not auth_ok:
+        logger.error("STARTUP HEALTH CHECK FAILED: Kite authentication is not working. "
+                      "Refusing to start. Re-run auth.py and restart.")
+        return
+
     if cfg.ENABLE_CANDLE_ALIGNED_POLLING:
         logger.info(f"Candle-aligned polling ENABLED | entry timeframe: {cfg.ENTRY_TIMEFRAME} | "
                     f"position check every {cfg.POSITION_CHECK_SECONDS}s | "
