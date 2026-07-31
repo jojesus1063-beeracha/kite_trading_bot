@@ -524,7 +524,7 @@ def run():
                                    f"(threshold {cfg.POSITION_CHECK_WARNING_SECONDS}s)")
 
                 remaining = max(0, (target_scan_time - datetime.now()).total_seconds())
-                logger.info(f"Position check: {len(open_positions)} open "
+                logger.info(f"Position monitor cycle | {len(open_positions)} open "
                             f"({', '.join(open_positions.keys())}) | next scan in {remaining:.0f}s")
             else:
                 logger.info("No open positions.")
@@ -550,7 +550,7 @@ def run():
                 logger.warning(f"Full scan starting {scan_delay:.0f}s late "
                                f"(threshold {cfg.SCAN_DELAY_WARNING_SECONDS}s)")
 
-            logger.info(f"Full scan starting | last completed candle: {current_candle.strftime('%H:%M')}")
+            logger.info(f"Entry scan starting (5-minute candle) | last completed candle: {current_candle.strftime('%H:%M')}")
             scan_start = time.time()
             status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk)
             scan_elapsed = time.time() - scan_start
@@ -566,7 +566,7 @@ def run():
                                f"(threshold {cfg.SCHEDULER_WARNING_SCAN_SECONDS}s)")
 
             next_target = next_scan_time(datetime.now(), interval_min, cfg.SCAN_BUFFER_SECONDS)
-            logger.info(f"Full scan complete | took {scan_elapsed:.1f}s | next scan: {next_target.strftime('%H:%M:%S')}")
+            logger.info(f"Entry scan completed (5-minute candle) | took {scan_elapsed:.1f}s | next scan: {next_target.strftime('%H:%M:%S')}")
         else:
             logger.info(f"Skipped duplicate scan for candle {current_candle.strftime('%H:%M')}")
 
