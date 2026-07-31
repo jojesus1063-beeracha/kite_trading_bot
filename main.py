@@ -29,7 +29,9 @@ from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, 
 from signal_log import log_signal
 from risk_manager import RiskManager
 from executor import place_entry_order, place_exit_order, cap_quantity_by_margin
-from trade_log import record_trade, save_bot_status
+from trade_log import record_trade, save_bot_status, load_bot_status
+from position_analytics import build_full_analytics_snapshot
+from daily_report import load_trades as load_todays_trades
 from costs import net_pnl_for_trade
 from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
@@ -428,6 +430,7 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
 
 
 def run():
+    start_time = time.time()
     kite = get_kite_client()
     risk = RiskManager(cfg)
 
@@ -528,7 +531,17 @@ def run():
         if not cfg.ENABLE_CANDLE_ALIGNED_POLLING:
             # --- ORIGINAL BEHAVIOR, byte-for-byte unchanged ---
             status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk)
-            save_bot_status(status_this_cycle)
+            try:
+                todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
+                prev_status = load_bot_status()
+                pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
+                    kite, cfg, open_positions, symbols, start_time,
+                    previous_bot_status=prev_status, todays_trades=todays_trades)
+                save_bot_status(status_this_cycle, positions=pos_analytics,
+                                portfolio_summary=portfolio_sum, session_summary=session_sum, health=health)
+            except Exception as e:
+                logger.warning(f"Analytics snapshot failed this cycle, saving basic status only: {e}")
+                save_bot_status(status_this_cycle)
 
             if risk.day.halted:
                 logger.warning(f"Trading halted (no new entries, still managing open positions): {risk.day.halt_reason}")
@@ -563,6 +576,17 @@ def run():
             else:
                 logger.info("No open positions.")
 
+            try:
+                todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
+                prev_status = load_bot_status()
+                pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
+                    kite, cfg, open_positions, symbols, start_time,
+                    previous_bot_status=prev_status, todays_trades=todays_trades)
+                save_bot_status([], positions=pos_analytics, portfolio_summary=portfolio_sum,
+                                session_summary=session_sum, health=health)
+            except Exception as e:
+                logger.warning(f"Analytics snapshot failed this position-monitor cycle: {e}")
+
             sleep_for = min(cfg.POSITION_CHECK_SECONDS,
                              max(0, (target_scan_time - datetime.now()).total_seconds()))
             if sleep_for > 0:
@@ -588,7 +612,17 @@ def run():
             scan_start = time.time()
             status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk)
             scan_elapsed = time.time() - scan_start
-            save_bot_status(status_this_cycle)
+            try:
+                todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
+                prev_status = load_bot_status()
+                pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
+                    kite, cfg, open_positions, symbols, start_time,
+                    previous_bot_status=prev_status, todays_trades=todays_trades)
+                save_bot_status(status_this_cycle, positions=pos_analytics,
+                                portfolio_summary=portfolio_sum, session_summary=session_sum, health=health)
+            except Exception as e:
+                logger.warning(f"Analytics snapshot failed this cycle, saving basic status only: {e}")
+                save_bot_status(status_this_cycle)
             scan_guard.mark_scanned(current_candle)
 
             if scan_elapsed > cfg.SCHEDULER_CRITICAL_SCAN_SECONDS:

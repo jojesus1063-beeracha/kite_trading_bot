@@ -59,13 +59,30 @@ def get_today_summary():
 
 STATUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_status.json")
 
-def save_bot_status(status_list):
+def save_bot_status(status_list, positions=None, portfolio_summary=None,
+                    session_summary=None, health=None):
+    """
+    Backward-compatible: existing callers passing only status_list are
+    completely unaffected. New optional params add the expanded
+    institutional-dashboard data (per-position analytics, portfolio/
+    session aggregation, health check) as additional top-level keys --
+    analytics-only, never read by any trading-decision code.
+    """
+    from json_safe import json_safe
     data = {
         "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "symbols": status_list,
     }
+    if positions is not None:
+        data["positions"] = positions
+    if portfolio_summary is not None:
+        data["portfolio_summary"] = portfolio_summary
+    if session_summary is not None:
+        data["session_summary"] = session_summary
+    if health is not None:
+        data["health"] = health
     with open(STATUS_PATH, "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump(json_safe(data), f, indent=2, default=str)
 
 def load_bot_status():
     if not os.path.exists(STATUS_PATH):
