@@ -1,0 +1,416 @@
+"""
+Analytics-only layer for live position monitoring. Never generates
+signals, never touches entry/exit decisions, never writes to
+open_positions.json's trading-critical fields (entry/stop/target/qty/
+direction) -- only reads them. Adds two new, purely informational
+fields to each position dict (mfe_pct, mae_pct) for continuous
+excursion tracking; everything else is written to bot_status.json,
+a reporting file, not a trading-state file.
+"""
+import time
+import logging
+
+logger = logging.getLogger("position_analytics")
+
+
+def compute_gross_pnl(direction, entry, current, qty):
+    if direction == "BUY":
+        return (current - entry) * qty
+    else:
+        return (entry - current) * qty
+
+
+def compute_profit_pct(direction, entry, current):
+    if entry == 0:
+        return 0.0
+    if direction == "BUY":
+        return (current - entry) / entry * 100
+    else:
+        return (entry - current) / entry * 100
+
+
+def compute_distances(direction, current, stop, target):
+    """Returns dict with distance to stop/target in both INR and %,
+    always non-negative in the 'still open' sense (distance remaining)."""
+    if direction == "BUY":
+        dist_stop_inr = current - stop
+        dist_target_inr = target - current
+    else:
+        dist_stop_inr = stop - current
+        dist_target_inr = current - target
+
+    dist_stop_pct = (dist_stop_inr / current * 100) if current else 0.0
+    dist_target_pct = (dist_target_inr / current * 100) if current else 0.0
+
+    return {
+        "distance_to_stop_inr": dist_stop_inr, "distance_to_stop_pct": dist_stop_pct,
+        "distance_to_target_inr": dist_target_inr, "distance_to_target_pct": dist_target_pct,
+    }
+
+
+def compute_reward_risk(direction, entry, current, stop, target):
+    """Reward/risk remaining FROM THE CURRENT PRICE (not from entry) --
+    this is 'what's left to gain vs. what's left to lose from here',
+    which is what a live monitor should show, distinct from the
+    original entry-time reward:risk ratio."""
+    if direction == "BUY":
+        reward_remaining = target - current
+        risk_remaining = current - stop
+    else:
+        reward_remaining = current - target
+        risk_remaining = stop - current
+
+    reward_risk = (reward_remaining / risk_remaining) if risk_remaining > 0 else None
+    return {
+        "reward_remaining": reward_remaining, "risk_remaining": risk_remaining,
+        "reward_risk": reward_risk,
+    }
+
+
+def compute_spread(bid, ask):
+    if bid is None or ask is None or bid <= 0:
+        return {"spread": None, "spread_pct": None}
+    spread = ask - bid
+    spread_pct = (spread / bid * 100) if bid else None
+    return {"spread": spread, "spread_pct": spread_pct}
+
+
+def update_mfe_mae(position, current_profit_pct):
+    """
+    Mutates position IN PLACE, adding/updating mfe_pct and mae_pct --
+    the best and worst profit % ever seen since entry. These are NEW
+    fields, purely informational, never read by any exit-decision
+    code. Returns the updated (mfe_pct, mae_pct).
+    """
+    mfe = position.get("mfe_pct", current_profit_pct)
+    mae = position.get("mae_pct", current_profit_pct)
+    mfe = max(mfe, current_profit_pct)
+    mae = min(mae, current_profit_pct)
+    position["mfe_pct"] = mfe
+    position["mae_pct"] = mae
+    return mfe, mae
+
+
+def classify_status(direction, current, stop, target, near_pct=0.25,
+                     quote_age_seconds=None, stale_threshold=60):
+    """
+    Returns one of: PRICE_STALE, TARGET_HIT (Pending Exit),
+    STOP_HIT (Pending Exit), NEAR_TARGET, NEAR_STOP, ACTIVE.
+    Stale check takes priority -- a stale quote makes every other
+    classification unreliable.
+    """
+    if quote_age_seconds is not None and quote_age_seconds > stale_threshold:
+        return "PRICE_STALE"
+
+    if direction == "BUY":
+        if current >= target:
+            return "TARGET_HIT (Pending Exit)"
+        if current <= stop:
+            return "STOP_HIT (Pending Exit)"
+        dist_to_target_pct = (target - current) / current * 100 if current else 0
+        dist_to_stop_pct = (current - stop) / current * 100 if current else 0
+    else:
+        if current <= target:
+            return "TARGET_HIT (Pending Exit)"
+        if current >= stop:
+            return "STOP_HIT (Pending Exit)"
+        dist_to_target_pct = (current - target) / current * 100 if current else 0
+        dist_to_stop_pct = (stop - current) / current * 100 if current else 0
+
+    if dist_to_target_pct <= near_pct:
+        return "NEAR TARGET"
+    if dist_to_stop_pct <= near_pct:
+        return "NEAR STOP"
+    return "ACTIVE"
+
+
+def fetch_batched_quotes(kite, open_positions):
+    """
+    ONE batched kite.quote() call for every open position's symbol --
+    per the explicit requirement not to fetch one symbol at a time and
+    not to create a second polling loop. Returns {} on any failure
+    (fail-safe); callers must retain prior values rather than treat
+    an empty result as 'price is zero'.
+    """
+    if not open_positions:
+        return {}
+    instrument_keys = [f"{pos.get('exchange', 'NSE')}:{symbol}" for symbol, pos in open_positions.items()]
+    try:
+        return kite.quote(instrument_keys)
+    except Exception as e:
+        logger.warning(f"Batched quote fetch failed for {len(instrument_keys)} instruments: {e}")
+        return {}
+
+
+def build_position_analytics(symbol, position, quotes, previous_status_entry=None,
+                               near_pct=0.25, stale_threshold_seconds=60):
+    """
+    Assembles the full analytics dict for one position, per the
+    requested bot_status.json schema. Fails safe: if this symbol's
+    quote is missing from `quotes` (batched fetch failed or omitted
+    it), retains every field from `previous_status_entry` unchanged
+    except marks status as PRICE_STALE and recomputes quote_age from
+    the OLD price_updated_at -- never fabricates a zero price.
+    """
+    from costs import net_pnl_for_trade
+
+    exchange = position.get("exchange", "NSE")
+    key = f"{exchange}:{symbol}"
+    quote = quotes.get(key)
+
+    now = time.time()
+    direction = position["direction"]
+    entry = position["entry"]
+    qty = position["qty"]
+    stop = position.get("stop")
+    target = position.get("target")
+
+    if quote is None:
+        # No fresh quote this cycle -- retain everything from last time.
+        if previous_status_entry:
+            retained = dict(previous_status_entry)
+            old_updated_at = retained.get("price_updated_at", now)
+            retained["quote_age_seconds"] = now - old_updated_at
+            retained["status"] = "PRICE_STALE"
+            return retained
+        # No quote AND no prior data -- genuinely nothing to report yet.
+        return {
+            "symbol": symbol, "exchange": exchange, "side": direction, "quantity": qty,
+            "entry_price": entry, "current_price": None, "status": "PRICE_STALE",
+            "price_updated_at": None, "quote_age_seconds": None,
+        }
+
+    current_price = quote.get("last_price")
+    depth = quote.get("depth", {})
+    bid = depth.get("buy", [{}])[0].get("price") if depth.get("buy") else None
+    ask = depth.get("sell", [{}])[0].get("price") if depth.get("sell") else None
+    ltq = quote.get("last_quantity")
+
+    gross_pnl = compute_gross_pnl(direction, entry, current_price, qty)
+    cost_result = net_pnl_for_trade(direction, qty, entry, current_price)
+    net_pnl = cost_result["net_pnl"]
+    profit_pct = compute_profit_pct(direction, entry, current_price)
+
+    mfe_pct, mae_pct = update_mfe_mae(position, profit_pct)
+
+    session_high = max(position.get("session_high_since_entry", current_price), current_price)
+    session_low = min(position.get("session_low_since_entry", current_price), current_price)
+    position["session_high_since_entry"] = session_high
+    position["session_low_since_entry"] = session_low
+
+    distances = compute_distances(direction, current_price, stop, target) if stop and target else {}
+    rr = compute_reward_risk(direction, entry, current_price, stop, target) if stop and target else {}
+    spread_info = compute_spread(bid, ask)
+
+    entry_time_str = position.get("entry_time")
+    time_in_trade_minutes = None
+    if entry_time_str:
+        try:
+            import pandas as pd
+            entry_dt = pd.to_datetime(entry_time_str)
+            now_dt = pd.Timestamp.now(tz=entry_dt.tz) if entry_dt.tz is not None else pd.Timestamp.now()
+            time_in_trade_minutes = (now_dt - entry_dt).total_seconds() / 60
+        except Exception:
+            pass
+
+    status = classify_status(direction, current_price, stop, target, near_pct=near_pct,
+                              quote_age_seconds=0, stale_threshold=stale_threshold_seconds) if stop and target else "ACTIVE"
+
+    return {
+        "symbol": symbol, "exchange": exchange, "side": direction, "quantity": qty,
+        "entry_price": entry, "current_price": current_price,
+        "gross_unrealized_pnl": gross_pnl, "net_unrealized_pnl": net_pnl, "profit_pct": profit_pct,
+        "entry_time": entry_time_str, "time_in_trade_minutes": time_in_trade_minutes,
+        "stop_price": stop, "target_price": target,
+        "session_high_since_entry": session_high, "session_low_since_entry": session_low,
+        "mfe_pct": mfe_pct, "mae_pct": mae_pct,
+        **distances, **rr,
+        "bid": bid, "ask": ask, **spread_info, "ltq": ltq,
+        "price_updated_at": now, "quote_age_seconds": 0,
+        "status": status,
+    }
+
+
+def compute_portfolio_summary(position_analytics_list, margins=None):
+    """
+    Aggregates across all open positions' analytics dicts (the output
+    of build_position_analytics, one per position). `margins` is the
+    raw dict from kite.margins(), optional -- fields needing it are
+    None if not provided.
+    """
+    if not position_analytics_list:
+        summary = {
+            "total_open_positions": 0, "buy_positions": 0, "sell_positions": 0,
+            "total_exposure": 0.0, "gross_unrealized_pnl": 0.0, "net_unrealized_pnl": 0.0,
+            "portfolio_profit_pct": None, "largest_winning_position": None,
+            "largest_losing_position": None, "total_portfolio_risk": 0.0,
+            "total_portfolio_reward": 0.0, "portfolio_reward_risk": None,
+            "largest_position_size": 0.0, "largest_position_risk": 0.0,
+            "average_holding_time_minutes": None,
+        }
+    else:
+        buy_count = sum(1 for p in position_analytics_list if p.get("side") == "BUY")
+        sell_count = sum(1 for p in position_analytics_list if p.get("side") == "SELL")
+        total_exposure = sum((p.get("current_price") or 0) * p.get("quantity", 0) for p in position_analytics_list)
+        gross_pnl = sum(p.get("gross_unrealized_pnl") or 0 for p in position_analytics_list)
+        net_pnl = sum(p.get("net_unrealized_pnl") or 0 for p in position_analytics_list)
+        portfolio_profit_pct = (net_pnl / total_exposure * 100) if total_exposure else None
+
+        by_pnl = sorted(position_analytics_list, key=lambda p: p.get("gross_unrealized_pnl") or 0)
+        largest_losing = by_pnl[0] if by_pnl and (by_pnl[0].get("gross_unrealized_pnl") or 0) < 0 else None
+        largest_winning = by_pnl[-1] if by_pnl and (by_pnl[-1].get("gross_unrealized_pnl") or 0) > 0 else None
+
+        total_risk = sum(p.get("risk_remaining") or 0 for p in position_analytics_list)
+        total_reward = sum(p.get("reward_remaining") or 0 for p in position_analytics_list)
+        portfolio_rr = (total_reward / total_risk) if total_risk > 0 else None
+
+        position_sizes = [(p.get("current_price") or 0) * p.get("quantity", 0) for p in position_analytics_list]
+        position_risks = [(p.get("risk_remaining") or 0) * p.get("quantity", 0) for p in position_analytics_list]
+        holding_times = [p.get("time_in_trade_minutes") for p in position_analytics_list if p.get("time_in_trade_minutes") is not None]
+
+        summary = {
+            "total_open_positions": len(position_analytics_list), "buy_positions": buy_count, "sell_positions": sell_count,
+            "total_exposure": total_exposure, "gross_unrealized_pnl": gross_pnl, "net_unrealized_pnl": net_pnl,
+            "portfolio_profit_pct": portfolio_profit_pct,
+            "largest_winning_position": largest_winning.get("symbol") if largest_winning else None,
+            "largest_losing_position": largest_losing.get("symbol") if largest_losing else None,
+            "total_portfolio_risk": total_risk, "total_portfolio_reward": total_reward,
+            "portfolio_reward_risk": portfolio_rr,
+            "largest_position_size": max(position_sizes) if position_sizes else 0.0,
+            "largest_position_risk": max(position_risks) if position_risks else 0.0,
+            "average_holding_time_minutes": (sum(holding_times) / len(holding_times)) if holding_times else None,
+        }
+
+    if margins:
+        try:
+            equity = margins.get("equity", {})
+            available_cash = equity.get("available", {}).get("live_balance")
+            used_margin = equity.get("utilised", {}).get("debits")
+            net_margin = equity.get("net")
+            margin_util_pct = (used_margin / net_margin * 100) if used_margin and net_margin else None
+            summary.update({
+                "available_cash": available_cash, "used_margin": used_margin,
+                "remaining_margin": net_margin, "margin_utilization_pct": margin_util_pct,
+            })
+        except Exception as e:
+            logger.warning(f"Failed to extract margin data for portfolio summary: {e}")
+
+    return summary
+
+
+def compute_session_summary(todays_trades):
+    """
+    Aggregates today's CLOSED trades (from trade_history.jsonl records
+    for today's date) into full session statistics.
+    """
+    if not todays_trades:
+        return {
+            "todays_trades": 0, "winning_trades": 0, "losing_trades": 0, "win_rate_pct": None,
+            "gross_realized_profit": 0.0, "gross_realized_loss": 0.0, "net_realized_profit": 0.0,
+            "brokerage_and_charges": 0.0, "average_win": None, "average_loss": None,
+            "expectancy": None, "profit_factor": None, "largest_winner": None, "largest_loser": None,
+            "current_consecutive_wins": 0, "current_consecutive_losses": 0,
+            "max_drawdown_today": 0.0, "peak_equity_today": 0.0, "current_equity": 0.0,
+            "average_holding_time_minutes": None,
+        }
+
+    pnls = [t["pnl"] for t in todays_trades]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    gross_wins = [t.get("gross_pnl", t["pnl"]) for t in todays_trades if t["pnl"] > 0]
+    gross_losses = [t.get("gross_pnl", t["pnl"]) for t in todays_trades if t["pnl"] <= 0]
+    total_costs = sum(t.get("costs", 0) for t in todays_trades)
+
+    win_rate = len(wins) / len(pnls) * 100
+    net_realized = sum(pnls)
+    avg_win = sum(wins) / len(wins) if wins else None
+    avg_loss = sum(losses) / len(losses) if losses else None
+    expectancy = net_realized / len(pnls)
+    profit_factor = (sum(wins) / abs(sum(losses))) if losses and sum(losses) != 0 else (float('inf') if wins else None)
+
+    # Consecutive wins/losses -- current streak, counting from the END (most recent) backwards
+    current_streak_wins, current_streak_losses = 0, 0
+    for p in reversed(pnls):
+        if p > 0:
+            if current_streak_losses > 0:
+                break
+            current_streak_wins += 1
+        else:
+            if current_streak_wins > 0:
+                break
+            current_streak_losses += 1
+
+    # Equity curve / max drawdown across today's trades in chronological order
+    cumulative, peak, max_dd = 0, 0, 0
+    for p in pnls:
+        cumulative += p
+        peak = max(peak, cumulative)
+        max_dd = min(max_dd, cumulative - peak)
+
+    return {
+        "todays_trades": len(pnls), "winning_trades": len(wins), "losing_trades": len(losses),
+        "win_rate_pct": win_rate,
+        "gross_realized_profit": sum(gross_wins), "gross_realized_loss": sum(gross_losses),
+        "net_realized_profit": net_realized, "brokerage_and_charges": total_costs,
+        "average_win": avg_win, "average_loss": avg_loss, "expectancy": expectancy,
+        "profit_factor": profit_factor,
+        "largest_winner": max(pnls) if wins else None, "largest_loser": min(pnls) if losses else None,
+        "current_consecutive_wins": current_streak_wins, "current_consecutive_losses": current_streak_losses,
+        "max_drawdown_today": max_dd, "peak_equity_today": peak, "current_equity": cumulative,
+        "average_holding_time_minutes": None,  # requires entry_time in trade_history, not yet tracked there
+    }
+
+
+def get_git_commit_hash():
+    """Short git commit hash of the running code, or 'unknown' on any failure."""
+    try:
+        import subprocess
+        result = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                                 capture_output=True, text=True, timeout=5,
+                                 cwd=__file__.rsplit("/", 1)[0])
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception as e:
+        logger.warning(f"Failed to get git commit hash: {e}")
+    return "unknown"
+
+
+def compute_health_check(cfg, kite, open_positions, symbols, start_time):
+    """
+    Full health-check snapshot: mode, filters, scheduler status, auth,
+    resource usage, uptime, version. Never raises -- every field
+    fails safe to None/'unknown' individually so one bad check
+    doesn't blank out the rest.
+    """
+    health = {
+        "trading_mode": "PAPER" if getattr(cfg, "PAPER_TRADING", True) else "LIVE",
+        "market_alignment": "Enabled" if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) else "Disabled",
+        "adx_filter": "Enabled" if getattr(cfg, "USE_ADX_FILTER", False) else "Disabled",
+        "entry_scheduler": "5 Minute Candle" if getattr(cfg, "ENABLE_CANDLE_ALIGNED_POLLING", False) else "Continuous",
+        "position_monitor_interval_seconds": getattr(cfg, "POSITION_CHECK_SECONDS", None),
+        "watchlist_size": len(getattr(cfg, "WATCHLIST", [])),
+        "symbols_loaded": len(symbols),
+        "open_positions": len(open_positions),
+        "bot_uptime_seconds": time.time() - start_time,
+        "version": get_git_commit_hash(),
+        "git_commit_hash": get_git_commit_hash(),
+    }
+
+    try:
+        margins = kite.margins()
+        health["api_connection"] = "Authenticated" if margins else "Disconnected"
+    except Exception as e:
+        health["api_connection"] = "Disconnected"
+        logger.warning(f"Health check: API connection check failed: {e}")
+
+    try:
+        import psutil
+        process = psutil.Process()
+        health["memory_usage_mb"] = process.memory_info().rss / (1024 * 1024)
+        health["cpu_usage_pct"] = process.cpu_percent(interval=0.1)
+    except Exception as e:
+        health["memory_usage_mb"] = None
+        health["cpu_usage_pct"] = None
+        logger.warning(f"Health check: resource usage check failed: {e}")
+
+    return health
