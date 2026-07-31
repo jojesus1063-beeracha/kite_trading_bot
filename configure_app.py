@@ -370,14 +370,20 @@ FORM_PAGE = BASE_STYLE + """
 <body>
   <div class="topbar" style="display: flex; justify-content: space-between; align-items: center;">
     <span>Trading Bot Dashboard</span>
-    <span style="font-size: 13px; font-weight: 600; background: var(--card); border: 1px solid var(--border);
-                 border-radius: 8px; padding: 6px 14px; color: var(--text-muted);">
-      {% if available_balance is not none %}
-        Available: <span style="color: var(--accent);">Rs {{ "{:,.2f}".format(available_balance) }}</span>
-      {% else %}
-        Balance unavailable
-      {% endif %}
-    </span>
+    <div style="display: flex; gap: 10px; align-items: center;">
+      <a href="/monitor" style="font-size: 13px; font-weight: 600; background: var(--accent); color: #fff;
+                   border-radius: 8px; padding: 6px 14px; text-decoration: none;">
+        Live Monitor
+      </a>
+      <span style="font-size: 13px; font-weight: 600; background: var(--card); border: 1px solid var(--border);
+                   border-radius: 8px; padding: 6px 14px; color: var(--text-muted);">
+        {% if available_balance is not none %}
+          Available: <span style="color: var(--accent);">Rs {{ "{:,.2f}".format(available_balance) }}</span>
+        {% else %}
+          Balance unavailable
+        {% endif %}
+      </span>
+    </div>
   </div>
   <div class="container">
 
