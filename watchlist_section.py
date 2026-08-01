@@ -6,6 +6,7 @@ WATCHLIST_SECTION = """
         <div class="empty">No watchlist report available. Run the end-of-day analytics process to generate one.</div>
         {% else %}
 
+        <div id="wl-header-cards">
         <div class="grid" style="margin-bottom: 12px;">
             <div class="metric">
                 <div class="label">Report Status</div>
@@ -45,6 +46,8 @@ WATCHLIST_SECTION = """
             <div class="metric"><div class="label">Most Common High Hour</div><div class="value">{{ "%02d:00"|format(summary_cards.most_common_high_hour) if summary_cards.most_common_high_hour is not none else 'N/A' }}</div></div>
             <div class="metric"><div class="label">Most Common Low Hour</div><div class="value">{{ "%02d:00"|format(summary_cards.most_common_low_hour) if summary_cards.most_common_low_hour is not none else 'N/A' }}</div></div>
             <div class="metric"><div class="label">High Retested</div><div class="value yellow">{{ summary_cards.high_retest_count }} stocks</div></div>
+        </div>
+        <div class="subtitle" id="wl-last-refresh" style="margin-top:8px;"></div>
         </div>
 
         <div style="display:flex; gap:10px; margin-bottom:12px; flex-wrap:wrap; align-items:center;">
@@ -209,11 +212,98 @@ WATCHLIST_SECTION = """
             link.click();
         }
 
-        document.getElementById('wl-search').addEventListener('input', renderWatchlistTable);
-        document.getElementById('wl-sort').addEventListener('change', renderWatchlistTable);
-        document.getElementById('wl-filter').addEventListener('change', renderWatchlistTable);
+        function saveControlState() {
+            sessionStorage.setItem("watchlistSearch", document.getElementById("wl-search").value);
+            sessionStorage.setItem("watchlistSort", document.getElementById("wl-sort").value);
+            sessionStorage.setItem("watchlistFilter", document.getElementById("wl-filter").value);
+        }
+        function restoreControlState() {
+            document.getElementById("wl-search").value = sessionStorage.getItem("watchlistSearch") || "";
+            document.getElementById("wl-sort").value = sessionStorage.getItem("watchlistSort") || "low_to_high_pct_desc";
+            document.getElementById("wl-filter").value = sessionStorage.getItem("watchlistFilter") || "";
+        }
+
+        function renderHeaderAndCards(fresh) {
+            const wl = fresh.watchlist_snapshot || {};
+            const fr = fresh.freshness || {};
+            const sc = fresh.summary_cards || {};
+            const statusClass = fr.status === "REPORT_READY" ? "green" : ((fr.status === "REPORT_PARTIAL" || fr.status === "REPORT_PROCESSING") ? "yellow" : "red");
+            const pct = (v) => (v === null || v === undefined) ? "N/A" : Number(v).toFixed(2) + "%";
+            const mover = sc.largest_mover ? (sc.largest_mover.symbol + " +" + pct(sc.largest_mover.low_to_high_pct).replace("%","") + "%") : "N/A";
+            const strong = sc.strongest_close ? (sc.strongest_close.symbol + " +" + pct(sc.strongest_close.close_change_pct).replace("%","") + "%") : "N/A";
+            const weak = sc.weakest_close ? (sc.weakest_close.symbol + " " + pct(sc.weakest_close.close_change_pct).replace("%","") + "%") : "N/A";
+            const hh = (sc.most_common_high_hour === null || sc.most_common_high_hour === undefined) ? "N/A" : (String(sc.most_common_high_hour).padStart(2,"0") + ":00");
+            const lh = (sc.most_common_low_hour === null || sc.most_common_low_hour === undefined) ? "N/A" : (String(sc.most_common_low_hour).padStart(2,"0") + ":00");
+            document.getElementById("wl-header-cards").innerHTML =
+                '<div class="grid" style="margin-bottom: 12px;">' +
+                    '<div class="metric"><div class="label">Report Status</div><div class="value ' + statusClass + '">' + (fr.status || "N/A") + '</div></div>' +
+                    '<div class="metric"><div class="label">Trading Session</div><div class="value">' + (fr.report_session_date || "N/A") + '</div></div>' +
+                    '<div class="metric"><div class="label">Symbols Analysed</div><div class="value">' + (wl.watchlist_size ?? "N/A") + '</div></div>' +
+                    '<div class="metric"><div class="label">Completed</div><div class="value green">' + (wl.complete_count ?? "N/A") + '</div></div>' +
+                    '<div class="metric"><div class="label">Errors</div><div class="value ' + ((wl.error_count || 0) > 0 ? "red" : "green") + '">' + (wl.error_count ?? "N/A") + '</div></div>' +
+                    '<div class="metric"><div class="label">Snapshot ID</div><div class="value" style="font-size:11px;">' + ((wl.snapshot_id || "N/A").slice(0,8)) + '</div></div>' +
+                '</div>' +
+                '<div class="subtitle" style="margin-bottom:16px;">' + (fr.reason || "") + '</div>' +
+                '<div class="grid" style="margin-bottom: 16px;">' +
+                    '<div class="metric"><div class="label">Largest Intraday Mover</div><div class="value green">' + mover + '</div></div>' +
+                    '<div class="metric"><div class="label">Strongest Close</div><div class="value green">' + strong + '</div></div>' +
+                    '<div class="metric"><div class="label">Weakest Close</div><div class="value red">' + weak + '</div></div>' +
+                    '<div class="metric"><div class="label">Average Range</div><div class="value">' + pct(sc.average_range_pct) + '</div></div>' +
+                    '<div class="metric"><div class="label">Median Range</div><div class="value">' + pct(sc.median_range_pct) + '</div></div>' +
+                    '<div class="metric"><div class="label">Most Common High Hour</div><div class="value">' + hh + '</div></div>' +
+                    '<div class="metric"><div class="label">Most Common Low Hour</div><div class="value">' + lh + '</div></div>' +
+                    '<div class="metric"><div class="label">High Retested</div><div class="value yellow">' + (sc.high_retest_count ?? 0) + ' stocks</div></div>' +
+                '</div>' +
+                '<div class="subtitle" id="wl-last-refresh" style="margin-top:8px;"></div>';
+        }
+
+        function setLastRefreshIndicator(success) {
+            const el = document.getElementById("wl-last-refresh");
+            if (!el) return;
+            const now = new Date().toLocaleTimeString("en-IN", {hour12: false, timeZone: "Asia/Kolkata"});
+            el.textContent = success ? ("Last data refresh: " + now) : ("Refresh failed - displaying last successful snapshot (last attempt: " + now + ")");
+            el.className = success ? "subtitle" : "subtitle red";
+        }
+
+        async function pollMonitorData() {
+            const currentState = {
+                search: document.getElementById("wl-search").value,
+                sort: document.getElementById("wl-sort").value,
+                filter: document.getElementById("wl-filter").value,
+                scrollY: window.scrollY,
+            };
+            try {
+                const resp = await fetch("/api/monitor-data");
+                if (resp.ok === false) throw new Error("HTTP " + resp.status);
+                const fresh = await resp.json();
+
+                WATCHLIST_DATA.length = 0;
+                WATCHLIST_DATA.push.apply(WATCHLIST_DATA, fresh.watchlist_symbols || []);
+
+                renderHeaderAndCards(fresh);
+
+                document.getElementById("wl-search").value = currentState.search;
+                document.getElementById("wl-sort").value = currentState.sort;
+                document.getElementById("wl-filter").value = currentState.filter;
+
+                renderWatchlistTable();
+                window.scrollTo(0, currentState.scrollY);
+                setLastRefreshIndicator(true);
+            } catch (e) {
+                setLastRefreshIndicator(false);
+                console.warn("Monitor data refresh failed, keeping last successful snapshot:", e);
+            }
+        }
+
+        restoreControlState();
+        document.getElementById("wl-search").addEventListener("input", function() { renderWatchlistTable(); saveControlState(); });
+        document.getElementById("wl-sort").addEventListener("change", function() { renderWatchlistTable(); saveControlState(); });
+        document.getElementById("wl-filter").addEventListener("change", function() { renderWatchlistTable(); saveControlState(); });
         renderWatchlistTable();
+        setLastRefreshIndicator(true);
+        setInterval(pollMonitorData, 15000);
         </script>
+
         {% endif %}
     </div>
 """

@@ -1049,6 +1049,32 @@ from watchlist_dashboard_helpers import compute_summary_cards, classify_report_f
 import json as _json
 
 
+@app.route("/api/monitor-data")
+def api_monitor_data():
+    """Read-only JSON endpoint for the /monitor page's client-side
+    polling. Makes ZERO Kite API calls -- reads only the already-
+    generated bot_status.json and watchlist_daily_range.json, exactly
+    like the server-rendered /monitor route does on initial load."""
+    if not require_login():
+        return {"error": "not authenticated"}, 401
+    status = load_bot_status() or {}
+    session_data = status.get("session_summary", {})
+    watchlist_snapshot = load_watchlist_snapshot()
+    freshness = classify_report_freshness(watchlist_snapshot)
+    summary_cards = compute_summary_cards(watchlist_snapshot)
+    return {
+        "updated": status.get("updated", "N/A"),
+        "positions": status.get("positions", []),
+        "portfolio": status.get("portfolio_summary", {}),
+        "session": session_data,
+        "health": status.get("health", {}),
+        "watchlist_snapshot": watchlist_snapshot,
+        "freshness": freshness,
+        "summary_cards": summary_cards,
+        "watchlist_symbols": watchlist_snapshot.get("symbols", []) if watchlist_snapshot else [],
+    }
+
+
 @app.route("/monitor")
 def monitor():
     if not require_login():

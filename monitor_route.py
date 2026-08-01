@@ -5,7 +5,6 @@ MONITOR_PAGE = """
 <html>
 <head>
     <title>Live Trading Monitor</title>
-    <meta http-equiv="refresh" content="15">
     <style>
         body { font-family: -apple-system, Segoe UI, Arial, sans-serif; background: #0f1117; color: #e5e7eb; margin: 0; padding: 20px; }
         h1 { font-size: 20px; margin-bottom: 4px; }
