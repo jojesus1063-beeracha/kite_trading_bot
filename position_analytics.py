@@ -142,6 +142,38 @@ def fetch_batched_quotes(kite, open_positions):
         return {}
 
 
+def validate_position(symbol, position):
+    """
+    Returns a list of validation error strings (empty list = valid).
+    Checks only the STATIC fields known before any quote fetch --
+    current_price validity (a genuinely nonsensical live price, e.g.
+    <= 0) is checked separately in build_position_analytics() once a
+    quote is actually available, since a missing quote is PRICE_STALE
+    territory, not INVALID_DATA.
+    """
+    errors = []
+    if not symbol or not isinstance(symbol, str):
+        errors.append("symbol is missing or invalid")
+    if not position.get("exchange"):
+        errors.append("exchange is missing")
+    direction = position.get("direction")
+    if direction not in ("BUY", "SELL"):
+        errors.append("direction is missing or invalid (must be BUY or SELL)")
+    qty = position.get("qty")
+    if not isinstance(qty, (int, float)) or isinstance(qty, bool) or qty <= 0:
+        errors.append("quantity must be greater than zero")
+    entry = position.get("entry")
+    if not isinstance(entry, (int, float)) or isinstance(entry, bool) or entry <= 0:
+        errors.append("entry_price must be greater than zero")
+    stop = position.get("stop")
+    if not isinstance(stop, (int, float)) or isinstance(stop, bool) or stop <= 0:
+        errors.append("stop_price must be greater than zero")
+    target = position.get("target")
+    if not isinstance(target, (int, float)) or isinstance(target, bool) or target <= 0:
+        errors.append("target_price must be greater than zero")
+    return errors
+
+
 def build_position_analytics(symbol, position, quotes, previous_status_entry=None,
                                near_pct=0.25, stale_threshold_seconds=60):
     """
@@ -153,6 +185,16 @@ def build_position_analytics(symbol, position, quotes, previous_status_entry=Non
     the OLD price_updated_at -- never fabricates a zero price.
     """
     from costs import net_pnl_for_trade
+
+    validation_errors = validate_position(symbol, position)
+    if validation_errors:
+        return {
+            "symbol": symbol, "exchange": position.get("exchange"),
+            "side": position.get("direction"), "quantity": position.get("qty"),
+            "entry_price": position.get("entry"), "current_price": None,
+            "status": "INVALID_DATA", "validation_errors": validation_errors,
+            "price_updated_at": None, "quote_age_seconds": None,
+        }
 
     exchange = position.get("exchange", "NSE")
     key = f"{exchange}:{symbol}"
@@ -181,6 +223,13 @@ def build_position_analytics(symbol, position, quotes, previous_status_entry=Non
         }
 
     current_price = quote.get("last_price")
+    if not isinstance(current_price, (int, float)) or isinstance(current_price, bool) or current_price <= 0:
+        return {
+            "symbol": symbol, "exchange": exchange, "side": direction, "quantity": qty,
+            "entry_price": entry, "current_price": current_price,
+            "status": "INVALID_DATA",
+            "price_updated_at": now, "quote_age_seconds": 0,
+        }
     depth = quote.get("depth", {})
     bid = depth.get("buy", [{}])[0].get("price") if depth.get("buy") else None
     ask = depth.get("sell", [{}])[0].get("price") if depth.get("sell") else None
@@ -238,6 +287,10 @@ def compute_portfolio_summary(position_analytics_list, margins=None):
     raw dict from kite.margins(), optional -- fields needing it are
     None if not provided.
     """
+    invalid_positions = [p for p in position_analytics_list if p.get("status") == "INVALID_DATA"]
+    valid_positions = [p for p in position_analytics_list if p.get("status") != "INVALID_DATA"]
+    position_analytics_list = valid_positions  # every line below this point sees ONLY valid rows
+
     if not position_analytics_list:
         summary = {
             "total_open_positions": 0, "buy_positions": 0, "sell_positions": 0,
@@ -247,6 +300,7 @@ def compute_portfolio_summary(position_analytics_list, margins=None):
             "total_portfolio_reward": 0.0, "portfolio_reward_risk": None,
             "largest_position_size": 0.0, "largest_position_risk": 0.0,
             "average_holding_time_minutes": None,
+            "invalid_position_count": len(invalid_positions),
         }
     else:
         buy_count = sum(1 for p in position_analytics_list if p.get("side") == "BUY")
@@ -279,6 +333,7 @@ def compute_portfolio_summary(position_analytics_list, margins=None):
             "largest_position_size": max(position_sizes) if position_sizes else 0.0,
             "largest_position_risk": max(position_risks) if position_risks else 0.0,
             "average_holding_time_minutes": (sum(holding_times) / len(holding_times)) if holding_times else None,
+            "invalid_position_count": len(invalid_positions),
         }
 
     if margins:
@@ -414,3 +469,130 @@ def compute_health_check(cfg, kite, open_positions, symbols, start_time):
         logger.warning(f"Health check: resource usage check failed: {e}")
 
     return health
+
+
+def build_full_analytics_snapshot(kite, cfg, open_positions, symbols, start_time,
+                                    previous_bot_status=None, todays_trades=None):
+    """
+    Top-level orchestration for the institutional dashboard: gathers
+    one batched quote fetch, builds every position's analytics,
+    aggregates the portfolio summary, computes today's session
+    summary, and runs the health check. Returns (positions_list,
+    portfolio_summary, session_summary, health) ready to pass into
+    save_bot_status(). Never raises -- any single piece failing
+    degrades gracefully rather than blocking the whole snapshot.
+    """
+    prev_positions_by_symbol = {}
+    if previous_bot_status and previous_bot_status.get("positions"):
+        prev_positions_by_symbol = {p["symbol"]: p for p in previous_bot_status["positions"]}
+
+    try:
+        quotes = fetch_batched_quotes(kite, open_positions)
+    except Exception as e:
+        logger.warning(f"Full analytics snapshot: batched quote fetch failed entirely: {e}")
+        quotes = {}
+
+    positions_list = []
+    for symbol, position in open_positions.items():
+        try:
+            analytics = build_position_analytics(
+                symbol, position, quotes,
+                previous_status_entry=prev_positions_by_symbol.get(symbol),
+                near_pct=getattr(cfg, "NEAR_TARGET_STOP_PCT", 0.25),
+                stale_threshold_seconds=getattr(cfg, "PRICE_STALE_THRESHOLD_SECONDS", 60),
+            )
+            positions_list.append(analytics)
+        except Exception as e:
+            logger.warning(f"Analytics build failed for {symbol}, skipping this cycle: {e}")
+
+    try:
+        margins = kite.margins()
+    except Exception:
+        margins = None
+    try:
+        portfolio_summary = compute_portfolio_summary(positions_list, margins=margins)
+    except Exception as e:
+        logger.warning(f"Portfolio summary computation failed: {e}")
+        portfolio_summary = {}
+
+    try:
+        session_summary = compute_session_summary(todays_trades or [])
+    except Exception as e:
+        logger.warning(f"Session summary computation failed: {e}")
+        session_summary = {}
+
+    try:
+        health = compute_health_check(cfg, kite, open_positions, symbols, start_time)
+    except Exception as e:
+        logger.warning(f"Health check computation failed: {e}")
+        health = {}
+
+    return positions_list, portfolio_summary, session_summary, health
+
+
+def classify_bot_freshness(generated_at, position_monitor_interval_seconds=25,
+                            stale_threshold_seconds=60, offline_multiplier=2,
+                            market_open="09:15", market_close="15:30", now=None):
+    """
+    Classifies overall bot status as MARKET_CLOSED, BOT_OFFLINE,
+    STATUS_STALE, or LIVE, using Asia/Kolkata time. `generated_at` is
+    the bot_status.json 'generated_at' ISO string (or a datetime).
+    `now` can be injected for testing; defaults to the real current
+    Asia/Kolkata time.
+
+    MARKET_CLOSED takes priority over everything else -- weekends and
+    outside market hours are never reported as BOT_OFFLINE, per the
+    explicit requirement not to show an alarming offline warning
+    merely because the trading day ended normally.
+    """
+    from datetime import datetime as dt, time as dtime
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo
+
+    kolkata = ZoneInfo("Asia/Kolkata")
+    if now is None:
+        now = dt.now(kolkata)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=kolkata)
+
+    if isinstance(generated_at, str):
+        try:
+            generated_dt = dt.fromisoformat(generated_at)
+            if generated_dt.tzinfo is None:
+                generated_dt = generated_dt.replace(tzinfo=kolkata)
+        except ValueError:
+            return {"status": "BOT_OFFLINE", "reason": "generated_at timestamp is unparseable",
+                    "age_seconds": None}
+    elif generated_at is None:
+        return {"status": "BOT_OFFLINE", "reason": "no status has ever been recorded",
+                "age_seconds": None}
+    else:
+        generated_dt = generated_at
+        if generated_dt.tzinfo is None:
+            generated_dt = generated_dt.replace(tzinfo=kolkata)
+
+    is_weekend = now.weekday() >= 5  # 5=Saturday, 6=Sunday
+    open_h, open_m = map(int, market_open.split(":"))
+    close_h, close_m = map(int, market_close.split(":"))
+    market_open_time = dtime(open_h, open_m)
+    market_close_time = dtime(close_h, close_m)
+    is_within_hours = market_open_time <= now.time() <= market_close_time
+
+    if is_weekend or not is_within_hours:
+        return {"status": "MARKET_CLOSED", "reason": "outside trading hours or weekend",
+                "age_seconds": (now - generated_dt).total_seconds()}
+
+    age_seconds = (now - generated_dt).total_seconds()
+    offline_threshold = position_monitor_interval_seconds * offline_multiplier
+
+    if age_seconds > offline_threshold:
+        return {"status": "BOT_OFFLINE",
+                "reason": f"no status update for {age_seconds:.0f}s (threshold {offline_threshold}s)",
+                "age_seconds": age_seconds}
+    if age_seconds > stale_threshold_seconds:
+        return {"status": "STATUS_STALE",
+                "reason": f"no status update for {age_seconds:.0f}s (threshold {stale_threshold_seconds}s)",
+                "age_seconds": age_seconds}
+    return {"status": "LIVE", "reason": "recently updated", "age_seconds": age_seconds}

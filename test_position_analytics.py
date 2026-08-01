@@ -221,3 +221,178 @@ check("Auth failure does not crash the rest of the health check", health_bad_aut
 
 print("")
 print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
+
+# --- build_full_analytics_snapshot (orchestration) ---
+print("\n--- Full Analytics Snapshot Orchestration ---")
+from position_analytics import build_full_analytics_snapshot
+
+mock_kite_full = MagicMock()
+mock_kite_full.margins.return_value = {"equity": {"net": 1000, "available": {"live_balance": 500},
+                                                     "utilised": {"debits": 500}}}
+mock_kite_full.quote.return_value = {
+    "NSE:TEST": {"last_price": 105.0, "last_quantity": 10,
+                 "depth": {"buy": [{"price": 104.9}], "sell": [{"price": 105.1}]}}
+}
+open_positions_snap = {"TEST": {"direction": "BUY", "entry": 100.0, "qty": 10, "stop": 95.0,
+                                  "target": 115.0, "exchange": "NSE", "entry_time": "2026-07-31 10:00:00"}}
+
+positions_list, portfolio, session, health = build_full_analytics_snapshot(
+    mock_kite_full, FakeCfg(), open_positions_snap, ["TEST"], time.time() - 100,
+    previous_bot_status=None, todays_trades=[{"pnl": 50, "gross_pnl": 55, "costs": 5}]
+)
+check("Orchestration: correctly assembles one position", len(positions_list) == 1)
+check("Orchestration: portfolio summary reflects the one position", portfolio["total_open_positions"] == 1)
+check("Orchestration: session summary reflects the one trade", session["todays_trades"] == 1)
+check("Orchestration: health check populated", health["trading_mode"] == "PAPER")
+
+# Fail-safe: quote fetch raises entirely -- should still return a usable (degraded) snapshot
+mock_kite_broken = MagicMock()
+mock_kite_broken.margins.return_value = {"equity": {"net": 1000}}
+mock_kite_broken.quote.side_effect = Exception("total API outage")
+positions_list_broken, portfolio_broken, session_broken, health_broken = build_full_analytics_snapshot(
+    mock_kite_broken, FakeCfg(), open_positions_snap, ["TEST"], time.time(), todays_trades=[]
+)
+check("Orchestration fail-safe: total quote outage does not crash the whole snapshot", True)
+check("Orchestration fail-safe: position still appears (marked stale), not silently dropped",
+      len(positions_list_broken) == 1 and positions_list_broken[0]["status"] == "PRICE_STALE")
+
+print("")
+print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
+
+# --- validate_position ---
+print("\n--- Position Validation ---")
+from position_analytics import validate_position, classify_bot_freshness
+
+valid_pos = {"exchange": "NSE", "direction": "BUY", "qty": 10, "entry": 100.0, "stop": 95.0, "target": 110.0}
+check("Fully valid position has no errors", validate_position("TEST", valid_pos) == [])
+
+check("Missing direction is caught", "direction is missing or invalid (must be BUY or SELL)" in
+      validate_position("TEST", {**valid_pos, "direction": None}))
+check("Invalid direction string is caught", "direction is missing or invalid (must be BUY or SELL)" in
+      validate_position("TEST", {**valid_pos, "direction": "HOLD"}))
+check("Zero quantity is caught", "quantity must be greater than zero" in
+      validate_position("TEST", {**valid_pos, "qty": 0}))
+check("Negative entry price is caught", "entry_price must be greater than zero" in
+      validate_position("TEST", {**valid_pos, "entry": -5}))
+check("Missing stop is caught", "stop_price must be greater than zero" in
+      validate_position("TEST", {**valid_pos, "stop": None}))
+check("Missing target is caught", "target_price must be greater than zero" in
+      validate_position("TEST", {**valid_pos, "target": None}))
+check("Missing exchange is caught", "exchange is missing" in
+      validate_position("TEST", {**valid_pos, "exchange": None}))
+check("Multiple errors all reported at once",
+      len(validate_position("TEST", {"exchange": None, "direction": None, "qty": 0, "entry": 0, "stop": 0, "target": 0})) >= 5)
+
+# --- INVALID_DATA integration in build_position_analytics ---
+print("\n--- INVALID_DATA Integration ---")
+malformed_position = {"exchange": "NSE", "direction": None, "qty": 10, "entry": 0, "stop": 95.0, "target": 110.0}
+result = build_position_analytics("BADSYM", malformed_position, {"NSE:BADSYM": {"last_price": 100}})
+check("Malformed position (missing direction) does not crash, returns INVALID_DATA",
+      result["status"] == "INVALID_DATA")
+check("Malformed position never fabricates a gross_unrealized_pnl", "gross_unrealized_pnl" not in result)
+check("validation_errors list is present and non-empty", len(result.get("validation_errors", [])) > 0)
+
+# Valid position + quote with a nonsensical current_price (e.g. 0)
+weird_quote = {"NSE:TEST2": {"last_price": 0, "depth": {}}}
+result2 = build_position_analytics("TEST2", valid_pos, weird_quote)
+check("Valid static data but nonsensical current_price (0) also returns INVALID_DATA",
+      result2["status"] == "INVALID_DATA")
+
+# --- Portfolio summary excludes INVALID_DATA from financial aggregation ---
+print("\n--- Portfolio Summary Excludes Invalid Positions ---")
+mixed_list = [
+    {"symbol": "GOOD", "side": "BUY", "quantity": 10, "current_price": 110,
+     "gross_unrealized_pnl": 100, "net_unrealized_pnl": 90, "risk_remaining": 5, "reward_remaining": 10,
+     "status": "ACTIVE"},
+    {"symbol": "BAD", "status": "INVALID_DATA", "validation_errors": ["entry_price must be greater than zero"]},
+]
+summary_mixed = compute_portfolio_summary(mixed_list)
+check("Invalid position excluded from total_open_positions count", summary_mixed["total_open_positions"] == 1)
+check("Invalid position counted separately", summary_mixed["invalid_position_count"] == 1)
+check("Invalid position's absence of gross_unrealized_pnl does not crash or corrupt the sum",
+      summary_mixed["gross_unrealized_pnl"] == 100)
+
+# --- Summary-equals-sum-of-rows guarantee ---
+print("\n--- Summary Consistency (sum of rows = summary total) ---")
+three_positions = [
+    {"symbol": "A", "side": "BUY", "quantity": 10, "current_price": 110, "gross_unrealized_pnl": 100,
+     "net_unrealized_pnl": 90, "risk_remaining": 5, "reward_remaining": 10, "status": "ACTIVE"},
+    {"symbol": "B", "side": "SELL", "quantity": 5, "current_price": 200, "gross_unrealized_pnl": -50,
+     "net_unrealized_pnl": -60, "risk_remaining": 8, "reward_remaining": 4, "status": "ACTIVE"},
+    {"symbol": "C", "status": "INVALID_DATA", "validation_errors": ["bad data"]},
+]
+summary3 = compute_portfolio_summary(three_positions)
+manual_sum_gross = sum(p.get("gross_unrealized_pnl", 0) for p in three_positions if p.get("status") != "INVALID_DATA")
+check("Sum of valid rows' gross P&L exactly equals portfolio summary total",
+      summary3["gross_unrealized_pnl"] == manual_sum_gross)
+check("Count of valid rows exactly equals portfolio open-position count",
+      summary3["total_open_positions"] == 2)
+
+print("")
+print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
+
+# --- classify_bot_freshness ---
+print("\n--- Bot Freshness / Offline Detection ---")
+from datetime import datetime as _dt
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+_kolkata = ZoneInfo("Asia/Kolkata")
+
+# Weekend (Saturday) during nominal "market hours" -> MARKET_CLOSED, never BOT_OFFLINE
+saturday_noon = _dt(2026, 8, 1, 12, 0, tzinfo=_kolkata)  # 2026-08-01 is a Saturday
+result_weekend = classify_bot_freshness(
+    generated_at=_dt(2026, 8, 1, 8, 0, tzinfo=_kolkata),  # very old, would be "offline" on a weekday
+    now=saturday_noon,
+)
+check("Weekend during nominal market hours -> MARKET_CLOSED (never alarms as offline)",
+      result_weekend["status"] == "MARKET_CLOSED")
+
+# Weekday, outside market hours (e.g. 20:00) -> MARKET_CLOSED, even with a very stale timestamp
+weekday_evening = _dt(2026, 7, 31, 20, 0, tzinfo=_kolkata)  # 2026-07-31 is a Friday
+result_after_hours = classify_bot_freshness(
+    generated_at=_dt(2026, 7, 31, 10, 0, tzinfo=_kolkata),
+    now=weekday_evening,
+)
+check("Weekday after market close -> MARKET_CLOSED, not an offline alarm",
+      result_after_hours["status"] == "MARKET_CLOSED")
+
+# Weekday, within market hours, status genuinely very old -> BOT_OFFLINE
+weekday_midday = _dt(2026, 7, 31, 11, 0, tzinfo=_kolkata)
+result_offline = classify_bot_freshness(
+    generated_at=_dt(2026, 7, 31, 10, 30, tzinfo=_kolkata),  # 30 min old
+    position_monitor_interval_seconds=25, offline_multiplier=2,  # offline threshold = 50s
+    now=weekday_midday,
+)
+check("Within market hours, status 30 min old (way past offline threshold) -> BOT_OFFLINE",
+      result_offline["status"] == "BOT_OFFLINE")
+
+# Weekday, within market hours, status moderately old (past stale but not offline)
+result_stale = classify_bot_freshness(
+    generated_at=weekday_midday.replace(second=0) - __import__("datetime").timedelta(seconds=90),
+    position_monitor_interval_seconds=25, offline_multiplier=10, stale_threshold_seconds=60,
+    now=weekday_midday,
+)
+check("Within market hours, moderately stale (past 60s, not past offline threshold) -> STATUS_STALE",
+      result_stale["status"] == "STATUS_STALE")
+
+# Weekday, within market hours, fresh status -> LIVE
+result_live = classify_bot_freshness(
+    generated_at=weekday_midday - __import__("datetime").timedelta(seconds=5),
+    position_monitor_interval_seconds=25, offline_multiplier=2, stale_threshold_seconds=60,
+    now=weekday_midday,
+)
+check("Within market hours, freshly updated (5s old) -> LIVE", result_live["status"] == "LIVE")
+
+# No status has ever been recorded
+result_none = classify_bot_freshness(generated_at=None, now=weekday_midday)
+check("No status ever recorded -> BOT_OFFLINE with a clear reason",
+      result_none["status"] == "BOT_OFFLINE" and "ever been recorded" in result_none["reason"])
+
+# Unparseable timestamp fails safe
+result_bad = classify_bot_freshness(generated_at="not-a-real-timestamp", now=weekday_midday)
+check("Unparseable generated_at fails safe to BOT_OFFLINE, does not crash", result_bad["status"] == "BOT_OFFLINE")
+
+print("")
+print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
