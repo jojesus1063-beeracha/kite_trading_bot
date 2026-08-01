@@ -1,3 +1,5 @@
+from watchlist_section import WATCHLIST_SECTION
+
 MONITOR_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -120,6 +122,7 @@ MONITOR_PAGE = """
             <div class="metric"><div class="label">Largest Loser</div><div class="value red">Rs{{ "%.2f"|format(session.get('largest_loser', 0) or 0) }}</div></div>
         </div>
     </div>
+""" + WATCHLIST_SECTION + """
 </body>
 </html>
 """

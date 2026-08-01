@@ -41,6 +41,7 @@ with app.app_context():
                  'brokerage_and_charges': 0, 'expectancy': 0, 'current_consecutive_wins': 0,
                  'current_consecutive_losses': 0, 'max_drawdown_today': 0, 'largest_winner': 0, 'largest_loser': 0},
         health=SAMPLE_HEALTH, profit_factor_display='4.80',
+        watchlist_snapshot=None, freshness={"status": "NO_REPORT_AVAILABLE", "reason": "none", "report_session_date": None, "expected_session_date": None}, summary_cards={"largest_mover": None, "strongest_close": None, "weakest_close": None, "average_range_pct": None, "median_range_pct": None, "most_common_high_hour": None, "most_common_low_hour": None, "high_retest_count": 0, "low_retest_count": 0}, watchlist_symbols_json="[]",
     )
     check("Normal render succeeds with no Jinja errors", len(html) > 0)
     check("Renders the real position's symbol", "RELIANCE" in html)
@@ -50,6 +51,7 @@ with app.app_context():
     html_empty = render_template_string(
         MONITOR_PAGE, updated='N/A', positions=[], portfolio={}, session={}, health={},
         profit_factor_display='N/A',
+        watchlist_snapshot=None, freshness={"status": "NO_REPORT_AVAILABLE", "reason": "none", "report_session_date": None, "expected_session_date": None}, summary_cards={"largest_mover": None, "strongest_close": None, "weakest_close": None, "average_range_pct": None, "median_range_pct": None, "most_common_high_hour": None, "most_common_low_hour": None, "high_retest_count": 0, "low_retest_count": 0}, watchlist_symbols_json="[]",
     )
     check("Empty portfolio renders without crashing", len(html_empty) > 0)
     check("Empty portfolio shows the 'no positions' message", "No open positions" in html_empty)
@@ -58,6 +60,7 @@ with app.app_context():
     html_inf = render_template_string(
         MONITOR_PAGE, updated='N/A', positions=[], portfolio={}, session={}, health={},
         profit_factor_display='inf',
+        watchlist_snapshot=None, freshness={"status": "NO_REPORT_AVAILABLE", "reason": "none", "report_session_date": None, "expected_session_date": None}, summary_cards={"largest_mover": None, "strongest_close": None, "weakest_close": None, "average_range_pct": None, "median_range_pct": None, "most_common_high_hour": None, "most_common_low_hour": None, "high_retest_count": 0, "low_retest_count": 0}, watchlist_symbols_json="[]",
     )
     check("Infinite profit factor renders as 'inf' without crashing (regression test for the real bug found)",
           "inf" in html_inf and len(html_inf) > 0)
@@ -68,6 +71,7 @@ with app.app_context():
     html_stale = render_template_string(
         MONITOR_PAGE, updated='N/A', positions=[stale_position], portfolio=SAMPLE_PORTFOLIO,
         session={}, health=SAMPLE_HEALTH, profit_factor_display='N/A',
+        watchlist_snapshot=None, freshness={"status": "NO_REPORT_AVAILABLE", "reason": "none", "report_session_date": None, "expected_session_date": None}, summary_cards={"largest_mover": None, "strongest_close": None, "weakest_close": None, "average_range_pct": None, "median_range_pct": None, "most_common_high_hour": None, "most_common_low_hour": None, "high_retest_count": 0, "low_retest_count": 0}, watchlist_symbols_json="[]",
     )
     check("PRICE_STALE status renders with the stale badge class", "badge-stale" in html_stale)
 
@@ -78,6 +82,7 @@ with app.app_context():
     html_multi = render_template_string(
         MONITOR_PAGE, updated='N/A', positions=[SAMPLE_POSITION, sell_position],
         portfolio=SAMPLE_PORTFOLIO, session={}, health=SAMPLE_HEALTH, profit_factor_display='N/A',
+        watchlist_snapshot=None, freshness={"status": "NO_REPORT_AVAILABLE", "reason": "none", "report_session_date": None, "expected_session_date": None}, summary_cards={"largest_mover": None, "strongest_close": None, "weakest_close": None, "average_range_pct": None, "median_range_pct": None, "most_common_high_hour": None, "most_common_low_hour": None, "high_retest_count": 0, "low_retest_count": 0}, watchlist_symbols_json="[]",
     )
     check("Multiple mixed BUY/SELL positions all render", "RELIANCE" in html_multi and "TCS" in html_multi)
 

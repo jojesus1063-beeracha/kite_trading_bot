@@ -1044,6 +1044,9 @@ def backtest_comparison():
 
 from monitor_route import MONITOR_PAGE
 from trade_log import load_bot_status
+from watchlist_range_analytics import load_watchlist_snapshot
+from watchlist_dashboard_helpers import compute_summary_cards, classify_report_freshness
+import json as _json
 
 
 @app.route("/monitor")
@@ -1059,6 +1062,12 @@ def monitor():
         pf_display = "inf"
     else:
         pf_display = f"{pf:.2f}"
+
+    watchlist_snapshot = load_watchlist_snapshot()
+    freshness = classify_report_freshness(watchlist_snapshot)
+    summary_cards = compute_summary_cards(watchlist_snapshot)
+    watchlist_symbols_json = _json.dumps(watchlist_snapshot.get("symbols", []) if watchlist_snapshot else [])
+
     return render_template_string(
         MONITOR_PAGE,
         updated=status.get("updated", "N/A"),
@@ -1067,6 +1076,10 @@ def monitor():
         session=session_data,
         health=status.get("health", {}),
         profit_factor_display=pf_display,
+        watchlist_snapshot=watchlist_snapshot,
+        freshness=freshness,
+        summary_cards=summary_cards,
+        watchlist_symbols_json=watchlist_symbols_json,
     )
 
 
