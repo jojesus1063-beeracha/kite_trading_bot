@@ -10,28 +10,71 @@ cd "$PROJECT"
 exec 9>"$LOCK_FILE"
 
 if ! flock -n 9; then
-    echo "Another automatic-watchlist run is already active."
+    echo "Another automatic-watchlist run is active."
     exit 1
 fi
 
-echo "Automatic watchlist started at:"
+if [[ "${ALLOW_LIVE_AUTOSTART:-}" != "YES" ]]; then
+    echo "SAFETY BLOCK: live automatic startup is not authorised."
+    exit 1
+fi
+
+echo "Live watchlist generation started:"
 TZ=Asia/Kolkata date
 
 "$PYTHON" - <<'PY'
 import json
+import config as cfg
 from pathlib import Path
 
-config = json.loads(
-    Path("user_config.json").read_text()
-)
+data = json.loads(Path("user_config.json").read_text())
 
-if config.get("paper_trading") is not True:
+if data.get("paper_trading") is not False:
     raise SystemExit(
-        "SAFETY BLOCK: automatic startup is authorised "
-        "only while Paper Trading is enabled."
+        "SAFETY BLOCK: configuration is not in live mode."
     )
 
-print("PASS: paper-trading safety lock enabled")
+checks = {
+    "capital": (
+        float(data.get("capital", 0)),
+        5000.0,
+    ),
+    "risk_per_trade_pct": (
+        float(data.get("risk_per_trade_pct", 999)),
+        0.5,
+    ),
+    "max_daily_loss_pct": (
+        float(data.get("max_daily_loss_pct", 999)),
+        2.0,
+    ),
+    "max_position_size_pct": (
+        float(data.get("max_position_size_pct", 999)),
+        50.0,
+    ),
+}
+
+for name, (actual, maximum) in checks.items():
+    if actual > maximum:
+        raise SystemExit(
+            f"SAFETY BLOCK: {name} is {actual}; "
+            f"maximum authorised is {maximum}."
+        )
+
+if int(getattr(cfg, "MAX_OPEN_POSITIONS", 999)) > 5:
+    raise SystemExit(
+        "SAFETY BLOCK: MAX_OPEN_POSITIONS exceeds 5."
+    )
+
+if data.get("no_entry_before") != "09:30":
+    raise SystemExit(
+        "SAFETY BLOCK: no_entry_before must remain 09:30."
+    )
+
+print("PASS: live-mode safety limits validated")
+print("Capital:", data.get("capital"))
+print("Risk per trade:", data.get("risk_per_trade_pct"))
+print("Daily-loss limit:", data.get("max_daily_loss_pct"))
+print("No entry before:", data.get("no_entry_before"))
 PY
 
 "$PYTHON" auto_watchlist.py \
@@ -61,7 +104,7 @@ report = json.loads(
 
 if report.get("status") != "success":
     raise SystemExit(
-        "FAIL: selector report is not successful"
+        "FAIL: automatic selector did not succeed."
     )
 
 generated = datetime.fromisoformat(
@@ -70,43 +113,50 @@ generated = datetime.fromisoformat(
 
 if generated.date() != datetime.now(ist).date():
     raise SystemExit(
-        "FAIL: selector report was not generated today"
+        "FAIL: selector report was not generated today."
     )
 
 watchlist = config.get("watchlist") or []
 
 if len(watchlist) != 80:
     raise SystemExit(
-        f"FAIL: expected 80 stocks, found {len(watchlist)}"
+        f"FAIL: expected 80 stocks; found {len(watchlist)}."
     )
 
 symbols = [
-    item.get("symbol")
+    str(item.get("symbol") or "").strip()
     for item in watchlist
 ]
 
-if len(symbols) != len(set(symbols)):
+if any(not symbol for symbol in symbols):
     raise SystemExit(
-        "FAIL: duplicate watchlist symbols detected"
+        "FAIL: blank symbol found in watchlist."
     )
 
-if config.get("paper_trading") is not True:
+if len(symbols) != len(set(symbols)):
     raise SystemExit(
-        "FAIL: Paper Trading became disabled"
+        "FAIL: duplicate watchlist symbols found."
+    )
+
+if config.get("paper_trading") is not False:
+    raise SystemExit(
+        "FAIL: configuration is no longer in live mode."
     )
 
 stats = report.get("statistics") or {}
-counts = stats.get("selected_priority_counts") or {}
+priority_counts = (
+    stats.get("selected_priority_counts") or {}
+)
 
-if sum(counts.values()) != 80:
+if sum(priority_counts.values()) != 80:
     raise SystemExit(
-        "FAIL: priority counts do not total 80"
+        "FAIL: priority counts do not total 80."
     )
 
-print("PASS: today's 80-stock watchlist validated")
-print("Priority counts:", counts)
-print("Symbols:", ", ".join(symbols))
+print("PASS: live watchlist validated")
+print("Priority counts:", priority_counts)
+print("Watchlist count:", len(watchlist))
 PY
 
-echo "Automatic watchlist completed at:"
+echo "Live watchlist generation completed:"
 TZ=Asia/Kolkata date

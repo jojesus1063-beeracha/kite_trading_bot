@@ -1,5 +1,5 @@
 [Unit]
-Description=Build daily NSE watchlist and start Kite paper bot
+Description=Build daily NSE watchlist and start Kite live bot
 Wants=network-online.target
 After=network-online.target
 Conflicts=kitebot-restart.service
@@ -8,6 +8,7 @@ Conflicts=kitebot-restart.service
 Type=oneshot
 User=ubuntu
 Group=ubuntu
+EnvironmentFile=/etc/kitebot.env
 WorkingDirectory=/home/ubuntu/kite_trading_bot
 ExecStartPre=+/usr/bin/systemctl stop kitebot.service
 ExecStart=/home/ubuntu/kite_trading_bot/run_auto_watchlist_daily.sh
