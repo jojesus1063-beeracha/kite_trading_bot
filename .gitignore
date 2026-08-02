@@ -26,3 +26,5 @@ signal_logs/
 # Runtime-generated files
 bot.log
 watchlist_daily_range.json
+pending_orders.json
+pending_orders.json.lock

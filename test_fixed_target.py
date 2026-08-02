@@ -4,6 +4,30 @@ import config as cfg
 from risk_manager import RiskManager
 import main as main_module
 
+def fake_confirmed_exit(*args, **kwargs):
+    """Stage 4-compatible confirmed exit result for legacy tests."""
+
+    quantity = kwargs.get("quantity")
+
+    if quantity is None and len(args) >= 4:
+        quantity = args[3]
+
+    quantity = int(quantity or 0)
+
+    return {
+        "success": True,
+        "order_id": "TEST-EXIT-ORDER",
+        "operation_id": None,
+        "status": "COMPLETE",
+        "reason": None,
+        "requested_quantity": quantity,
+        "filled_quantity": quantity,
+        "average_price": 100.0,
+        "exit_confirmation_pending": False,
+        "resolved": True,
+    }
+
+
 passed, failed = 0, 0
 
 def check(name, condition):
@@ -41,7 +65,7 @@ target = entry * 1.015  # 1015.0
 open_positions = {"TEST": {"direction": "BUY", "qty": 10, "entry": entry, "stop": entry*0.9965,
                             "target": target, "exchange": "NSE", "peak_price": entry, "tight_mode": False}}
 main_module.fetch_candles = lambda *a, **kw: make_df_5m([entry, entry+5, target])
-main_module.place_exit_order = lambda *a, **kw: True
+main_module.place_exit_order = fake_confirmed_exit
 risk = RiskManager(cfg, persist=False)
 status = main_module.check_position_exit(mock_kite, "TEST", {"TEST": 1}, {"TEST": "NSE"}, open_positions, risk, check_trend=False)
 check("BUY exits exactly at +1.5% target", "fixed_target" in status and "TEST" not in open_positions)
