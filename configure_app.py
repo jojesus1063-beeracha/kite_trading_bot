@@ -365,7 +365,7 @@ TWO_FACTOR_PAGE = BASE_STYLE + """
 FORM_PAGE = BASE_STYLE + """
 <!doctype html>
 <title>Trading Bot Dashboard</title>
-<meta http-equiv="refresh" content="60">
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <body>
   <div class="topbar" style="display: flex; justify-content: space-between; align-items: center;">
