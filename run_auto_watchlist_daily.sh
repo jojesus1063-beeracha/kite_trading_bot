@@ -80,12 +80,13 @@ PY
 "$PYTHON" auto_watchlist.py \
   --write \
   --top 80 \
-  --min-selected 80 \
+  --min-selected 1 \
   --open-low-tolerance-ticks 0 \
   --min-live-momentum-pct 0.20
 
 "$PYTHON" - <<'PY'
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -118,9 +119,36 @@ if generated.date() != datetime.now(ist).date():
 
 watchlist = config.get("watchlist") or []
 
-if len(watchlist) != 80:
+stats = report.get("statistics") or {}
+
+matched_symbols = int(
+    stats.get("matched_symbols") or 0
+)
+quotes_received = int(
+    stats.get("quotes_received") or 0
+)
+
+minimum_quotes = math.ceil(
+    matched_symbols * 0.90
+)
+
+if matched_symbols < 450:
     raise SystemExit(
-        f"FAIL: expected 80 stocks; found {len(watchlist)}."
+        "FAIL: too few NSE symbols matched: "
+        f"{matched_symbols}. Minimum required is 450."
+    )
+
+if quotes_received < minimum_quotes:
+    raise SystemExit(
+        "FAIL: incomplete Kite quote coverage: "
+        f"{quotes_received}/{matched_symbols}. "
+        "At least 90% is required."
+    )
+
+if not 1 <= len(watchlist) <= 80:
+    raise SystemExit(
+        "FAIL: expected between 1 and 80 qualified "
+        f"stocks; found {len(watchlist)}."
     )
 
 symbols = [
@@ -148,9 +176,10 @@ priority_counts = (
     stats.get("selected_priority_counts") or {}
 )
 
-if sum(priority_counts.values()) != 80:
+if sum(priority_counts.values()) != len(watchlist):
     raise SystemExit(
-        "FAIL: priority counts do not total 80."
+        "FAIL: priority counts do not match the "
+        "generated watchlist size."
     )
 
 print("PASS: live watchlist validated")
