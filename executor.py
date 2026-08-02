@@ -140,25 +140,42 @@ def cap_quantity_by_margin(kite, symbol: str, direction: str, quantity: int, exc
 
 def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange: str, cfg):
     """
+    Stage 3: entries are only ever tracked based on a BROKER-CONFIRMED
+    fill, never on kite.place_order()'s return value alone (which only
+    confirms submission). Full lifecycle: create a durable ENTRY intent
+    BEFORE submission -> submit -> attach the broker order_id
+    IMMEDIATELY (before verification begins) -> verify_order_execution()
+    -> track only the confirmed filled_quantity.
+
     ALWAYS returns a dict: {"success": bool, "order_id": str|None,
-    "status": str, "reason": str|None}. "reason" is populated only on
-    failure, identifying WHICH check rejected the order.
+    "operation_id": str|None, "status": str, "reason": str|None,
+    "requested_quantity": int, "filled_quantity": int,
+    "average_price": float|None, "entry_confirmation_pending": bool,
+    "resolved": bool}. "success" is True only when filled_quantity > 0
+    -- callers must track exactly filled_quantity, never requested_quantity.
     """
-    if quantity <= 0:
-        reason = "computed quantity is 0"
+    def _rejected(reason, operation_id=None):
         logger.warning(f"Skipping order for {symbol} ({direction}): {reason}")
-        return {"success": False, "order_id": None, "status": "REJECTED", "reason": reason}
+        return {"success": False, "order_id": None, "operation_id": operation_id, "status": "REJECTED",
+                "reason": reason, "requested_quantity": quantity, "filled_quantity": 0,
+                "average_price": None, "entry_confirmation_pending": False, "resolved": True}
+
+    if quantity <= 0:
+        return _rejected("computed quantity is 0")
 
     if cfg.PAPER_TRADING:
+        # Paper mode is completely unchanged: no order_history/pending-order-store
+        # calls at all, average_price stays None so callers fall back to the
+        # existing signal-price behavior exactly as before Stage 3.
         logger.info(f"[PAPER] {direction} {quantity} {exchange}:{symbol} @ MARKET")
-        return {"success": True, "order_id": "PAPER", "status": "PAPER_FILLED", "reason": None}
+        return {"success": True, "order_id": "PAPER", "operation_id": None, "status": "PAPER_FILLED",
+                "reason": None, "requested_quantity": quantity, "filled_quantity": quantity,
+                "average_price": None, "entry_confirmation_pending": False, "resolved": True}
 
     if getattr(cfg, "CHECK_MARGIN_BEFORE_ENTRY", True):
         ok, margin_reason = _check_sufficient_margin(kite, symbol, direction, quantity, exchange, cfg)
         if not ok:
-            reason = f"insufficient margin -- {margin_reason}"
-            logger.warning(f"Skipping order for {symbol} ({direction}): {reason}")
-            return {"success": False, "order_id": None, "status": "REJECTED", "reason": reason}
+            return _rejected(f"insufficient margin -- {margin_reason}")
 
     if getattr(cfg, "CIRCUIT_PROXIMITY_PCT", None) is not None:
         from risk_manager import is_near_circuit_limit
@@ -171,24 +188,99 @@ def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange
             if is_near_circuit_limit(direction, last_price, lower_limit, upper_limit, cfg.CIRCUIT_PROXIMITY_PCT):
                 reason = (f"within {cfg.CIRCUIT_PROXIMITY_PCT}% of circuit limit "
                           f"(price={last_price}, lower={lower_limit}, upper={upper_limit})")
-                logger.warning(f"Skipping order for {symbol} ({direction}): {reason}")
-                return {"success": False, "order_id": None, "status": "REJECTED", "reason": reason}
+                return _rejected(reason)
         except Exception as e:
             logger.warning(f"Circuit-proximity check for {symbol} failed ({e}), proceeding without check")
 
+    from pending_order_store import (create_order_intent, attach_broker_order_id,
+                                      update_order_verification, mark_order_resolved,
+                                      has_unresolved_order, UnresolvedOrderExistsError)
+    from order_verification import verify_order_execution
+
+    if has_unresolved_order(symbol, exchange, "ENTRY"):
+        return _rejected("ENTRY_BLOCKED_PENDING_ORDER")
+
+    try:
+        operation_id = create_order_intent(symbol, exchange, "ENTRY", direction, quantity)
+    except UnresolvedOrderExistsError:
+        return _rejected("ENTRY_BLOCKED_PENDING_ORDER")
+    except Exception as e:
+        return _rejected(f"intent creation failed: {e}")
+
     transaction_type = kite.TRANSACTION_TYPE_BUY if direction == "BUY" else kite.TRANSACTION_TYPE_SELL
-    order_id = kite.place_order(
-        variety=cfg.VARIETY,
-        exchange=exchange,
-        tradingsymbol=symbol,
-        transaction_type=transaction_type,
-        quantity=quantity,
-        product=cfg.PRODUCT,
-        order_type=cfg.ORDER_TYPE_ENTRY,
-        market_protection=cfg.MARKET_PROTECTION,
+    try:
+        order_id = kite.place_order(
+            variety=cfg.VARIETY,
+            exchange=exchange,
+            tradingsymbol=symbol,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            product=cfg.PRODUCT,
+            order_type=cfg.ORDER_TYPE_ENTRY,
+            market_protection=cfg.MARKET_PROTECTION,
+        )
+    except Exception as e:
+        # Submission outcome is genuinely UNCERTAIN -- the network call could
+        # have failed after the broker already accepted the order. Never
+        # resubmit blindly. The intent stays unresolved (order_id=None) for
+        # deliberate reconciliation/recovery, not automatic retry.
+        logger.error(f"CRITICAL: order submission uncertain for {symbol} "
+                     f"(operation_id={operation_id}): {e}")
+        return {"success": False, "order_id": None, "operation_id": operation_id,
+                "status": "SUBMISSION_UNCERTAIN",
+                "reason": f"submission exception, broker outcome unknown: {e}",
+                "requested_quantity": quantity, "filled_quantity": 0, "average_price": None,
+                "entry_confirmation_pending": True, "resolved": False}
+
+    attach_broker_order_id(operation_id, order_id)
+    logger.info(f"[LIVE] Placed {direction} order {order_id} for {quantity} {exchange}:{symbol} "
+                f"(operation_id={operation_id})")
+
+    exec_result = verify_order_execution(
+        kite, order_id, quantity,
+        max_wait_seconds=getattr(cfg, "ORDER_VERIFY_MAX_WAIT_SECONDS", 15),
+        poll_interval_seconds=getattr(cfg, "ORDER_VERIFY_POLL_INTERVAL_SECONDS", 1),
     )
-    logger.info(f"[LIVE] Placed {direction} order {order_id} for {quantity} {exchange}:{symbol}")
-    return {"success": True, "order_id": order_id, "status": "SUBMITTED", "reason": None}
+    update_order_verification(operation_id, exec_result)
+
+    filled = exec_result.filled_quantity
+    if exec_result.terminal:
+        mark_order_resolved(operation_id, resolution_reason=exec_result.status)
+
+    if exec_result.status == "COMPLETE":
+        logger.info(f"ENTRY CONFIRMED: {symbol} {direction} {filled}@{exec_result.average_price}")
+        return {"success": True, "order_id": order_id, "operation_id": operation_id, "status": "COMPLETE",
+                "reason": None, "requested_quantity": quantity, "filled_quantity": filled,
+                "average_price": exec_result.average_price, "entry_confirmation_pending": False, "resolved": True}
+
+    if exec_result.status == "PARTIALLY_FILLED" and exec_result.terminal:
+        logger.info(f"ENTRY CONFIRMED (terminal partial fill): {symbol} {direction} "
+                    f"{filled}/{quantity}@{exec_result.average_price}")
+        return {"success": True, "order_id": order_id, "operation_id": operation_id, "status": "PARTIALLY_FILLED",
+                "reason": "terminal partial fill", "requested_quantity": quantity, "filled_quantity": filled,
+                "average_price": exec_result.average_price, "entry_confirmation_pending": False, "resolved": True}
+
+    if exec_result.status in ("REJECTED", "CANCELLED"):
+        logger.warning(f"ENTRY {exec_result.status}: {symbol} {direction} -- {exec_result.status_message}")
+        return {"success": False, "order_id": order_id, "operation_id": operation_id, "status": exec_result.status,
+                "reason": exec_result.status_message, "requested_quantity": quantity, "filled_quantity": 0,
+                "average_price": None, "entry_confirmation_pending": False, "resolved": True}
+
+    # TIMEOUT or UNKNOWN -- not terminal. If any real shares are already
+    # confirmed filled, they exist and must be tracked; the remainder stays
+    # unresolved for later recovery, never assumed either way.
+    if filled > 0:
+        logger.warning(f"ENTRY CONFIRMATION PENDING: {symbol} {direction} -- {filled}/{quantity} "
+                       f"confirmed so far, remainder still unresolved ({exec_result.status})")
+        return {"success": True, "order_id": order_id, "operation_id": operation_id, "status": exec_result.status,
+                "reason": "partial fill confirmed, remainder still pending", "requested_quantity": quantity,
+                "filled_quantity": filled, "average_price": exec_result.average_price,
+                "entry_confirmation_pending": True, "resolved": False}
+
+    logger.warning(f"ENTRY CONFIRMATION PENDING: {symbol} {direction} -- no fill confirmed yet ({exec_result.status})")
+    return {"success": False, "order_id": order_id, "operation_id": operation_id, "status": exec_result.status,
+            "reason": "no confirmed fill yet, order still unresolved", "requested_quantity": quantity,
+            "filled_quantity": 0, "average_price": None, "entry_confirmation_pending": True, "resolved": False}
 
 
 def place_exit_order(kite, symbol: str, direction: str, quantity: int, exchange: str, cfg):

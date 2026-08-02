@@ -167,18 +167,29 @@ real_elapsed = real_time.time() - real_start
 check(f"A 15-second simulated timeout took {real_elapsed:.3f}s of REAL wall-clock time (should be near-instant)",
       real_elapsed < 1.0)
 
-# --- 15: Existing paper/live paths remain untouched (Stage 1 makes zero live-path changes) ---
-print("\n--- No Live-Path Integration Yet ---")
+# --- 15: Stage 3 entry integration is active; exit integration remains deferred ---
+print("\n--- Stage 3 Entry Integration ---")
 with open("main.py") as f:
     main_content = f.read()
 with open("executor.py") as f:
     executor_content = f.read()
-check("main.py does not yet import order_verification (Stage 1 is standalone)",
-      "order_verification" not in main_content)
-check("executor.py does not yet import order_verification (Stage 1 is standalone)",
-      "order_verification" not in executor_content)
-check("executor.py's place_exit_order still returns the original SUBMITTED status (unchanged)",
-      '"status": "SUBMITTED"' in executor_content)
+
+check(
+    "main.py now uses confirmed filled_quantity for live entry tracking",
+    "filled_quantity" in main_content
+)
+
+check(
+    "executor.py now uses verify_order_execution for live entry confirmation",
+    "verify_order_execution" in executor_content
+    and "place_entry_order" in executor_content
+)
+
+check(
+    "executor.py's place_exit_order still returns the original SUBMITTED status "
+    "(exit verification is deferred to Stage 4)",
+    '"status": "SUBMITTED"' in executor_content
+)
 
 print("")
 print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
