@@ -1,0 +1,6 @@
+[Unit]
+Description=Stop Kite bot after market session
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl stop kitebot.service

@@ -1,0 +1,18 @@
+[Unit]
+Description=Build daily NSE watchlist and start Kite paper bot
+Wants=network-online.target
+After=network-online.target
+Conflicts=kitebot-restart.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/kite_trading_bot
+ExecStartPre=+/usr/bin/systemctl stop kitebot.service
+ExecStart=/home/ubuntu/kite_trading_bot/run_auto_watchlist_daily.sh
+ExecStartPost=+/usr/bin/systemctl start kitebot.service
+TimeoutStartSec=600
+UMask=0027
+StandardOutput=journal
+StandardError=journal
