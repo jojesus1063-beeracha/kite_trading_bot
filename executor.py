@@ -284,16 +284,17 @@ def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange
 
 
 
-def place_exit_order(
+def _place_exit_order(
     kite,
     symbol: str,
     direction: str,
     quantity: int,
     exchange: str,
     cfg,
+    action: str,
 ):
     """
-    Stage 4 normal-exit execution.
+    Shared verified execution for normal EXIT and FORCE_EXIT orders.
 
     `direction` is the ORIGINAL position direction. The exit reverses it.
 
@@ -310,11 +311,23 @@ def place_exit_order(
     Force-square-off integration is intentionally deferred to Stage 5.
     """
 
-    exit_direction = "SELL" if direction == "BUY" else "BUY"
+    if action not in ("EXIT", "FORCE_EXIT"):
+        raise ValueError(
+            f"Unsupported exit action: {action}"
+        )
+
+    exit_direction = (
+        "SELL" if direction == "BUY" else "BUY"
+    )
+    action_label = (
+        "FORCE EXIT"
+        if action == "FORCE_EXIT"
+        else "EXIT"
+    )
 
     def rejected(reason, operation_id=None):
         logger.warning(
-            f"Skipping EXIT for {symbol} ({exit_direction}): {reason}"
+            f"Skipping {action_label} for {symbol} ({exit_direction}): {reason}"
         )
         return {
             "success": False,
@@ -331,13 +344,13 @@ def place_exit_order(
 
     def blocked_pending():
         logger.warning(
-            f"Skipping EXIT for {symbol}: EXIT_BLOCKED_PENDING_ORDER"
+            f"Skipping {action_label} for {symbol}: {action}_BLOCKED_PENDING_ORDER"
         )
         return {
             "success": False,
             "order_id": None,
             "operation_id": None,
-            "status": "EXIT_BLOCKED_PENDING_ORDER",
+            "status": f"{action}_BLOCKED_PENDING_ORDER",
             "reason": "an unresolved exit already exists",
             "requested_quantity": quantity,
             "filled_quantity": 0,
@@ -353,7 +366,7 @@ def place_exit_order(
     # no broker submission, no order_history and no pending-order store.
     if cfg.PAPER_TRADING:
         logger.info(
-            f"[PAPER] EXIT {exit_direction} "
+            f"[PAPER] {action_label} {exit_direction} "
             f"{quantity} {exchange}:{symbol} @ MARKET"
         )
         return {
@@ -379,21 +392,21 @@ def place_exit_order(
     from order_verification import verify_order_execution
 
     # EXIT and FORCE_EXIT share one lock family in pending_order_store.
-    if has_unresolved_order(symbol, exchange, "EXIT"):
+    if has_unresolved_order(symbol, exchange, action):
         return blocked_pending()
 
     try:
         operation_id = create_order_intent(
             symbol=symbol,
             exchange=exchange,
-            action="EXIT",
+            action=action,
             side=exit_direction,
             requested_quantity=quantity,
         )
     except UnresolvedOrderExistsError:
         return blocked_pending()
     except Exception as exc:
-        return rejected(f"exit intent creation failed: {exc}")
+        return rejected(f"{action_label.lower()} intent creation failed: {exc}")
 
     transaction_type = (
         kite.TRANSACTION_TYPE_BUY
@@ -416,7 +429,7 @@ def place_exit_order(
         # The broker may have accepted the order even though the network
         # response failed. Keep the intent unresolved and never retry blindly.
         logger.error(
-            f"CRITICAL: EXIT submission uncertain for {symbol} "
+            f"CRITICAL: {action_label} submission uncertain for {symbol} "
             f"(operation_id={operation_id}): {exc}"
         )
         return {
@@ -439,7 +452,7 @@ def place_exit_order(
     attach_broker_order_id(operation_id, order_id)
 
     logger.info(
-        f"[LIVE] Placed EXIT {exit_direction} order {order_id} "
+        f"[LIVE] Placed {action_label} {exit_direction} order {order_id} "
         f"for {quantity} {exchange}:{symbol} "
         f"(operation_id={operation_id})"
     )
@@ -466,7 +479,7 @@ def place_exit_order(
 
     if exec_result.status == "COMPLETE":
         logger.info(
-            f"EXIT CONFIRMED: {symbol} {exit_direction} "
+            f"{action_label} CONFIRMED: {symbol} {exit_direction} "
             f"{filled}@{exec_result.average_price}"
         )
         return {
@@ -487,7 +500,7 @@ def place_exit_order(
         and exec_result.terminal
     ):
         logger.info(
-            f"EXIT CONFIRMED (terminal partial fill): "
+            f"{action_label} CONFIRMED (terminal partial fill): "
             f"{symbol} {exit_direction} "
             f"{filled}/{quantity}@{exec_result.average_price}"
         )
@@ -506,7 +519,7 @@ def place_exit_order(
 
     if exec_result.status in ("REJECTED", "CANCELLED"):
         logger.warning(
-            f"EXIT {exec_result.status}: {symbol} "
+            f"{action_label} {exec_result.status}: {symbol} "
             f"{exit_direction} -- {exec_result.status_message}"
         )
         return {
@@ -526,7 +539,7 @@ def place_exit_order(
     # confirmed shares must be acted on, but the remainder remains unresolved.
     if filled > 0:
         logger.warning(
-            f"EXIT CONFIRMATION PENDING: {symbol} "
+            f"{action_label} CONFIRMATION PENDING: {symbol} "
             f"{exit_direction} -- {filled}/{quantity} confirmed; "
             f"remainder unresolved ({exec_result.status})"
         )
@@ -546,7 +559,7 @@ def place_exit_order(
         }
 
     logger.warning(
-        f"EXIT CONFIRMATION PENDING: {symbol} {exit_direction} -- "
+        f"{action_label} CONFIRMATION PENDING: {symbol} {exit_direction} -- "
         f"no fill confirmed ({exec_result.status})"
     )
     return {
@@ -561,3 +574,43 @@ def place_exit_order(
         "exit_confirmation_pending": True,
         "resolved": False,
     }
+
+
+def place_exit_order(
+    kite,
+    symbol: str,
+    direction: str,
+    quantity: int,
+    exchange: str,
+    cfg,
+):
+    """Submit and verify a normal strategy-triggered exit."""
+    return _place_exit_order(
+        kite,
+        symbol,
+        direction,
+        quantity,
+        exchange,
+        cfg,
+        action="EXIT",
+    )
+
+
+def place_force_exit_order(
+    kite,
+    symbol: str,
+    direction: str,
+    quantity: int,
+    exchange: str,
+    cfg,
+):
+    """Submit and verify an end-of-day forced exit."""
+    return _place_exit_order(
+        kite,
+        symbol,
+        direction,
+        quantity,
+        exchange,
+        cfg,
+        action="FORCE_EXIT",
+    )
