@@ -26,8 +26,8 @@ import shutil
 import tempfile
 import time
 from collections import Counter
-from dataclasses import asdict, dataclass
-from datetime import datetime
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -61,12 +61,24 @@ class AutoWatchlistError(RuntimeError):
 @dataclass(frozen=True)
 class SelectorSettings:
     top_n: int = 80
-    min_selected: int = 40
+    min_selected: int = 80
     min_price: float = 20.0
     max_price: float = 5000.0
     min_turnover: float = 500_000.0
     max_spread_pct: float = 0.40
     min_circuit_distance_pct: float = 0.75
+
+    # Priority 1: strict Open = Low using the instrument tick size.
+    enable_open_equals_low_priority: bool = True
+    open_low_tolerance_ticks: int = 0
+
+    # Priority 2: minimum current movement required for live momentum.
+    min_live_momentum_pct: float = 0.20
+
+    # Priority 3: use previous completed trading-day momentum.
+    enable_previous_day_momentum_fallback: bool = True
+    historical_lookback_days: int = 45
+    historical_delay_seconds: float = 0.36
 
 
 def now_ist_iso() -> str:
@@ -448,11 +460,38 @@ def evaluate_quote(
         + depth_score
     )
 
+    tick_size = positive_float(
+        universe_row.get("tick_size"),
+        0.05,
+    )
+
+    if tick_size <= 0:
+        tick_size = 0.05
+
+    open_low_difference = open_price - low_price
+
+    open_low_tolerance = (
+        tick_size
+        * max(settings.open_low_tolerance_ticks, 0)
+        + 1e-9
+    )
+
+    open_equals_low = (
+        settings.enable_open_equals_low_priority
+        and abs(open_low_difference) <= open_low_tolerance
+    )
+
     candidate = {
         "symbol": symbol,
         "exchange": "NSE",
         "company_name": universe_row.get("company_name", ""),
         "industry": universe_row.get("industry", ""),
+        "tick_size": round(tick_size, 6),
+        "open_low_difference": round(
+            open_low_difference,
+            6,
+        ),
+        "open_equals_low": open_equals_low,
         "instrument_token": positive_int(
             quote.get("instrument_token")
         ),
@@ -480,6 +519,236 @@ def evaluate_quote(
     return candidate, None
 
 
+def _normalise_daily_candles(
+    candles: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(candles, list):
+        return []
+
+    usable = [
+        candle
+        for candle in candles
+        if isinstance(candle, dict)
+        and positive_float(candle.get("close")) > 0
+    ]
+
+    usable.sort(
+        key=lambda candle: str(candle.get("date") or "")
+    )
+
+    return usable
+
+
+def calculate_previous_day_momentum(
+    candles: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    usable = _normalise_daily_candles(candles)
+
+    if len(usable) < 2:
+        return None
+
+    previous_candle = usable[-2]
+    latest_candle = usable[-1]
+
+    previous_close = positive_float(
+        previous_candle.get("close")
+    )
+    latest_close = positive_float(
+        latest_candle.get("close")
+    )
+    latest_high = positive_float(
+        latest_candle.get("high")
+    )
+    latest_low = positive_float(
+        latest_candle.get("low")
+    )
+    latest_volume = positive_int(
+        latest_candle.get("volume")
+    )
+
+    if (
+        previous_close <= 0
+        or latest_close <= 0
+        or latest_high <= 0
+        or latest_low <= 0
+    ):
+        return None
+
+    return_pct = (
+        (latest_close - previous_close)
+        / previous_close
+        * 100.0
+    )
+
+    range_pct = (
+        (latest_high - latest_low)
+        / previous_close
+        * 100.0
+    )
+
+    baseline_volumes = [
+        positive_int(candle.get("volume"))
+        for candle in usable[:-1][-20:]
+        if positive_int(candle.get("volume")) > 0
+    ]
+
+    if baseline_volumes:
+        average_volume = (
+            sum(baseline_volumes)
+            / len(baseline_volumes)
+        )
+    else:
+        average_volume = 0.0
+
+    volume_ratio = (
+        latest_volume / average_volume
+        if latest_volume > 0 and average_volume > 0
+        else 0.0
+    )
+
+    # Weighted fallback momentum score:
+    # 60% absolute close-to-close return
+    # 25% completed-day range
+    # 15% relative volume, capped to avoid outliers dominating
+    momentum_score = (
+        0.60 * abs(return_pct)
+        + 0.25 * range_pct
+        + 0.15 * min(volume_ratio, 5.0)
+    )
+
+    if return_pct > 0:
+        direction = "UP"
+    elif return_pct < 0:
+        direction = "DOWN"
+    else:
+        direction = "FLAT"
+
+    return {
+        "previous_day_date": str(
+            latest_candle.get("date") or ""
+        ),
+        "previous_day_return_pct": round(
+            return_pct,
+            6,
+        ),
+        "previous_day_range_pct": round(
+            range_pct,
+            6,
+        ),
+        "previous_day_volume": latest_volume,
+        "previous_day_average_volume": round(
+            average_volume,
+            2,
+        ),
+        "previous_day_volume_ratio": round(
+            volume_ratio,
+            6,
+        ),
+        "previous_day_direction": direction,
+        "previous_day_momentum_score": round(
+            momentum_score,
+            6,
+        ),
+    }
+
+
+def fetch_previous_day_momentum(
+    kite: Any,
+    matched_rows: list[dict[str, Any]],
+    settings: SelectorSettings,
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, int],
+]:
+    today = datetime.now(IST).date()
+
+    from_date = today - timedelta(
+        days=settings.historical_lookback_days
+    )
+    to_date = today - timedelta(days=1)
+
+    momentum: dict[str, dict[str, Any]] = {}
+
+    statistics = {
+        "historical_requested": 0,
+        "historical_received": 0,
+        "historical_usable": 0,
+        "historical_failed": 0,
+    }
+
+    consecutive_failures = 0
+    total = len(matched_rows)
+
+    for index, row in enumerate(matched_rows, 1):
+        symbol = row["symbol"]
+        instrument_token = positive_int(
+            row.get("instrument_token")
+        )
+
+        if instrument_token <= 0:
+            statistics["historical_failed"] += 1
+            continue
+
+        statistics["historical_requested"] += 1
+
+        try:
+            candles = kite.historical_data(
+                instrument_token,
+                from_date,
+                to_date,
+                "day",
+                continuous=False,
+                oi=False,
+            )
+
+            statistics["historical_received"] += 1
+            consecutive_failures = 0
+
+        except Exception as exc:
+            statistics["historical_failed"] += 1
+            consecutive_failures += 1
+
+            print(
+                "Historical data failed:",
+                symbol,
+                type(exc).__name__,
+            )
+
+            if consecutive_failures >= 10:
+                raise AutoWatchlistError(
+                    "Ten consecutive historical-data "
+                    "requests failed. Aborting fallback "
+                    "generation, likely because authentication "
+                    "or the Kite API is unavailable."
+                ) from exc
+
+            time.sleep(
+                settings.historical_delay_seconds
+            )
+            continue
+
+        calculated = calculate_previous_day_momentum(
+            candles
+        )
+
+        if calculated is not None:
+            momentum[symbol] = calculated
+            statistics["historical_usable"] += 1
+
+        if index % 50 == 0 or index == total:
+            print(
+                "Previous-day momentum progress:",
+                f"{index}/{total}",
+            )
+
+        if index < total:
+            time.sleep(
+                settings.historical_delay_seconds
+            )
+
+    return momentum, statistics
+
+
 def generate_selection(
     kite: Any,
     universe: list[dict[str, str]],
@@ -498,16 +767,31 @@ def generate_selection(
         raw_instruments
     )
 
-    matched_rows = [
-        row
-        for row in universe
-        if row["symbol"] in instrument_map
-    ]
+    matched_rows: list[dict[str, Any]] = []
+
+    for row in universe:
+        instrument = instrument_map.get(row["symbol"])
+
+        if instrument is None:
+            continue
+
+        matched_rows.append(
+            {
+                **row,
+                "instrument_token": positive_int(
+                    instrument.get("instrument_token")
+                ),
+                "tick_size": positive_float(
+                    instrument.get("tick_size"),
+                    0.05,
+                ),
+            }
+        )
 
     if len(matched_rows) < settings.min_selected:
         raise AutoWatchlistError(
-            "Too few NIFTY 500 symbols matched current Kite instruments: "
-            f"{len(matched_rows)}"
+            "Too few NIFTY 500 symbols matched current "
+            f"Kite instruments: {len(matched_rows)}"
         )
 
     quote_keys = [
@@ -515,17 +799,19 @@ def generate_selection(
         for row in matched_rows
     ]
 
+    # This is the single 9:16 live snapshot. Historical fallback
+    # requests happen only after this quote snapshot is captured.
     quotes = fetch_full_quotes(kite, quote_keys)
 
-    eligible: list[dict[str, Any]] = []
-    rejection_reasons: Counter[str] = Counter()
+    strict_eligible: list[dict[str, Any]] = []
+    strict_rejections: Counter[str] = Counter()
 
     for row in matched_rows:
         quote_key = f"NSE:{row['symbol']}"
         quote = quotes.get(quote_key)
 
         if not isinstance(quote, dict):
-            rejection_reasons["missing_quote"] += 1
+            strict_rejections["missing_quote"] += 1
             continue
 
         candidate, rejection_reason = evaluate_quote(
@@ -536,22 +822,197 @@ def generate_selection(
         )
 
         if candidate is None:
-            rejection_reasons[
+            strict_rejections[
                 rejection_reason or "unknown_rejection"
             ] += 1
             continue
 
-        eligible.append(candidate)
+        strict_eligible.append(candidate)
 
-    eligible.sort(
-        key=lambda item: (
+    def live_sort_key(
+        item: dict[str, Any],
+    ) -> tuple[Any, ...]:
+        return (
             -positive_float(item.get("score")),
             -positive_float(item.get("turnover")),
             item["symbol"],
         )
-    )
 
-    selected = eligible[: settings.top_n]
+    # Priority 1: Open = Low.
+    priority_1 = [
+        candidate
+        for candidate in strict_eligible
+        if candidate.get("open_equals_low") is True
+    ]
+
+    priority_1.sort(key=live_sort_key)
+
+    for candidate in priority_1:
+        candidate["selection_priority"] = (
+            "PRIORITY_1_OPEN_EQUALS_LOW"
+        )
+
+    # Priority 2: strong current momentum, excluding Priority 1.
+    priority_2 = [
+        candidate
+        for candidate in strict_eligible
+        if candidate.get("open_equals_low") is not True
+        and max(
+            abs(
+                positive_float(
+                    candidate.get("change_pct")
+                )
+            ),
+            positive_float(
+                candidate.get("day_range_pct")
+            ),
+        )
+        >= settings.min_live_momentum_pct
+    ]
+
+    priority_2.sort(key=live_sort_key)
+
+    for candidate in priority_2:
+        candidate["selection_priority"] = (
+            "PRIORITY_2_LIVE_MOMENTUM"
+        )
+
+    selected: list[dict[str, Any]] = []
+    selected_symbols: set[str] = set()
+
+    for candidate in priority_1 + priority_2:
+        symbol = candidate["symbol"]
+
+        if symbol in selected_symbols:
+            continue
+
+        selected.append(candidate)
+        selected_symbols.add(symbol)
+
+        if len(selected) >= settings.top_n:
+            break
+
+    historical_statistics = {
+        "historical_requested": 0,
+        "historical_received": 0,
+        "historical_usable": 0,
+        "historical_failed": 0,
+    }
+
+    fallback_rejections: Counter[str] = Counter()
+    priority_3: list[dict[str, Any]] = []
+
+    # Priority 3: fill remaining spaces from the previous
+    # completed trading day's strongest absolute momentum.
+    if (
+        len(selected) < settings.top_n
+        and settings.enable_previous_day_momentum_fallback
+    ):
+        (
+            momentum_by_symbol,
+            historical_statistics,
+        ) = fetch_previous_day_momentum(
+            kite,
+            matched_rows,
+            settings,
+        )
+
+        # Previous-day fallback ignores the strict early-turnover
+        # threshold, but still requires a live traded quote,
+        # valid spread, acceptable price and circuit safety.
+        fallback_settings = replace(
+            settings,
+            min_turnover=0.0,
+        )
+
+        for row in matched_rows:
+            symbol = row["symbol"]
+
+            if symbol in selected_symbols:
+                continue
+
+            momentum = momentum_by_symbol.get(symbol)
+
+            if momentum is None:
+                fallback_rejections[
+                    "missing_previous_day_momentum"
+                ] += 1
+                continue
+
+            quote = quotes.get(f"NSE:{symbol}")
+
+            if not isinstance(quote, dict):
+                fallback_rejections[
+                    "missing_current_quote"
+                ] += 1
+                continue
+
+            candidate, rejection_reason = evaluate_quote(
+                row,
+                quote,
+                fallback_settings,
+                allow_missing_depth=allow_missing_depth,
+            )
+
+            if candidate is None:
+                fallback_rejections[
+                    rejection_reason
+                    or "unknown_fallback_rejection"
+                ] += 1
+                continue
+
+            candidate.update(momentum)
+            candidate["selection_priority"] = (
+                "PRIORITY_3_PREVIOUS_DAY_MOMENTUM"
+            )
+            candidate["live_score"] = candidate["score"]
+            candidate["score"] = momentum[
+                "previous_day_momentum_score"
+            ]
+
+            priority_3.append(candidate)
+
+        priority_3.sort(
+            key=lambda item: (
+                -positive_float(
+                    item.get(
+                        "previous_day_momentum_score"
+                    )
+                ),
+                -abs(
+                    positive_float(
+                        item.get(
+                            "previous_day_return_pct"
+                        )
+                    )
+                ),
+                -positive_float(
+                    item.get(
+                        "previous_day_volume_ratio"
+                    )
+                ),
+                item["symbol"],
+            )
+        )
+
+        for candidate in priority_3:
+            symbol = candidate["symbol"]
+
+            if symbol in selected_symbols:
+                continue
+
+            selected.append(candidate)
+            selected_symbols.add(symbol)
+
+            if len(selected) >= settings.top_n:
+                break
+
+    selected = selected[: settings.top_n]
+
+    selected_priority_counts = Counter(
+        item.get("selection_priority", "UNKNOWN")
+        for item in selected
+    )
 
     status = (
         "success"
@@ -563,9 +1024,16 @@ def generate_selection(
         "status": status,
         "generated_at": now_ist_iso(),
         "source": {
-            "universe": "NIFTY 500 official constituent CSV",
+            "universe": (
+                "NIFTY 500 official constituent CSV"
+            ),
             "universe_url": NIFTY_500_URL,
-            "quotes": "Kite Connect full market quotes",
+            "quotes": (
+                "Kite Connect full market quotes"
+            ),
+            "previous_day_momentum": (
+                "Kite Connect daily historical candles"
+            ),
         },
         "settings": asdict(settings),
         "statistics": {
@@ -573,12 +1041,23 @@ def generate_selection(
             "kite_nse_equities": len(instrument_map),
             "matched_symbols": len(matched_rows),
             "quotes_received": len(quotes),
-            "eligible_symbols": len(eligible),
-            "selected_symbols": len(selected),
-            "rejected_symbols": sum(rejection_reasons.values()),
-            "rejection_reasons": dict(
-                sorted(rejection_reasons.items())
+            "strict_eligible_symbols": len(
+                strict_eligible
             ),
+            "priority_1_candidates": len(priority_1),
+            "priority_2_candidates": len(priority_2),
+            "priority_3_candidates": len(priority_3),
+            "selected_symbols": len(selected),
+            "selected_priority_counts": dict(
+                sorted(selected_priority_counts.items())
+            ),
+            "strict_rejection_reasons": dict(
+                sorted(strict_rejections.items())
+            ),
+            "fallback_rejection_reasons": dict(
+                sorted(fallback_rejections.items())
+            ),
+            **historical_statistics,
         },
         "selected": selected,
     }
@@ -586,8 +1065,9 @@ def generate_selection(
     if status != "success":
         result["error"] = (
             "Selection produced only "
-            f"{len(selected)} eligible symbols; "
-            f"minimum required is {settings.min_selected}"
+            f"{len(selected)} safe unique symbols; "
+            f"minimum required is "
+            f"{settings.min_selected}"
         )
 
     return result
@@ -668,51 +1148,88 @@ def print_summary(result: dict[str, Any]) -> None:
     print("===== AUTO-WATCHLIST RESULT =====")
     print("Status:", result.get("status"))
     print("Generated at:", result.get("generated_at"))
-    print("NIFTY 500 rows:", statistics.get("nifty500_rows"))
-    print("Matched symbols:", statistics.get("matched_symbols"))
-    print("Quotes received:", statistics.get("quotes_received"))
-    print("Eligible symbols:", statistics.get("eligible_symbols"))
-    print("Selected symbols:", statistics.get("selected_symbols"))
-
-    reasons = statistics.get("rejection_reasons") or {}
-
-    print()
-    print("Rejection reasons:")
-
-    if reasons:
-        for reason, count in reasons.items():
-            print(f"  {reason}: {count}")
-    else:
-        print("  None")
+    print(
+        "NIFTY 500 rows:",
+        statistics.get("nifty500_rows"),
+    )
+    print(
+        "Matched symbols:",
+        statistics.get("matched_symbols"),
+    )
+    print(
+        "Quotes received:",
+        statistics.get("quotes_received"),
+    )
+    print(
+        "Strict eligible:",
+        statistics.get("strict_eligible_symbols"),
+    )
+    print(
+        "Priority 1 candidates:",
+        statistics.get("priority_1_candidates"),
+    )
+    print(
+        "Priority 2 candidates:",
+        statistics.get("priority_2_candidates"),
+    )
+    print(
+        "Priority 3 candidates:",
+        statistics.get("priority_3_candidates"),
+    )
+    print(
+        "Selected symbols:",
+        statistics.get("selected_symbols"),
+    )
+    print(
+        "Selected priority counts:",
+        statistics.get("selected_priority_counts"),
+    )
 
     print()
     print("Top selected symbols:")
 
-    for item in selected[:20]:
+    for item in selected[:80]:
         print(
             f"  {item['symbol']:<14} "
-            f"score={item['score']:>8.3f} "
-            f"turnover=₹{item['turnover']:>12,.0f} "
-            f"change={item['change_pct']:>7.3f}% "
-            f"range={item['day_range_pct']:>7.3f}% "
-            f"spread={item['spread_pct']}"
+            f"{item.get('selection_priority', 'UNKNOWN'):<38} "
+            f"score={positive_float(item.get('score')):>8.3f} "
+            f"change={positive_float(item.get('change_pct')):>7.3f}% "
+            f"range={positive_float(item.get('day_range_pct')):>7.3f}% "
+            f"prev={positive_float(item.get('previous_day_return_pct')):>7.3f}%"
         )
 
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate an automatic NSE morning watchlist"
+        description=(
+            "Generate an automatic NSE morning watchlist"
+        )
     )
 
     parser.add_argument(
         "--write",
         action="store_true",
-        help="Atomically update user_config.json after validation",
+        help=(
+            "Atomically update user_config.json "
+            "after validation"
+        ),
     )
     parser.add_argument("--top", type=int, default=80)
-    parser.add_argument("--min-selected", type=int, default=40)
-    parser.add_argument("--min-price", type=float, default=20.0)
-    parser.add_argument("--max-price", type=float, default=5000.0)
+    parser.add_argument(
+        "--min-selected",
+        type=int,
+        default=80,
+    )
+    parser.add_argument(
+        "--min-price",
+        type=float,
+        default=20.0,
+    )
+    parser.add_argument(
+        "--max-price",
+        type=float,
+        default=5000.0,
+    )
     parser.add_argument(
         "--min-turnover",
         type=float,
@@ -729,11 +1246,52 @@ def parse_arguments() -> argparse.Namespace:
         default=0.75,
     )
     parser.add_argument(
+        "--open-low-tolerance-ticks",
+        type=int,
+        default=0,
+        help=(
+            "Number of instrument ticks permitted between "
+            "today's open and low. Zero means strict Open = Low."
+        ),
+    )
+    parser.add_argument(
+        "--min-live-momentum-pct",
+        type=float,
+        default=0.20,
+        help=(
+            "Minimum absolute current change or day range "
+            "for Priority 2."
+        ),
+    )
+    parser.add_argument(
+        "--disable-open-equals-low-priority",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--disable-previous-day-fallback",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--historical-lookback-days",
+        type=int,
+        default=45,
+    )
+    parser.add_argument(
+        "--historical-delay-seconds",
+        type=float,
+        default=0.36,
+        help=(
+            "Delay between historical requests to remain "
+            "within the Kite historical-data rate limit."
+        ),
+    )
+    parser.add_argument(
         "--allow-missing-depth",
         action="store_true",
         help=(
-            "Allow missing bid/ask depth for an after-hours dry run. "
-            "This cannot be combined with --write."
+            "Allow missing bid/ask depth for an "
+            "after-hours dry run. This cannot be "
+            "combined with --write."
         ),
     )
     parser.add_argument(
@@ -776,6 +1334,30 @@ def main() -> int:
             "ERROR: --min-selected cannot exceed --top"
         )
 
+    if args.open_low_tolerance_ticks < 0:
+        raise SystemExit(
+            "ERROR: --open-low-tolerance-ticks "
+            "cannot be negative"
+        )
+
+    if args.min_live_momentum_pct < 0:
+        raise SystemExit(
+            "ERROR: --min-live-momentum-pct "
+            "cannot be negative"
+        )
+
+    if args.historical_lookback_days < 10:
+        raise SystemExit(
+            "ERROR: --historical-lookback-days "
+            "must be at least 10"
+        )
+
+    if args.historical_delay_seconds < 0.34:
+        raise SystemExit(
+            "ERROR: --historical-delay-seconds "
+            "must be at least 0.34"
+        )
+
     settings = SelectorSettings(
         top_n=args.top,
         min_selected=args.min_selected,
@@ -785,6 +1367,24 @@ def main() -> int:
         max_spread_pct=args.max_spread_pct,
         min_circuit_distance_pct=(
             args.min_circuit_distance_pct
+        ),
+        enable_open_equals_low_priority=(
+            not args.disable_open_equals_low_priority
+        ),
+        open_low_tolerance_ticks=(
+            args.open_low_tolerance_ticks
+        ),
+        min_live_momentum_pct=(
+            args.min_live_momentum_pct
+        ),
+        enable_previous_day_momentum_fallback=(
+            not args.disable_previous_day_fallback
+        ),
+        historical_lookback_days=(
+            args.historical_lookback_days
+        ),
+        historical_delay_seconds=(
+            args.historical_delay_seconds
         ),
     )
 
