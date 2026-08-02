@@ -63,6 +63,30 @@ print("\n--- Hard Stop-Loss Regression Tests ---")
 
 import main as main_module
 
+def fake_confirmed_exit(*args, **kwargs):
+    """Stage 4-compatible confirmed exit result for legacy tests."""
+
+    quantity = kwargs.get("quantity")
+
+    if quantity is None and len(args) >= 4:
+        quantity = args[3]
+
+    quantity = int(quantity or 0)
+
+    return {
+        "success": True,
+        "order_id": "TEST-EXIT-ORDER",
+        "operation_id": None,
+        "status": "COMPLETE",
+        "reason": None,
+        "requested_quantity": quantity,
+        "filled_quantity": quantity,
+        "average_price": 100.0,
+        "exit_confirmation_pending": False,
+        "resolved": True,
+    }
+
+
 def run_check(direction, entry, stop, price_sequence, qty=10, check_trend=False):
     """Helper: mocks fetch_candles to return a fixed last price, runs check_position_exit once."""
     mock_kite = MagicMock()
@@ -77,7 +101,7 @@ def run_check(direction, entry, stop, price_sequence, qty=10, check_trend=False)
 
     df = make_df_5m(closes=price_sequence)
     main_module.fetch_candles = lambda *a, **kw: df
-    main_module.place_exit_order = lambda *a, **kw: True
+    main_module.place_exit_order = fake_confirmed_exit
     main_module.record_trade = lambda *a, **kw: None
     main_module.save_positions = lambda *a, **kw: None
 
@@ -144,7 +168,7 @@ tokens = {"TESTSTOCK": 12345}
 exchange_map = {"TESTSTOCK": "NSE"}
 risk = RiskManager(cfg, persist=False)
 main_module.fetch_candles = lambda *a, **kw: make_df_5m(closes=[100,102,104,106,108,110,109,108])
-main_module.place_exit_order = lambda *a, **kw: True
+main_module.place_exit_order = fake_confirmed_exit
 main_module.record_trade = lambda *a, **kw: None
 main_module.save_positions = lambda *a, **kw: None
 check_position_exit(mock_kite, "TESTSTOCK", tokens, exchange_map, open_positions, risk, check_trend=False)
@@ -185,7 +209,7 @@ def fake_fetch(kite, token, interval, lookback_days=1, **kwargs):
     return down_15m  # 15m call returns a clear downtrend
 
 main_module.fetch_candles = fake_fetch
-main_module.place_exit_order = lambda *a, **kw: True
+main_module.place_exit_order = fake_confirmed_exit
 main_module.record_trade = lambda *a, **kw: None
 main_module.save_positions = lambda *a, **kw: None
 

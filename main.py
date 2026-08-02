@@ -401,10 +401,6 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             save_positions(open_positions)
 
     if hit_hard_stop or hit_trailing_stop or structure_broken or trend_reversed or hit_target:
-        cost_result = net_pnl_for_trade(direction, pos["qty"], pos["entry"], last_price)
-        gross_pnl = cost_result["gross_pnl"]
-        costs = cost_result["costs"]
-        pnl = cost_result["net_pnl"]  # TRUE NET -- used for kill-switch and logging
         if hit_hard_stop:
             result = "stop"
         elif hit_trailing_stop:
@@ -416,30 +412,259 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         else:
             result = "trend_reversal"
 
-        gross_pct = ((last_price - pos["entry"]) / pos["entry"] * 100 if direction == "BUY"
-                     else (pos["entry"] - last_price) / pos["entry"] * 100)
-        net_pct = (pnl / (pos["entry"] * pos["qty"]) * 100) if pos["entry"] and pos["qty"] else None
         time_in_trade_str = "N/A"
         try:
             if pos.get("entry_time"):
                 entry_dt = pd.to_datetime(pos["entry_time"])
-                exit_dt = pd.Timestamp.now(tz=entry_dt.tz) if entry_dt.tz is not None else pd.Timestamp.now()
-                minutes = (exit_dt - entry_dt).total_seconds() / 60
+                exit_dt = (
+                    pd.Timestamp.now(tz=entry_dt.tz)
+                    if entry_dt.tz is not None
+                    else pd.Timestamp.now()
+                )
+                minutes = (
+                    exit_dt - entry_dt
+                ).total_seconds() / 60
                 time_in_trade_str = f"{minutes:.0f} minutes"
         except Exception:
             pass
 
-        place_exit_order(kite, symbol, direction, pos["qty"], exchange, cfg)
-        risk.record_trade_result(pnl)
-        record_trade(symbol, direction, pos["qty"], pos["entry"], last_price, pnl,
-                     result, exchange=exchange, gross_pnl=gross_pnl, costs=costs)
-        logger.info(f"Closed {exchange}:{symbol} ({result}) net P&L={pnl:.2f} (gross={gross_pnl:.2f}, "
-                    f"costs={costs:.2f}) | target={pos.get('target')} | gross_pct={gross_pct:+.2f}% | "
-                    f"net_pct={net_pct:+.2f}% | time_in_trade={time_in_trade_str}")
-        del open_positions[symbol]
-        save_positions(open_positions)
-        return f"CLOSED ({result}) @ {last_price:.2f} | P&L {pnl:+.2f}"
+        requested_qty = int(pos["qty"])
 
+        exit_result = place_exit_order(
+            kite,
+            symbol,
+            direction,
+            requested_qty,
+            exchange,
+            cfg,
+        )
+
+        confirmed_qty = int(
+            exit_result.get("filled_quantity") or 0
+        )
+
+        # Persist the latest known broker-exit state even when nothing
+        # has filled yet. This prevents a restart from forgetting that
+        # an exit is still pending or needs reconciliation.
+        if exit_result.get("order_id") is not None:
+            pos["exit_order_id"] = exit_result.get("order_id")
+
+        if exit_result.get("operation_id") is not None:
+            pos["exit_operation_id"] = exit_result.get(
+                "operation_id"
+            )
+
+        pos["exit_requested_quantity"] = (
+            exit_result.get(
+                "requested_quantity",
+                requested_qty,
+            )
+        )
+        pos["exit_fill_status"] = exit_result.get("status")
+        pos["exit_confirmation_pending"] = exit_result.get(
+            "exit_confirmation_pending",
+            False,
+        )
+        pos["exit_status_message"] = exit_result.get("reason")
+        pos["exit_reason"] = result
+
+        def finalize_terminal_exit_operation():
+            """
+            Resolve the durable EXIT operation only AFTER the
+            corresponding local position update has been saved.
+
+            exit_result["resolved"] means the broker result is
+            terminal. The pending-order record intentionally remains
+            unresolved until this function is called.
+            """
+            operation_id = exit_result.get("operation_id")
+
+            if (
+                operation_id is None
+                or not exit_result.get("resolved", False)
+            ):
+                return
+
+            from pending_order_store import mark_order_resolved
+
+            mark_order_resolved(
+                operation_id,
+                resolution_reason=exit_result.get("status"),
+            )
+
+        if confirmed_qty <= 0:
+            save_positions(open_positions)
+            finalize_terminal_exit_operation()
+
+            if pos["exit_confirmation_pending"]:
+                logger.warning(
+                    f"{symbol}: exit trigger={result}, but broker "
+                    f"confirmation is still pending "
+                    f"({exit_result.get('status')}); "
+                    f"position remains open locally"
+                )
+                return (
+                    f"EXIT PENDING ({result}) | "
+                    f"status={exit_result.get('status')} | "
+                    f"confirmed 0/{requested_qty}"
+                )
+
+            logger.warning(
+                f"{symbol}: exit trigger={result}, but no quantity "
+                f"was filled ({exit_result.get('status')}); "
+                f"position remains open"
+            )
+            return (
+                f"EXIT NOT FILLED ({result}) | "
+                f"status={exit_result.get('status')}"
+            )
+
+        if confirmed_qty > requested_qty:
+            logger.critical(
+                f"{symbol}: broker reported exit fill "
+                f"{confirmed_qty} greater than local position "
+                f"quantity {requested_qty}. "
+                f"Manual reconciliation required."
+            )
+            raise RuntimeError(
+                "confirmed exit quantity exceeds local position"
+            )
+
+        exit_price = exit_result.get("average_price")
+
+        # Paper mode intentionally has no broker average price.
+        if exit_price is None and cfg.PAPER_TRADING:
+            exit_price = last_price
+
+        if exit_price is None:
+            # A real fill with no execution price must never have a
+            # fabricated P&L. Reduce the known live exposure, but leave
+            # an explicit reconciliation record instead of inventing a
+            # price or silently recording inaccurate profit.
+            remaining_qty = requested_qty - confirmed_qty
+
+            pos["qty"] = remaining_qty
+            pos["exit_filled_quantity"] = confirmed_qty
+            pos["exit_average_price"] = None
+            pos["manual_reconciliation_required"] = True
+            pos["exit_status_message"] = (
+                "confirmed broker exit fill has no average price; "
+                "P&L was not recorded"
+            )
+
+            save_positions(open_positions)
+            finalize_terminal_exit_operation()
+
+            logger.critical(
+                f"{symbol}: {confirmed_qty} exit shares confirmed, "
+                f"but broker average price is unavailable. "
+                f"Remaining local quantity={remaining_qty}. "
+                f"Manual reconciliation required; P&L not recorded."
+            )
+
+            return (
+                f"EXIT RECONCILIATION REQUIRED ({result}) | "
+                f"confirmed {confirmed_qty}/{requested_qty}"
+            )
+
+        exit_price = float(exit_price)
+
+        cost_result = net_pnl_for_trade(
+            direction,
+            confirmed_qty,
+            pos["entry"],
+            exit_price,
+        )
+
+        gross_pnl = cost_result["gross_pnl"]
+        costs = cost_result["costs"]
+        pnl = cost_result["net_pnl"]
+
+        gross_pct = (
+            (
+                exit_price - pos["entry"]
+            ) / pos["entry"] * 100
+            if direction == "BUY"
+            else (
+                pos["entry"] - exit_price
+            ) / pos["entry"] * 100
+        )
+
+        net_pct = (
+            pnl / (
+                pos["entry"] * confirmed_qty
+            ) * 100
+            if pos["entry"] and confirmed_qty
+            else None
+        )
+
+        risk.record_trade_result(pnl)
+
+        record_trade(
+            symbol,
+            direction,
+            confirmed_qty,
+            pos["entry"],
+            exit_price,
+            pnl,
+            result,
+            exchange=exchange,
+            gross_pnl=gross_pnl,
+            costs=costs,
+        )
+
+        remaining_qty = requested_qty - confirmed_qty
+
+        pos["exit_filled_quantity"] = confirmed_qty
+        pos["exit_average_price"] = exit_price
+        pos["last_exit_price"] = exit_price
+        pos["last_exit_pnl"] = pnl
+
+        if remaining_qty == 0:
+            logger.info(
+                f"Closed {exchange}:{symbol} ({result}) "
+                f"confirmed_qty={confirmed_qty} "
+                f"exit={exit_price:.2f} "
+                f"net P&L={pnl:.2f} "
+                f"(gross={gross_pnl:.2f}, costs={costs:.2f}) "
+                f"| target={pos.get('target')} "
+                f"| gross_pct={gross_pct:+.2f}% "
+                f"| net_pct={net_pct:+.2f}% "
+                f"| time_in_trade={time_in_trade_str} "
+                f"| fill_status={exit_result.get('status')}"
+            )
+
+            del open_positions[symbol]
+            save_positions(open_positions)
+            finalize_terminal_exit_operation()
+
+            return (
+                f"CLOSED ({result}) @ {exit_price:.2f} "
+                f"| qty {confirmed_qty} "
+                f"| P&L {pnl:+.2f}"
+            )
+
+        pos["qty"] = remaining_qty
+        save_positions(open_positions)
+        finalize_terminal_exit_operation()
+
+        logger.warning(
+            f"Partially closed {exchange}:{symbol} ({result}) "
+            f"confirmed_qty={confirmed_qty}/{requested_qty} "
+            f"exit={exit_price:.2f} "
+            f"remaining_qty={remaining_qty} "
+            f"net P&L={pnl:.2f} "
+            f"| fill_status={exit_result.get('status')} "
+            f"| confirmation_pending="
+            f"{pos['exit_confirmation_pending']}"
+        )
+
+        return (
+            f"PARTIAL EXIT ({result}) @ {exit_price:.2f} "
+            f"| closed {confirmed_qty}/{requested_qty} "
+            f"| remaining {remaining_qty} "
+            f"| P&L {pnl:+.2f}"
+        )
     unrealized_per_share = (last_price - pos["entry"]) if direction == "BUY" else (pos["entry"] - last_price)
     unrealized = unrealized_per_share * pos["qty"]
     return (f"position open | {direction} entry {pos['entry']:.2f} -> current {last_price:.2f} "
@@ -528,6 +753,446 @@ def recover_unresolved_entries(kite, open_positions, cfg, positions_path=None):
     save_positions(open_positions, positions_path=positions_path)
 
 
+def recover_unresolved_exits(
+    kite,
+    open_positions,
+    risk,
+    cfg,
+    positions_path=None,
+):
+    """
+    Stage 4 restart recovery for unresolved normal EXIT operations.
+
+    FORCE_EXIT is intentionally excluded until Stage 5.
+
+    The broker's filled_quantity is cumulative. The local position
+    stores how much of that cumulative quantity has already been
+    applied for the current exit operation. Recovery therefore applies:
+
+        newly_confirmed =
+            broker_cumulative_fill - locally_applied_fill
+
+    Repeated recovery with no additional broker fill applies zero,
+    making position reduction and P&L recording idempotent.
+    """
+
+    if getattr(cfg, "PAPER_TRADING", False):
+        return
+
+    from pending_order_store import (
+        list_unresolved_orders,
+        update_order_verification,
+        mark_order_resolved,
+    )
+    from order_verification import verify_order_execution
+
+    unresolved_exits = [
+        order
+        for order in list_unresolved_orders()
+        if order["action"] == "EXIT"
+    ]
+
+    if not unresolved_exits:
+        return
+
+    logger.info(
+        f"Restart recovery: {len(unresolved_exits)} "
+        f"unresolved normal EXIT operation(s) found"
+    )
+
+    for operation in unresolved_exits:
+        operation_id = operation["operation_id"]
+        order_id = operation.get("order_id")
+        symbol = operation["symbol"]
+        exchange = operation["exchange"]
+        requested_quantity = int(
+            operation["requested_quantity"]
+        )
+
+        if order_id is None:
+            logger.error(
+                f"CRITICAL: unresolved EXIT intent for {symbol} "
+                f"has no broker order_id "
+                f"(operation_id={operation_id}). "
+                f"Submission outcome is unknown. "
+                f"Do not resubmit automatically; manual broker "
+                f"reconciliation is required."
+            )
+            continue
+
+        logger.info(
+            f"Resuming verification for unresolved EXIT: "
+            f"{exchange}:{symbol} "
+            f"(order_id={order_id}, "
+            f"operation_id={operation_id})"
+        )
+
+        execution = verify_order_execution(
+            kite,
+            order_id,
+            requested_quantity,
+            max_wait_seconds=getattr(
+                cfg,
+                "ORDER_VERIFY_MAX_WAIT_SECONDS",
+                15,
+            ),
+            poll_interval_seconds=getattr(
+                cfg,
+                "ORDER_VERIFY_POLL_INTERVAL_SECONDS",
+                1,
+            ),
+        )
+
+        update_order_verification(
+            operation_id,
+            execution,
+        )
+
+        total_confirmed = int(
+            execution.filled_quantity or 0
+        )
+
+        position = open_positions.get(symbol)
+
+        # The normal full-close path records the trade and saves the
+        # removed position before resolving the pending operation.
+        # Therefore, a missing local position with a full cumulative
+        # broker fill means the local full close may already have been
+        # applied immediately before a crash.
+        if position is None:
+            if total_confirmed == requested_quantity:
+                if execution.terminal:
+                    mark_order_resolved(
+                        operation_id,
+                        resolution_reason=execution.status,
+                    )
+                    logger.info(
+                        f"Recovered EXIT for {symbol}: local position "
+                        f"is already absent and broker confirms the "
+                        f"full {total_confirmed}/{requested_quantity} "
+                        f"terminal fill. Pending operation resolved "
+                        f"without applying or logging the fill again."
+                    )
+                else:
+                    logger.warning(
+                        f"EXIT for {symbol} has no local position and "
+                        f"the full quantity is confirmed, but broker "
+                        f"status remains non-terminal "
+                        f"({execution.status}). Leaving unresolved."
+                    )
+            else:
+                logger.error(
+                    f"CRITICAL: unresolved EXIT for {symbol} has no "
+                    f"local position, but broker confirms only "
+                    f"{total_confirmed}/{requested_quantity}. "
+                    f"Automatic recovery cannot safely reconstruct "
+                    f"the remaining position. Leaving unresolved for "
+                    f"manual reconciliation."
+                )
+
+            continue
+
+        same_operation = (
+            position.get("exit_operation_id")
+            == operation_id
+        )
+
+        if same_operation:
+            already_applied = int(
+                position.get(
+                    "exit_filled_quantity",
+                    0,
+                )
+                or 0
+            )
+        else:
+            # The process may have crashed after broker verification
+            # but before saving any exit metadata to the position.
+            already_applied = 0
+
+        newly_confirmed = (
+            total_confirmed - already_applied
+        )
+
+        if newly_confirmed < 0:
+            logger.error(
+                f"CRITICAL: EXIT recovery quantity moved backwards "
+                f"for {symbol}: broker total={total_confirmed}, "
+                f"locally applied={already_applied}. "
+                f"No local changes made."
+            )
+            continue
+
+        current_quantity = int(
+            position.get("qty", 0) or 0
+        )
+
+        if newly_confirmed > current_quantity:
+            logger.error(
+                f"CRITICAL: EXIT recovery for {symbol} would apply "
+                f"{newly_confirmed} shares, but the local remaining "
+                f"position contains only {current_quantity}. "
+                f"No automatic quantity change made."
+            )
+
+            position["manual_reconciliation_required"] = True
+            position["exit_status_message"] = (
+                "broker exit fill exceeds local remaining quantity"
+            )
+            save_positions(
+                open_positions,
+                positions_path=positions_path,
+            )
+            continue
+
+        position["exit_order_id"] = order_id
+        position["exit_operation_id"] = operation_id
+        position["exit_requested_quantity"] = (
+            requested_quantity
+        )
+        position["exit_fill_status"] = execution.status
+        position["exit_confirmation_pending"] = (
+            not execution.terminal
+        )
+        position["exit_status_message"] = (
+            execution.status_message
+        )
+
+        if newly_confirmed == 0:
+            save_positions(
+                open_positions,
+                positions_path=positions_path,
+            )
+
+            if execution.terminal:
+                mark_order_resolved(
+                    operation_id,
+                    resolution_reason=execution.status,
+                )
+                position["exit_confirmation_pending"] = False
+
+                save_positions(
+                    open_positions,
+                    positions_path=positions_path,
+                )
+
+                logger.info(
+                    f"Resolved recovered EXIT for {symbol}: "
+                    f"{execution.status}; no new fill needed "
+                    f"applying (already applied "
+                    f"{already_applied}/{requested_quantity})"
+                )
+            else:
+                logger.info(
+                    f"Recovery for EXIT {symbol}: no new broker "
+                    f"fills since the previous application "
+                    f"(idempotent; cumulative fill remains "
+                    f"{total_confirmed}/{requested_quantity})"
+                )
+
+            continue
+
+        cumulative_average = execution.average_price
+
+        if cumulative_average is None:
+            remaining_quantity = (
+                current_quantity - newly_confirmed
+            )
+
+            position["qty"] = remaining_quantity
+            position["exit_filled_quantity"] = (
+                total_confirmed
+            )
+            position["exit_average_price"] = None
+            position["manual_reconciliation_required"] = True
+            position["exit_status_message"] = (
+                "confirmed recovered exit fill has no broker "
+                "average price; exposure was reduced but P&L "
+                "was not recorded"
+            )
+
+            save_positions(
+                open_positions,
+                positions_path=positions_path,
+            )
+
+            logger.error(
+                f"CRITICAL: recovery confirmed "
+                f"{newly_confirmed} new exit shares for {symbol}, "
+                f"but no broker average price was available. "
+                f"Remaining local quantity={remaining_quantity}. "
+                f"P&L was not fabricated or recorded. "
+                f"Operation remains unresolved for manual review."
+            )
+            continue
+
+        cumulative_average = float(
+            cumulative_average
+        )
+
+        # Kite reports a cumulative average for all fills belonging
+        # to the order. When previous partial fills were already
+        # applied, derive the price of only the newly confirmed fill:
+        #
+        # new fill notional =
+        #   latest cumulative notional - previous cumulative notional
+        if already_applied == 0:
+            incremental_exit_price = (
+                cumulative_average
+            )
+        else:
+            previous_average = position.get(
+                "exit_average_price"
+            )
+
+            if previous_average is None:
+                remaining_quantity = (
+                    current_quantity - newly_confirmed
+                )
+
+                position["qty"] = remaining_quantity
+                position["exit_filled_quantity"] = (
+                    total_confirmed
+                )
+                position["exit_average_price"] = (
+                    cumulative_average
+                )
+                position[
+                    "manual_reconciliation_required"
+                ] = True
+                position["exit_status_message"] = (
+                    "previous cumulative exit average is missing; "
+                    "incremental recovery P&L cannot be calculated"
+                )
+
+                save_positions(
+                    open_positions,
+                    positions_path=positions_path,
+                )
+
+                logger.error(
+                    f"CRITICAL: recovery applied "
+                    f"{newly_confirmed} new exit shares for "
+                    f"{symbol}, but the previous cumulative "
+                    f"average price is unavailable. "
+                    f"P&L was not fabricated. "
+                    f"Operation remains unresolved."
+                )
+                continue
+
+            previous_average = float(
+                previous_average
+            )
+
+            latest_notional = (
+                total_confirmed
+                * cumulative_average
+            )
+
+            previous_notional = (
+                already_applied
+                * previous_average
+            )
+
+            incremental_notional = (
+                latest_notional
+                - previous_notional
+            )
+
+            incremental_exit_price = (
+                incremental_notional
+                / newly_confirmed
+            )
+
+            if incremental_exit_price <= 0:
+                logger.error(
+                    f"CRITICAL: derived invalid incremental exit "
+                    f"price {incremental_exit_price} for {symbol}. "
+                    f"No local change made."
+                )
+                continue
+
+        direction = position["direction"]
+        entry_price = float(position["entry"])
+
+        cost_result = net_pnl_for_trade(
+            direction,
+            newly_confirmed,
+            entry_price,
+            incremental_exit_price,
+        )
+
+        gross_pnl = cost_result["gross_pnl"]
+        costs = cost_result["costs"]
+        pnl = cost_result["net_pnl"]
+
+        exit_reason = (
+            position.get("exit_reason")
+            or "exit_recovery"
+        )
+
+        risk.record_trade_result(pnl)
+
+        record_trade(
+            symbol,
+            direction,
+            newly_confirmed,
+            entry_price,
+            incremental_exit_price,
+            pnl,
+            exit_reason,
+            exchange=exchange,
+            gross_pnl=gross_pnl,
+            costs=costs,
+        )
+
+        remaining_quantity = (
+            current_quantity - newly_confirmed
+        )
+
+        position["qty"] = remaining_quantity
+        position["exit_filled_quantity"] = (
+            total_confirmed
+        )
+        position["exit_average_price"] = (
+            cumulative_average
+        )
+        position["last_exit_price"] = (
+            incremental_exit_price
+        )
+        position["last_exit_pnl"] = pnl
+
+        if remaining_quantity == 0:
+            del open_positions[symbol]
+
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+
+        # Resolution happens only after both confirmed P&L and the
+        # revised local position have been applied and persisted.
+        if execution.terminal:
+            mark_order_resolved(
+                operation_id,
+                resolution_reason=execution.status,
+            )
+
+        logger.info(
+            f"Recovered EXIT fill for {exchange}:{symbol}: "
+            f"newly_confirmed={newly_confirmed}, "
+            f"broker_total={total_confirmed}/"
+            f"{requested_quantity}, "
+            f"incremental_exit_price="
+            f"{incremental_exit_price:.2f}, "
+            f"remaining_quantity={remaining_quantity}, "
+            f"net P&L={pnl:.2f}, "
+            f"status={execution.status}, "
+            f"terminal={execution.terminal}"
+        )
+
+
+
 def run():
     start_time = time.time()
     kite = get_kite_client()
@@ -555,7 +1220,17 @@ def run():
             exchange_map.setdefault(sym, exch)
 
     if not cfg.PAPER_TRADING:
-        recover_unresolved_entries(kite, open_positions, cfg)
+        recover_unresolved_entries(
+            kite,
+            open_positions,
+            cfg,
+        )
+        recover_unresolved_exits(
+            kite,
+            open_positions,
+            risk,
+            cfg,
+        )
 
     logger.info(f"Starting {'PAPER' if cfg.PAPER_TRADING else 'LIVE'} trading on "
                 f"{[(s, exchange_map[s]) for s in symbols]}")

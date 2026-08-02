@@ -115,9 +115,27 @@ def fake_check_position_exit(kite, symbol, tokens, exchange_map, open_positions,
 def fake_sleep(seconds):
     FakeDateTime._current = FakeDateTime._current + _datetime_module.timedelta(seconds=seconds)
 
-def fake_place_exit_order(*a, **kw):
+def fake_place_exit_order(*args, **kwargs):
     exit_orders_placed.append(FakeDateTime._current)
-    return True
+
+    quantity = kwargs.get("quantity")
+    if quantity is None and len(args) >= 4:
+        quantity = args[3]
+
+    quantity = int(quantity or 0)
+
+    return {
+        "success": True,
+        "order_id": "TEST-EXIT-ORDER",
+        "operation_id": None,
+        "status": "COMPLETE",
+        "reason": None,
+        "requested_quantity": quantity,
+        "filled_quantity": quantity,
+        "average_price": 100.0,
+        "exit_confirmation_pending": False,
+        "resolved": True,
+    }
 
 # Wire everything up
 cfg.ENABLE_CANDLE_ALIGNED_POLLING = True

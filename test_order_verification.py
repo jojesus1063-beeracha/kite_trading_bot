@@ -167,8 +167,8 @@ real_elapsed = real_time.time() - real_start
 check(f"A 15-second simulated timeout took {real_elapsed:.3f}s of REAL wall-clock time (should be near-instant)",
       real_elapsed < 1.0)
 
-# --- 15: Stage 3 entry integration is active; exit integration remains deferred ---
-print("\n--- Stage 3 Entry Integration ---")
+# --- 15: Stage 4 entry and normal-exit integration are active ---
+print("\n--- Stage 4 Entry and Normal-Exit Integration ---")
 with open("main.py") as f:
     main_content = f.read()
 with open("executor.py") as f:
@@ -186,9 +186,11 @@ check(
 )
 
 check(
-    "executor.py's place_exit_order still returns the original SUBMITTED status "
-    "(exit verification is deferred to Stage 4)",
-    '"status": "SUBMITTED"' in executor_content
+    "executor.py place_exit_order now verifies live normal-exit fills",
+    "def place_exit_order" in executor_content
+    and 'action="EXIT"' in executor_content
+    and "verify_order_execution" in executor_content
+    and "exit_confirmation_pending" in executor_content
 )
 
 print("")

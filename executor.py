@@ -283,24 +283,281 @@ def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange
             "filled_quantity": 0, "average_price": None, "entry_confirmation_pending": True, "resolved": False}
 
 
-def place_exit_order(kite, symbol: str, direction: str, quantity: int, exchange: str, cfg):
-    """direction here is the ORIGINAL entry direction; the exit reverses it."""
+
+def place_exit_order(
+    kite,
+    symbol: str,
+    direction: str,
+    quantity: int,
+    exchange: str,
+    cfg,
+):
+    """
+    Stage 4 normal-exit execution.
+
+    `direction` is the ORIGINAL position direction. The exit reverses it.
+
+    A live exit is never treated as completed merely because
+    kite.place_order() returned an order ID.
+
+    Lifecycle:
+      1. Persist EXIT intent.
+      2. Submit broker order.
+      3. Persist broker order ID immediately.
+      4. Verify using order_history().
+      5. Return only confirmed filled quantity and broker average price.
+
+    Force-square-off integration is intentionally deferred to Stage 5.
+    """
+
     exit_direction = "SELL" if direction == "BUY" else "BUY"
 
-    if cfg.PAPER_TRADING:
-        logger.info(f"[PAPER] EXIT {exit_direction} {quantity} {exchange}:{symbol} @ MARKET")
-        return {"order_id": "PAPER", "status": "PAPER_FILLED"}
+    def rejected(reason, operation_id=None):
+        logger.warning(
+            f"Skipping EXIT for {symbol} ({exit_direction}): {reason}"
+        )
+        return {
+            "success": False,
+            "order_id": None,
+            "operation_id": operation_id,
+            "status": "REJECTED",
+            "reason": reason,
+            "requested_quantity": quantity,
+            "filled_quantity": 0,
+            "average_price": None,
+            "exit_confirmation_pending": False,
+            "resolved": True,
+        }
 
-    transaction_type = kite.TRANSACTION_TYPE_BUY if exit_direction == "BUY" else kite.TRANSACTION_TYPE_SELL
-    order_id = kite.place_order(
-        variety=cfg.VARIETY,
-        exchange=exchange,
-        tradingsymbol=symbol,
-        transaction_type=transaction_type,
-        quantity=quantity,
-        product=cfg.PRODUCT,
-        order_type="MARKET",
-        market_protection=cfg.MARKET_PROTECTION,  # required on MARKET/SL-M orders since Apr 2026
+    def blocked_pending():
+        logger.warning(
+            f"Skipping EXIT for {symbol}: EXIT_BLOCKED_PENDING_ORDER"
+        )
+        return {
+            "success": False,
+            "order_id": None,
+            "operation_id": None,
+            "status": "EXIT_BLOCKED_PENDING_ORDER",
+            "reason": "an unresolved exit already exists",
+            "requested_quantity": quantity,
+            "filled_quantity": 0,
+            "average_price": None,
+            "exit_confirmation_pending": True,
+            "resolved": False,
+        }
+
+    if quantity <= 0:
+        return rejected("exit quantity is 0")
+
+    # Paper mode remains completely synthetic:
+    # no broker submission, no order_history and no pending-order store.
+    if cfg.PAPER_TRADING:
+        logger.info(
+            f"[PAPER] EXIT {exit_direction} "
+            f"{quantity} {exchange}:{symbol} @ MARKET"
+        )
+        return {
+            "success": True,
+            "order_id": "PAPER",
+            "operation_id": None,
+            "status": "PAPER_FILLED",
+            "reason": None,
+            "requested_quantity": quantity,
+            "filled_quantity": quantity,
+            "average_price": None,
+            "exit_confirmation_pending": False,
+            "resolved": True,
+        }
+
+    from pending_order_store import (
+        create_order_intent,
+        attach_broker_order_id,
+        update_order_verification,
+        has_unresolved_order,
+        UnresolvedOrderExistsError,
     )
-    logger.info(f"[LIVE] Placed EXIT order {order_id} for {quantity} {exchange}:{symbol}")
-    return {"order_id": order_id, "status": "SUBMITTED"}
+    from order_verification import verify_order_execution
+
+    # EXIT and FORCE_EXIT share one lock family in pending_order_store.
+    if has_unresolved_order(symbol, exchange, "EXIT"):
+        return blocked_pending()
+
+    try:
+        operation_id = create_order_intent(
+            symbol=symbol,
+            exchange=exchange,
+            action="EXIT",
+            side=exit_direction,
+            requested_quantity=quantity,
+        )
+    except UnresolvedOrderExistsError:
+        return blocked_pending()
+    except Exception as exc:
+        return rejected(f"exit intent creation failed: {exc}")
+
+    transaction_type = (
+        kite.TRANSACTION_TYPE_BUY
+        if exit_direction == "BUY"
+        else kite.TRANSACTION_TYPE_SELL
+    )
+
+    try:
+        order_id = kite.place_order(
+            variety=cfg.VARIETY,
+            exchange=exchange,
+            tradingsymbol=symbol,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            product=cfg.PRODUCT,
+            order_type="MARKET",
+            market_protection=cfg.MARKET_PROTECTION,
+        )
+    except Exception as exc:
+        # The broker may have accepted the order even though the network
+        # response failed. Keep the intent unresolved and never retry blindly.
+        logger.error(
+            f"CRITICAL: EXIT submission uncertain for {symbol} "
+            f"(operation_id={operation_id}): {exc}"
+        )
+        return {
+            "success": False,
+            "order_id": None,
+            "operation_id": operation_id,
+            "status": "SUBMISSION_UNCERTAIN",
+            "reason": (
+                "exit submission exception; broker outcome unknown: "
+                f"{exc}"
+            ),
+            "requested_quantity": quantity,
+            "filled_quantity": 0,
+            "average_price": None,
+            "exit_confirmation_pending": True,
+            "resolved": False,
+        }
+
+    # This must happen before the first order_history() call.
+    attach_broker_order_id(operation_id, order_id)
+
+    logger.info(
+        f"[LIVE] Placed EXIT {exit_direction} order {order_id} "
+        f"for {quantity} {exchange}:{symbol} "
+        f"(operation_id={operation_id})"
+    )
+
+    exec_result = verify_order_execution(
+        kite,
+        order_id,
+        quantity,
+        max_wait_seconds=getattr(
+            cfg,
+            "ORDER_VERIFY_MAX_WAIT_SECONDS",
+            15,
+        ),
+        poll_interval_seconds=getattr(
+            cfg,
+            "ORDER_VERIFY_POLL_INTERVAL_SECONDS",
+            1,
+        ),
+    )
+
+    update_order_verification(operation_id, exec_result)
+
+    filled = exec_result.filled_quantity
+
+    if exec_result.status == "COMPLETE":
+        logger.info(
+            f"EXIT CONFIRMED: {symbol} {exit_direction} "
+            f"{filled}@{exec_result.average_price}"
+        )
+        return {
+            "success": True,
+            "order_id": order_id,
+            "operation_id": operation_id,
+            "status": "COMPLETE",
+            "reason": None,
+            "requested_quantity": quantity,
+            "filled_quantity": filled,
+            "average_price": exec_result.average_price,
+            "exit_confirmation_pending": False,
+            "resolved": True,
+        }
+
+    if (
+        exec_result.status == "PARTIALLY_FILLED"
+        and exec_result.terminal
+    ):
+        logger.info(
+            f"EXIT CONFIRMED (terminal partial fill): "
+            f"{symbol} {exit_direction} "
+            f"{filled}/{quantity}@{exec_result.average_price}"
+        )
+        return {
+            "success": True,
+            "order_id": order_id,
+            "operation_id": operation_id,
+            "status": "PARTIALLY_FILLED",
+            "reason": "terminal partial exit fill",
+            "requested_quantity": quantity,
+            "filled_quantity": filled,
+            "average_price": exec_result.average_price,
+            "exit_confirmation_pending": False,
+            "resolved": True,
+        }
+
+    if exec_result.status in ("REJECTED", "CANCELLED"):
+        logger.warning(
+            f"EXIT {exec_result.status}: {symbol} "
+            f"{exit_direction} -- {exec_result.status_message}"
+        )
+        return {
+            "success": False,
+            "order_id": order_id,
+            "operation_id": operation_id,
+            "status": exec_result.status,
+            "reason": exec_result.status_message,
+            "requested_quantity": quantity,
+            "filled_quantity": 0,
+            "average_price": None,
+            "exit_confirmation_pending": False,
+            "resolved": True,
+        }
+
+    # TIMEOUT or UNKNOWN:
+    # confirmed shares must be acted on, but the remainder remains unresolved.
+    if filled > 0:
+        logger.warning(
+            f"EXIT CONFIRMATION PENDING: {symbol} "
+            f"{exit_direction} -- {filled}/{quantity} confirmed; "
+            f"remainder unresolved ({exec_result.status})"
+        )
+        return {
+            "success": True,
+            "order_id": order_id,
+            "operation_id": operation_id,
+            "status": exec_result.status,
+            "reason": (
+                "partial exit fill confirmed; remainder unresolved"
+            ),
+            "requested_quantity": quantity,
+            "filled_quantity": filled,
+            "average_price": exec_result.average_price,
+            "exit_confirmation_pending": True,
+            "resolved": False,
+        }
+
+    logger.warning(
+        f"EXIT CONFIRMATION PENDING: {symbol} {exit_direction} -- "
+        f"no fill confirmed ({exec_result.status})"
+    )
+    return {
+        "success": False,
+        "order_id": order_id,
+        "operation_id": operation_id,
+        "status": exec_result.status,
+        "reason": "no confirmed exit fill; order remains unresolved",
+        "requested_quantity": quantity,
+        "filled_quantity": 0,
+        "average_price": None,
+        "exit_confirmation_pending": True,
+        "resolved": False,
+    }
