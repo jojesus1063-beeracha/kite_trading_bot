@@ -28,3 +28,4 @@ bot.log
 watchlist_daily_range.json
 pending_orders.json
 pending_orders.json.lock
+runtime/auto_watchlist/
