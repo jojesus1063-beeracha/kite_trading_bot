@@ -12,6 +12,7 @@ Open positions are persisted to disk (position_store.py) after every
 change, so a crash or restart mid-day picks up exactly where it left
 off instead of "forgetting" a live position.
 """
+import pandas as pd
 
 import logging
 import time
