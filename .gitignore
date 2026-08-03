@@ -33,3 +33,5 @@ runtime/
 
 # Paper-validation runtime ledger
 validation_events/
+protective_stops.json
+protective_stops.json.lock
