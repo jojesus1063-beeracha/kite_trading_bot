@@ -3,9 +3,11 @@ set -Eeuo pipefail
 
 PROJECT="/home/ubuntu/kite_trading_bot"
 PYTHON="$PROJECT/venv/bin/python3"
-LOCK_FILE="/run/kite-auto-watchlist.lock"
+LOCK_DIR="$PROJECT/runtime/auto_watchlist"
+LOCK_FILE="$LOCK_DIR/daily.lock"
 
 cd "$PROJECT"
+mkdir -p "$LOCK_DIR"
 
 exec 9>"$LOCK_FILE"
 
