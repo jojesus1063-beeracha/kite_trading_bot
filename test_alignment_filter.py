@@ -69,6 +69,7 @@ def run_scan_for_alignment(
     main_module.get_sector_trend = (
         lambda kite, symbol, cfg_arg: sector_trend_val
     )
+    main_module.sector_for_symbol = lambda symbol: "NIFTY TEST"
 
     # Stage 3-compatible confirmed entry result.
     # The old test returned only "SUBMITTED", which no longer contains
@@ -189,10 +190,7 @@ status, positions = run_scan_for_alignment(
     filter_enabled=True,
 )
 
-check(
-    "Filter enabled: NEUTRAL alignment still executes",
-    "ENTRY" in status and "TEST" in positions,
-)
+check('Filter enabled: NEUTRAL alignment is blocked', not ("ENTRY" in status and "TEST" in positions))
 
 
 # Restore the normal safe default after the test.

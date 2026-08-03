@@ -11,8 +11,8 @@ Trend filter (15-min):
 
 Entry trigger (5-min), only taken in the direction of the current
 15-min trend:
-  Long  -> bullish_engulfing AND close > ema_entry AND volume > avg_volume * VOLUME_MULTIPLIER
-  Short -> bearish_engulfing AND close < ema_entry AND volume > avg_volume * VOLUME_MULTIPLIER
+  Long  -> close > ema_entry AND volume > avg_volume * VOLUME_MULTIPLIER
+  Short -> close < ema_entry AND volume > avg_volume * VOLUME_MULTIPLIER
 
 Stop-loss: signal candle's low (long) / high (short), with a small buffer.
 Target: entry + (entry - stop) * RISK_REWARD_MIN  (i.e. minimum 1:2 reward:risk).
@@ -24,7 +24,6 @@ from typing import Optional
 
 import pandas as pd
 
-from patterns import label_engulfing_patterns
 from adx_confidence import resolve_adx_mode, adx_confidence
 
 
@@ -126,7 +125,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
     if len(df_5m) < 2 or len(df_15m) < 1:
         return None
 
-    df_5m = label_engulfing_patterns(df_5m)
     curr = df_5m.iloc[-1]
 
     trend = latest_completed_15m_trend(df_15m, curr["date"], cfg)
@@ -153,7 +151,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         if risk <= 0:
             return None
         target = entry + risk * cfg.RISK_REWARD_MIN
-        reason = "15m uptrend + 5m bullish engulfing above EMA20 on above-avg volume"
+        reason = f"15m uptrend + 5m close above EMA{cfg.ENTRY_EMA} on above-avg volume"
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
         if confidence:
@@ -168,7 +166,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         if risk <= 0:
             return None
         target = entry - risk * cfg.RISK_REWARD_MIN
-        reason = "15m downtrend + 5m bearish engulfing below EMA20 on above-avg volume"
+        reason = f"15m downtrend + 5m close below EMA{cfg.ENTRY_EMA} on above-avg volume"
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
         if confidence:

@@ -33,6 +33,7 @@ from trade_log import record_trade, save_bot_status, load_bot_status
 from position_analytics import build_full_analytics_snapshot
 from daily_report import load_trades as load_todays_trades
 from costs import net_pnl_for_trade
+from trade_levels import fixed_levels_from_fill
 from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
 
@@ -120,7 +121,7 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             try:
                 sector = sector_for_symbol(symbol)
                 if sector is None:
-                    sector_trend = "Sideways"
+                    sector_trend = "UNKNOWN"
                 elif sector in sector_cache:
                     sector_trend = sector_cache[sector]
                     sector_cache_hits += 1
@@ -128,13 +129,21 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     sector_trend = get_sector_trend(kite, symbol, cfg)
                     sector_cache[sector] = sector_trend
                     sector_fetches += 1
-                signal.market_alignment = compute_market_alignment(signal.direction, market_trend, sector_trend)
+                signal.market_alignment = (
+                    "UNKNOWN"
+                    if sector_trend == "UNKNOWN"
+                    else compute_market_alignment(
+                        signal.direction,
+                        market_trend,
+                        sector_trend,
+                    )
+                )
             except Exception as e:
                 logger.warning(f"Market alignment computation failed for {symbol}, using UNKNOWN: {e}")
                 signal.market_alignment = "UNKNOWN"
 
             if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and \
-               signal.market_alignment in ("MISALIGNED", "STRONG_MISALIGNMENT"):
+               signal.market_alignment not in ("ALIGNED", "STRONG_ALIGNMENT"):
                 logger.info(f"{symbol}: skipped -- market_alignment={signal.market_alignment} "
                             f"(trading against market/sector trend)")
                 status_this_cycle.append({"symbol": symbol,
@@ -188,7 +197,17 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     continue
 
 
-            qty = risk.position_size(signal.entry_price, signal.stop_loss)
+            planned_stop_price = signal.stop_loss
+            if getattr(cfg, "ENABLE_FIXED_TARGET", False):
+                planned_stop_price, _ = (
+                    fixed_levels_from_fill(
+                        signal.direction,
+                        signal.entry_price,
+                        getattr(cfg, "STOP_LOSS_PERCENT", 0.45),
+                        getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
+                    )
+                )
+            qty = risk.position_size(signal.entry_price, planned_stop_price)
             if qty > 0 and not cfg.PAPER_TRADING:
                 qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
             result = place_entry_order(kite, symbol, signal.direction, qty, exchange, cfg)
@@ -200,21 +219,20 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 # silently redesign strategy-derived stop/target because the
                 # actual fill differs from the signal price.
                 confirmed_entry_price = result["average_price"] if result["average_price"] is not None else signal.entry_price
+                stop_price = signal.stop_loss
                 target_price = signal.target
                 if getattr(cfg, "ENABLE_FIXED_TARGET", False):
-                    try:
-                        pct = getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5) / 100
-                        target_price = (signal.entry_price * (1 + pct) if signal.direction == "BUY"
-                                        else signal.entry_price * (1 - pct))
-                    except Exception as e:
-                        logger.warning(f"{symbol}: fixed target calculation failed, "
-                                        f"using strategy-computed target instead: {e}")
-                        target_price = signal.target
+                    stop_price, target_price = fixed_levels_from_fill(
+                        signal.direction,
+                        confirmed_entry_price,
+                        getattr(cfg, "STOP_LOSS_PERCENT", 0.45),
+                        getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
+                    )
                 open_positions[symbol] = {
                     "direction": signal.direction,
                     "qty": confirmed_qty,
                     "entry": confirmed_entry_price,
-                    "stop": signal.stop_loss,
+                    "stop": stop_price,
                     "target": target_price,
                     "exchange": exchange,
                     "peak_price": confirmed_entry_price,
@@ -231,7 +249,7 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 }
                 save_positions(open_positions)
                 logger.info(f"ENTRY {signal.direction} {exchange}:{symbol} qty={confirmed_qty} "
-                            f"entry={confirmed_entry_price:.2f} stop={signal.stop_loss:.2f} "
+                            f"entry={confirmed_entry_price:.2f} stop={stop_price:.2f} "
                             f"target={signal.target:.2f} | {signal.reason} "
                             f"[market_alignment: {signal.market_alignment}] "
                             f"[fill_status: {result.get('status')}]")

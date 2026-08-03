@@ -546,7 +546,7 @@ FORM_PAGE = BASE_STYLE + """
             <input type="number" step="0.1" name="risk_per_trade_pct" value="{{ risk_per_trade_pct }}">
           </div>
           <div>
-            <label>Stop-loss buffer (%)</label>
+            <label>Fixed stop-loss (%)</label>
             <input type="number" step="0.01" name="sl_buffer_pct" value="{{ sl_buffer_pct }}">
           </div>
           <div>
@@ -845,7 +845,7 @@ def load_current():
         "watchlist": watchlist,
         "capital": saved.get("capital", cfg.CAPITAL),
         "risk_per_trade_pct": saved.get("risk_per_trade_pct", cfg.RISK_PER_TRADE_PCT),
-        "sl_buffer_pct": saved.get("sl_buffer_pct", cfg.SL_BUFFER_PCT),
+        "sl_buffer_pct": saved.get("sl_buffer_pct", getattr(cfg, "STOP_LOSS_PERCENT", 0.45)),
         "risk_reward_min": saved.get("risk_reward_min", cfg.RISK_REWARD_MIN),
         "max_trades_per_day": saved.get("max_trades_per_day", cfg.MAX_TRADES_PER_DAY),
         "max_daily_loss_pct": saved.get("max_daily_loss_pct", cfg.MAX_DAILY_LOSS_PCT),

@@ -275,9 +275,7 @@ cfg.PAPER_TRADING = False
 print("\n--- Stop/Target Preservation ---")
 with open("main.py") as f:
     main_src = f.read()
-check("19. main.py's target_price/stop calculation still reads from signal.entry_price/signal.stop_loss "
-      "(not from the confirmed fill price) -- stop/target strategy logic untouched",
-      'target_price = (signal.entry_price * (1 + pct)' in main_src and '"stop": signal.stop_loss,' in main_src)
+check('19. main.py recalculates fixed stop and target from the confirmed broker fill', "fixed_levels_from_fill(" in main_src and "confirmed_entry_price" in main_src and '"stop": stop_price,' in main_src and "signal.entry_price * (1 + pct)" not in main_src)
 
 # --- 20: main.py never adds requested_quantity when filled_quantity is lower ---
 check("20. main.py's position dict uses confirmed_qty (== filled_quantity), never the raw requested qty",

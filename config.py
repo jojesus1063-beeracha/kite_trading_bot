@@ -124,6 +124,7 @@ USE_CHOCH = True
 SUPPORT_RESISTANCE_LOOKBACK = 30
 MIN_DISTANCE_TO_SR_PERCENT = 0.5
 
+STOP_LOSS_PERCENT = 0.45  # fixed stop measured from confirmed fill
 PROFIT_TARGET_PERCENT = 1.50  # fixed profit target, replaces trailing-stop-based
                                 # exits entirely when ENABLE_FIXED_TARGET is True
 ENABLE_FIXED_TARGET = True
@@ -236,6 +237,7 @@ if os.path.exists(_USER_CONFIG_PATH):
     SUPPORT_RESISTANCE_LOOKBACK = _overrides.get("support_resistance_lookback", SUPPORT_RESISTANCE_LOOKBACK)
     MIN_DISTANCE_TO_SR_PERCENT = _overrides.get("min_distance_to_sr_percent", MIN_DISTANCE_TO_SR_PERCENT)
     PROFIT_TARGET_PERCENT = _overrides.get("profit_target_percent", PROFIT_TARGET_PERCENT)
+    STOP_LOSS_PERCENT = float(_overrides.get("sl_buffer_pct", _overrides.get("stop_loss_percent", STOP_LOSS_PERCENT)))
     NO_ENTRY_BEFORE = _overrides.get("no_entry_before", NO_ENTRY_BEFORE)
     NO_ENTRY_AFTER = _overrides.get("no_entry_after", NO_ENTRY_AFTER)
     ENABLE_FIXED_TARGET = _overrides.get("enable_fixed_target", ENABLE_FIXED_TARGET)
