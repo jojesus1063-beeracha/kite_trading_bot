@@ -626,11 +626,53 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     ),
                 }
             )
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    "symbol": symbol,
+                    "candidate_rank": candidate_rank,
+                    "candidate_count": len(ranked_candidates),
+                    "ranking_score": candidate.get("ranking_score"),
+                    "reason_code": "SAME_SCAN_POSITION_EXIT",
+                    "reason": "position exited earlier in the same scan",
+                },
+            )
+
             continue
         exchange = candidate["exchange"]
         signal = candidate["signal"]
         df_5m = candidate["df_5m"]
         _snapshot_row = candidate["snapshot_row"]
+
+        candidate_event_context = {
+            "symbol": symbol,
+            "direction": signal.direction,
+            "candidate_rank": candidate_rank,
+            "candidate_count": len(ranked_candidates),
+            "ranking_score": candidate.get("ranking_score"),
+            "entry_quality_score": candidate.get("quality_score"),
+            "entry_context_score": candidate.get(
+                "entry_context_score"
+            ),
+            "entry_context_detail": candidate.get(
+                "entry_context_detail"
+            ),
+            "relative_strength_score": candidate.get(
+                "relative_strength_score"
+            ),
+            "relative_strength_detail": candidate.get(
+                "relative_strength_detail"
+            ),
+            "signal_price": signal.entry_price,
+            "signal_stop": signal.stop_loss,
+            "signal_target": signal.target,
+            "signal_timestamp": signal.timestamp,
+            "technical_confidence": signal.confidence,
+            "market_alignment": signal.market_alignment,
+            "market_trend": market_trend,
+            "sector": sector_for_symbol(symbol),
+            "exchange": exchange,
+        }
 
         if not within_trading_window():
             status_this_cycle.append(
@@ -642,6 +684,15 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     ),
                 }
             )
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    **candidate_event_context,
+                    "reason_code": "OUTSIDE_TRADING_WINDOW",
+                    "reason": "trading window closed after ranking",
+                },
+            )
+
             continue
 
         if not risk.can_take_new_trade(
@@ -664,6 +715,15 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 f"| rank={candidate_rank} "
                 "| existing risk limit reached"
             )
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    **candidate_event_context,
+                    "reason_code": "RISK_LIMIT_REACHED",
+                    "reason": "risk manager rejected candidate after ranking",
+                },
+            )
+
             continue
 
         logger.info(
@@ -711,6 +771,21 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     ),
                 }
             )
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    **candidate_event_context,
+                    "reason_code": "FRESH_PRICE_REJECTED",
+                    "reason": fresh_validation.reason,
+                    "validated_signal_price": fresh_validation.signal_price,
+                    "live_price": fresh_validation.live_price,
+                    "drift_pct": fresh_validation.drift_pct,
+                    "adverse_slippage_pct": (
+                        fresh_validation.adverse_slippage_pct
+                    ),
+                },
+            )
+
             continue
 
         if fresh_validation.live_price is None:

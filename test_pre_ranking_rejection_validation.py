@@ -93,14 +93,53 @@ check(
 )
 
 check(
-    "Exactly four candidate rejections exist",
-    event_types.count("candidate_rejected") == 4,
+    "At least four candidate rejections exist",
+    event_types.count("candidate_rejected") >= 4,
 )
 
 check(
-    "All four rejection codes are present",
-    set(reason_codes) == expected_codes,
+    "All four pre-ranking rejection codes are present",
+    expected_codes.issubset(
+        set(reason_codes)
+    ),
 )
+
+pre_ranking_rejection_lines = []
+
+for node in ast.walk(run_full_scan):
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id
+        == "record_validation_event"
+    ):
+        continue
+
+    if (
+        len(node.args) < 2
+        or not isinstance(node.args[1], ast.Dict)
+    ):
+        continue
+
+    reason_code = None
+
+    for key, value in zip(
+        node.args[1].keys,
+        node.args[1].values,
+    ):
+        if (
+            isinstance(key, ast.Constant)
+            and key.value == "reason_code"
+            and isinstance(value, ast.Constant)
+        ):
+            reason_code = value.value
+            break
+
+    if reason_code in expected_codes:
+        pre_ranking_rejection_lines.append(
+            node.lineno
+        )
+
 
 ranking_lines = [
     node.lineno
@@ -119,12 +158,13 @@ check(
 )
 
 check(
-    "All rejection events occur before ranking",
+    "All four pre-ranking events occur before ranking",
     (
         len(ranking_lines) == 1
+        and len(pre_ranking_rejection_lines) == 4
         and all(
             line < ranking_lines[0]
-            for line in rejection_lines
+            for line in pre_ranking_rejection_lines
         )
     ),
 )
