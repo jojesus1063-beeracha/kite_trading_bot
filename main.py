@@ -35,6 +35,10 @@ from market_trend import (
     get_cached_sector_candles,
 )
 from relative_strength import assess_relative_strength
+from validation_recorder import (
+    candidate_snapshot,
+    record_validation_event,
+)
 from signal_log import log_signal
 from risk_manager import RiskManager
 from executor import place_entry_order, place_exit_order, place_force_exit_order, cap_quantity_by_margin
@@ -493,6 +497,20 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 f"{relative_strength.detail.get('market_edge_pct')} "
                 f"| sector_edge="
                 f"{relative_strength.detail.get('sector_edge_pct')}"
+            )
+
+            record_validation_event(
+                "candidate_collected",
+                {
+                    **candidate_snapshot(
+                        entry_candidates[-1]
+                    ),
+                    "market_trend": market_trend,
+                    "sector": sector_for_symbol(
+                        symbol
+                    ),
+                    "exchange": exchange,
+                },
             )
         else:
             status_this_cycle.append({"symbol": symbol, "status": "no signal"})
