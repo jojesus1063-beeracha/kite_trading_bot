@@ -88,3 +88,52 @@ check(
 
 print()
 print("All dashboard automatic-restart tests passed.")
+
+# Verify that loading the dashboard with GET cannot restart the bot.
+import ast
+
+tree = ast.parse(source)
+parents = {}
+
+for parent in ast.walk(tree):
+    for child in ast.iter_child_nodes(parent):
+        parents[child] = parent
+
+apply_calls = [
+    node
+    for node in ast.walk(tree)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Name)
+    and node.func.id == "apply_saved_config"
+]
+
+check(
+    "Exactly one dashboard apply call exists",
+    len(apply_calls) == 1,
+)
+
+inside_post = False
+
+if apply_calls:
+    ancestor = parents.get(apply_calls[0])
+
+    while ancestor is not None:
+        if isinstance(ancestor, ast.If):
+            condition = (
+                ast.get_source_segment(source, ancestor.test)
+                or ""
+            )
+
+            if (
+                "request.method" in condition
+                and "POST" in condition
+            ):
+                inside_post = True
+                break
+
+        ancestor = parents.get(ancestor)
+
+check(
+    "Dashboard apply call is inside POST handler",
+    inside_post,
+)

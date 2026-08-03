@@ -1165,8 +1165,8 @@ def index():
         with open(USER_CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
         saved = True
-    # DASHBOARD_AUTO_APPLY_CONFIG
-    apply_saved_config()
+        # DASHBOARD_AUTO_APPLY_CONFIG
+        apply_saved_config()
 
     current = load_current()
     selected_symbols = [w["symbol"] for w in current["watchlist"]]
