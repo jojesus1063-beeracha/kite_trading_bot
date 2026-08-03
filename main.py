@@ -26,6 +26,7 @@ from patterns import is_bear_trap, is_bull_trap
 from news_filter import evaluate_news, get_news_confidence
 from price_action import evaluate_price_action
 from entry_quality import assess_entry_quality, fetch_live_prices, rank_entry_candidates, validate_live_price
+from entry_confirmation import assess_entry_context
 from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
 from signal_log import log_signal
 from risk_manager import RiskManager
@@ -189,6 +190,35 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 )
                 continue
 
+            entry_context = assess_entry_context(
+                signal,
+                df_15m,
+            )
+
+            signal.entry_confirmation_score = (
+                entry_context.score_adjustment
+            )
+            signal.entry_confirmation_detail = (
+                entry_context.detail
+            )
+
+            if not entry_context.accepted:
+                logger.info(
+                    f"{symbol}: skipped -- opposing CHoCH "
+                    f"| {entry_context.reason} "
+                    f"| detail={entry_context.detail}"
+                )
+
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "skipped, opposing CHoCH"
+                        ),
+                    }
+                )
+                continue
+
             if getattr(cfg, "ENABLE_NEWS_FILTER", False):
                 try:
                     company_name = get_company_name(kite, symbol, exchange)
@@ -229,7 +259,10 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
 
             ranking_score = round(
                 float(_base_score)
-                + float(quality.score),
+                + float(quality.score)
+                + float(
+                    entry_context.score_adjustment
+                ),
                 2,
             )
 
@@ -242,6 +275,12 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "snapshot_row": _snapshot_row,
                     "ranking_score": ranking_score,
                     "quality_score": quality.score,
+                    "entry_context_score": (
+                        entry_context.score_adjustment
+                    ),
+                    "entry_context_detail": (
+                        entry_context.detail
+                    ),
                 }
             )
 
@@ -250,7 +289,13 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 f"| ranking_score={ranking_score:.2f} "
                 f"| technical_confidence={signal.confidence} "
                 f"| price_action={pa_score} "
-                f"| entry_quality={quality.score:.2f}"
+                f"| entry_quality={quality.score:.2f} "
+                f"| entry_context="
+                f"{entry_context.score_adjustment:+.2f} "
+                f"| confirmations="
+                f"{entry_context.detail.get('confirmation_count')} "
+                f"| adx_state="
+                f"{entry_context.detail.get('adx_state')}"
             )
         else:
             status_this_cycle.append({"symbol": symbol, "status": "no signal"})
