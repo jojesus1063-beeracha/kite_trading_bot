@@ -840,23 +840,75 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
     else:
         # ORIGINAL exit-stack logic, completely unchanged from before
         # fixed-target mode existed.
+        # Retain the most favourable closing price present in the
+        # fetched monitoring window. This prevents a later pullback
+        # from replacing an earlier peak and works during ATR warm-up.
+        completed_closes = pd.to_numeric(
+            df_5m["close"],
+            errors="coerce",
+        ).dropna()
+
+        previous_peak = float(
+            pos.get(
+                "peak_price",
+                pos["entry"],
+            )
+        )
+
+        if completed_closes.empty:
+            observed_extreme = float(
+                last_price
+            )
+        elif direction == "BUY":
+            observed_extreme = float(
+                completed_closes.max()
+            )
+        else:
+            observed_extreme = float(
+                completed_closes.min()
+            )
+
+        if direction == "BUY":
+            updated_peak = max(
+                previous_peak,
+                observed_extreme,
+            )
+        else:
+            updated_peak = min(
+                previous_peak,
+                observed_extreme,
+            )
+
+        pos["peak_price"] = updated_peak
+
+        if updated_peak != previous_peak:
+            save_positions(open_positions)
+
         atr_series = atr_indicator(df_5m, 14)
         current_atr = atr_series.iloc[-1] if not atr_series.empty else None
         tight_mode = pos.get("tight_mode", False)
         multiplier = 1.2 if tight_mode else 2.5
+
         if current_atr is None or pd.isna(current_atr):
             logger.info(f"{symbol}: ATR trailing stop inactive (warming up, needs 14 candles of "
                         f"history) -- protected only by hard stop-loss and structure-break checks")
         else:
             if direction == "BUY":
-                pos["peak_price"] = max(pos.get("peak_price", pos["entry"]), last_price)
-                trailing_stop = pos["peak_price"] - current_atr * multiplier
-                hit_trailing_stop = last_price <= trailing_stop
+                trailing_stop = (
+                    pos["peak_price"]
+                    - current_atr * multiplier
+                )
+                hit_trailing_stop = (
+                    last_price <= trailing_stop
+                )
             else:
-                pos["peak_price"] = min(pos.get("peak_price", pos["entry"]), last_price)
-                trailing_stop = pos["peak_price"] + current_atr * multiplier
-                hit_trailing_stop = last_price >= trailing_stop
-            save_positions(open_positions)
+                trailing_stop = (
+                    pos["peak_price"]
+                    + current_atr * multiplier
+                )
+                hit_trailing_stop = (
+                    last_price >= trailing_stop
+                )
         structure_broken = _market_structure_broken(df_5m, direction)
         if check_trend and not (hit_hard_stop or hit_trailing_stop or structure_broken):
             trend_reversed, current_adx = _trend_reversed(kite, symbol, token, direction)
