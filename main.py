@@ -25,7 +25,7 @@ from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_
 from patterns import is_bear_trap, is_bull_trap
 from news_filter import evaluate_news, get_news_confidence
 from price_action import evaluate_price_action
-from entry_quality import assess_entry_quality
+from entry_quality import assess_entry_quality, fetch_live_price, validate_live_price
 from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
 from signal_log import log_signal
 from risk_manager import RiskManager
@@ -236,6 +236,51 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                         getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
                     )
                 )
+            fresh_live_price = fetch_live_price(
+                kite,
+                exchange,
+                symbol,
+            )
+
+            fresh_validation = validate_live_price(
+                signal,
+                fresh_live_price,
+            )
+
+            if not fresh_validation.accepted:
+                logger.info(
+                    f"{symbol}: skipped -- stale or "
+                    f"adverse entry price | "
+                    f"signal={fresh_validation.signal_price} "
+                    f"live={fresh_validation.live_price} "
+                    f"drift={fresh_validation.drift_pct} "
+                    f"| {fresh_validation.reason}"
+                )
+
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "skipped, stale entry price: "
+                            + fresh_validation.reason
+                        ),
+                    }
+                )
+                continue
+
+            if fresh_validation.live_price is None:
+                logger.warning(
+                    f"{symbol}: fresh quote unavailable; "
+                    "continuing with signal price"
+                )
+            else:
+                logger.info(
+                    f"{symbol}: fresh price validated "
+                    f"| signal={fresh_validation.signal_price} "
+                    f"live={fresh_validation.live_price} "
+                    f"drift={fresh_validation.drift_pct:+.4f}%"
+                )
+
             qty = risk.position_size(signal.entry_price, planned_stop_price)
             if qty > 0 and not cfg.PAPER_TRADING:
                 qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)

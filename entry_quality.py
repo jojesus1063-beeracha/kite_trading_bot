@@ -327,3 +327,177 @@ def assess_entry_quality(
         ),
         detail=detail,
     )
+
+# FRESH_ENTRY_PRICE_VALIDATION
+MAX_ADVERSE_LIVE_SLIPPAGE_PCT = 0.15
+MAX_ABSOLUTE_SIGNAL_DRIFT_PCT = 0.35
+
+
+@dataclass(frozen=True)
+class FreshPriceValidation:
+    accepted: bool
+    signal_price: float | None
+    live_price: float | None
+    drift_pct: float | None
+    adverse_slippage_pct: float | None
+    reason: str
+
+
+def _strict_market_number(
+    value: Any,
+) -> float | None:
+    """
+    Accept broker numeric values while rejecting booleans,
+    strings, mocks, NaN, infinity and nonpositive prices.
+    """
+
+    if isinstance(value, bool):
+        return None
+
+    if not isinstance(value, (int, float)):
+        return None
+
+    result = float(value)
+
+    if not isfinite(result) or result <= 0:
+        return None
+
+    return result
+
+
+def fetch_live_price(
+    kite,
+    exchange: str,
+    symbol: str,
+) -> float | None:
+    """
+    Fetch the latest market price immediately before sizing
+    and order submission.
+    """
+
+    instrument = f"{exchange}:{symbol}"
+
+    try:
+        response = kite.quote([instrument])
+    except Exception:
+        return None
+
+    if not isinstance(response, dict):
+        return None
+
+    quote = response.get(instrument)
+
+    if not isinstance(quote, dict):
+        return None
+
+    return _strict_market_number(
+        quote.get("last_price")
+    )
+
+
+def validate_live_price(
+    signal,
+    live_price: float | None,
+) -> FreshPriceValidation:
+    """
+    Reject a signal when the current quote has moved too far
+    from the completed candle's reference price.
+    """
+
+    signal_price = _strict_market_number(
+        getattr(signal, "entry_price", None)
+    )
+
+    if signal_price is None:
+        signal_price = _strict_market_number(
+            getattr(signal, "price", None)
+        )
+
+    if signal_price is None:
+        return FreshPriceValidation(
+            accepted=False,
+            signal_price=None,
+            live_price=live_price,
+            drift_pct=None,
+            adverse_slippage_pct=None,
+            reason="invalid signal reference price",
+        )
+
+    if live_price is None:
+        return FreshPriceValidation(
+            accepted=True,
+            signal_price=signal_price,
+            live_price=None,
+            drift_pct=None,
+            adverse_slippage_pct=None,
+            reason=(
+                "fresh quote unavailable; "
+                "existing execution path retained"
+            ),
+        )
+
+    drift_pct = (
+        (live_price - signal_price)
+        / signal_price
+        * 100.0
+    )
+
+    direction = str(
+        getattr(signal, "direction", "")
+    ).upper()
+
+    if direction == "BUY":
+        adverse_slippage_pct = drift_pct
+    elif direction == "SELL":
+        adverse_slippage_pct = -drift_pct
+    else:
+        return FreshPriceValidation(
+            accepted=False,
+            signal_price=signal_price,
+            live_price=live_price,
+            drift_pct=drift_pct,
+            adverse_slippage_pct=None,
+            reason="invalid signal direction",
+        )
+
+    if (
+        abs(drift_pct)
+        > MAX_ABSOLUTE_SIGNAL_DRIFT_PCT
+    ):
+        return FreshPriceValidation(
+            accepted=False,
+            signal_price=signal_price,
+            live_price=live_price,
+            drift_pct=drift_pct,
+            adverse_slippage_pct=adverse_slippage_pct,
+            reason=(
+                "live price moved more than "
+                f"{MAX_ABSOLUTE_SIGNAL_DRIFT_PCT:.2f}% "
+                "from the completed signal"
+            ),
+        )
+
+    if (
+        adverse_slippage_pct
+        > MAX_ADVERSE_LIVE_SLIPPAGE_PCT
+    ):
+        return FreshPriceValidation(
+            accepted=False,
+            signal_price=signal_price,
+            live_price=live_price,
+            drift_pct=drift_pct,
+            adverse_slippage_pct=adverse_slippage_pct,
+            reason=(
+                "adverse entry slippage exceeds "
+                f"{MAX_ADVERSE_LIVE_SLIPPAGE_PCT:.2f}%"
+            ),
+        )
+
+    return FreshPriceValidation(
+        accepted=True,
+        signal_price=signal_price,
+        live_price=live_price,
+        drift_pct=drift_pct,
+        adverse_slippage_pct=adverse_slippage_pct,
+        reason="fresh live price remains acceptable",
+    )
