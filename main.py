@@ -25,7 +25,7 @@ from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_
 from patterns import is_bear_trap, is_bull_trap
 from news_filter import evaluate_news, get_news_confidence
 from price_action import evaluate_price_action
-from entry_quality import assess_entry_quality, fetch_live_price, validate_live_price
+from entry_quality import assess_entry_quality, fetch_live_prices, rank_entry_candidates, validate_live_price
 from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
 from signal_log import log_signal
 from risk_manager import RiskManager
@@ -71,6 +71,7 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
     """
     symbols_to_check = list(dict.fromkeys(symbols + list(open_positions.keys())))
     status_this_cycle = []
+    entry_candidates = []
 
 
     # Step 4c: market/sector trend, fetched/cached ONCE per scan cycle.
@@ -226,163 +227,255 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     continue
 
 
-            planned_stop_price = signal.stop_loss
-            if getattr(cfg, "ENABLE_FIXED_TARGET", False):
-                planned_stop_price, _ = (
-                    fixed_levels_from_fill(
-                        signal.direction,
-                        signal.entry_price,
-                        getattr(cfg, "STOP_LOSS_PERCENT", 0.45),
-                        getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
-                    )
-                )
-            fresh_live_price = fetch_live_price(
-                kite,
-                exchange,
-                symbol,
+            ranking_score = round(
+                float(_base_score)
+                + float(quality.score),
+                2,
             )
 
-            fresh_validation = validate_live_price(
-                signal,
-                fresh_live_price,
-            )
-
-            if not fresh_validation.accepted:
-                logger.info(
-                    f"{symbol}: skipped -- stale or "
-                    f"adverse entry price | "
-                    f"signal={fresh_validation.signal_price} "
-                    f"live={fresh_validation.live_price} "
-                    f"drift={fresh_validation.drift_pct} "
-                    f"| {fresh_validation.reason}"
-                )
-
-                status_this_cycle.append(
-                    {
-                        "symbol": symbol,
-                        "status": (
-                            "skipped, stale entry price: "
-                            + fresh_validation.reason
-                        ),
-                    }
-                )
-                continue
-
-            if fresh_validation.live_price is None:
-                logger.warning(
-                    f"{symbol}: fresh quote unavailable; "
-                    "continuing with signal price"
-                )
-            else:
-                logger.info(
-                    f"{symbol}: fresh price validated "
-                    f"| signal={fresh_validation.signal_price} "
-                    f"live={fresh_validation.live_price} "
-                    f"drift={fresh_validation.drift_pct:+.4f}%"
-                )
-
-            qty = risk.position_size(signal.entry_price, planned_stop_price)
-            if qty > 0 and not cfg.PAPER_TRADING:
-                qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
-            result = place_entry_order(kite, symbol, signal.direction, qty, exchange, cfg)
-            if result["success"]:
-                confirmed_qty = result["filled_quantity"]
-                # Confirmed average fill price is the REAL entry price used for the
-                # position/qty tracked below -- but stop/target stay computed from
-                # the ORIGINAL signal price, per explicit requirement: never
-                # silently redesign strategy-derived stop/target because the
-                # actual fill differs from the signal price.
-                confirmed_entry_price = result["average_price"] if result["average_price"] is not None else signal.entry_price
-                stop_price = signal.stop_loss
-                target_price = signal.target
-                if getattr(cfg, "ENABLE_FIXED_TARGET", False):
-                    stop_price, target_price = fixed_levels_from_fill(
-                        signal.direction,
-                        confirmed_entry_price,
-                        getattr(cfg, "STOP_LOSS_PERCENT", 0.45),
-                        getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
-                    )
-                open_positions[symbol] = {
-                    "direction": signal.direction,
-                    "qty": confirmed_qty,
-                    "entry": confirmed_entry_price,
-                    "stop": stop_price,
-                    "target": target_price,
-                    "exchange": exchange,
-                    "peak_price": confirmed_entry_price,
-                    "tight_mode": False,
-                    "entry_time": str(signal.timestamp),
-                    "entry_order_id": result.get("order_id"),
-                    "entry_operation_id": result.get("operation_id"),
-                    "requested_quantity": result.get("requested_quantity", confirmed_qty),
-                    "filled_quantity": confirmed_qty,
-                    "entry_fill_status": result.get("status"),
-                    "entry_average_price": result.get("average_price"),
-                    "entry_confirmation_pending": result.get("entry_confirmation_pending", False),
-                    "entry_status_message": result.get("reason"),
-                }
-                save_positions(open_positions)
-                logger.info(f"ENTRY {signal.direction} {exchange}:{symbol} qty={confirmed_qty} "
-                            f"entry={confirmed_entry_price:.2f} stop={stop_price:.2f} "
-                            f"target={signal.target:.2f} | {signal.reason} "
-                            f"[market_alignment: {signal.market_alignment}] "
-                            f"[fill_status: {result.get('status')}]")
-                status_this_cycle.append({
+            entry_candidates.append(
+                {
                     "symbol": symbol,
-                    "status": f"ENTRY {signal.direction} @ {confirmed_entry_price:.2f}",
-                    "confidence": signal.confidence,
-                    "confidence": signal.confidence,
-                    "market_alignment": signal.market_alignment,
-                })
-                log_signal({
-                    "timestamp": str(signal.timestamp), "symbol": symbol,
-                    "market_trend": market_trend, "sector": sector_for_symbol(symbol),
-                    "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
-                    "entry_price": signal.entry_price, "direction": signal.direction, "executed": True,
-                    "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
-                    "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
-                    "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
-                    "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
-                    "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
-                    "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
-                    "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
-                    "news_confidence_score": signal.news_confidence_score,
-                    "price_action_score": signal.price_action_score,
-                    "market_structure": (signal.price_action_detail or {}).get("market_structure"),
-                    "support": (signal.price_action_detail or {}).get("support"),
-                    "resistance": (signal.price_action_detail or {}).get("resistance"),
-                    "breakout": (signal.price_action_detail or {}).get("breakout"),
-                    "pullback": (signal.price_action_detail or {}).get("pullback"),
-                    "bos": (signal.price_action_detail or {}).get("bos"),
-                    "choch": (signal.price_action_detail or {}).get("choch"),
-                })
-            else:
-                status_this_cycle.append({"symbol": symbol, "status": "signal found, order failed"})
-                log_signal({
-                    "timestamp": str(signal.timestamp), "symbol": symbol,
-                    "market_trend": market_trend, "sector": sector_for_symbol(symbol),
-                    "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
-                    "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
-                    "rejection_reason": result["reason"],
-                    "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
-                    "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
-                    "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
-                    "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
-                    "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
-                    "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
-                    "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
-                    "news_confidence_score": signal.news_confidence_score,
-                    "price_action_score": signal.price_action_score,
-                    "market_structure": (signal.price_action_detail or {}).get("market_structure"),
-                    "support": (signal.price_action_detail or {}).get("support"),
-                    "resistance": (signal.price_action_detail or {}).get("resistance"),
-                    "breakout": (signal.price_action_detail or {}).get("breakout"),
-                    "pullback": (signal.price_action_detail or {}).get("pullback"),
-                    "bos": (signal.price_action_detail or {}).get("bos"),
-                    "choch": (signal.price_action_detail or {}).get("choch"),
-                })
+                    "exchange": exchange,
+                    "signal": signal,
+                    "df_5m": df_5m,
+                    "snapshot_row": _snapshot_row,
+                    "ranking_score": ranking_score,
+                    "quality_score": quality.score,
+                }
+            )
+
+            logger.info(
+                f"{symbol}: valid candidate collected "
+                f"| ranking_score={ranking_score:.2f} "
+                f"| technical_confidence={signal.confidence} "
+                f"| price_action={pa_score} "
+                f"| entry_quality={quality.score:.2f}"
+            )
         else:
             status_this_cycle.append({"symbol": symbol, "status": "no signal"})
+
+    ranked_candidates = rank_entry_candidates(
+        entry_candidates
+    )
+
+    batch_live_prices = fetch_live_prices(
+        kite,
+        ranked_candidates,
+    )
+
+    if ranked_candidates:
+        logger.info(
+            "Candidate ranking complete "
+            f"| valid_candidates={len(ranked_candidates)} "
+            f"| ranking="
+            f"{[(item['symbol'], item['ranking_score']) for item in ranked_candidates]}"
+        )
+
+    for candidate_rank, candidate in enumerate(
+        ranked_candidates,
+        start=1,
+    ):
+        symbol = candidate["symbol"]
+        exchange = candidate["exchange"]
+        signal = candidate["signal"]
+        df_5m = candidate["df_5m"]
+        _snapshot_row = candidate["snapshot_row"]
+
+        if not within_trading_window():
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": (
+                        "outside trading window "
+                        "after candidate ranking"
+                    ),
+                }
+            )
+            continue
+
+        if not risk.can_take_new_trade(
+            current_open_count=len(
+                open_positions
+            )
+        ):
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": (
+                        "risk limit reached "
+                        "after candidate ranking"
+                    ),
+                }
+            )
+
+            logger.info(
+                f"{symbol}: ranked candidate not executed "
+                f"| rank={candidate_rank} "
+                "| existing risk limit reached"
+            )
+            continue
+
+        logger.info(
+            f"{symbol}: executing ranked candidate "
+            f"| rank={candidate_rank}/"
+            f"{len(ranked_candidates)} "
+            f"| ranking_score="
+            f"{candidate['ranking_score']:.2f}"
+        )
+        planned_stop_price = signal.stop_loss
+        if getattr(cfg, "ENABLE_FIXED_TARGET", False):
+            planned_stop_price, _ = (
+                fixed_levels_from_fill(
+                    signal.direction,
+                    signal.entry_price,
+                    getattr(cfg, "STOP_LOSS_PERCENT", 0.45),
+                    getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
+                )
+            )
+        fresh_live_price = batch_live_prices.get(
+            symbol
+        )
+
+        fresh_validation = validate_live_price(
+            signal,
+            fresh_live_price,
+        )
+
+        if not fresh_validation.accepted:
+            logger.info(
+                f"{symbol}: skipped -- stale or "
+                f"adverse entry price | "
+                f"signal={fresh_validation.signal_price} "
+                f"live={fresh_validation.live_price} "
+                f"drift={fresh_validation.drift_pct} "
+                f"| {fresh_validation.reason}"
+            )
+
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": (
+                        "skipped, stale entry price: "
+                        + fresh_validation.reason
+                    ),
+                }
+            )
+            continue
+
+        if fresh_validation.live_price is None:
+            logger.warning(
+                f"{symbol}: fresh quote unavailable; "
+                "continuing with signal price"
+            )
+        else:
+            logger.info(
+                f"{symbol}: fresh price validated "
+                f"| signal={fresh_validation.signal_price} "
+                f"live={fresh_validation.live_price} "
+                f"drift={fresh_validation.drift_pct:+.4f}%"
+            )
+
+        qty = risk.position_size(signal.entry_price, planned_stop_price)
+        if qty > 0 and not cfg.PAPER_TRADING:
+            qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
+        result = place_entry_order(kite, symbol, signal.direction, qty, exchange, cfg)
+        if result["success"]:
+            confirmed_qty = result["filled_quantity"]
+            # Confirmed average fill price is the REAL entry price used for the
+            # position/qty tracked below -- but stop/target stay computed from
+            # the ORIGINAL signal price, per explicit requirement: never
+            # silently redesign strategy-derived stop/target because the
+            # actual fill differs from the signal price.
+            confirmed_entry_price = result["average_price"] if result["average_price"] is not None else signal.entry_price
+            stop_price = signal.stop_loss
+            target_price = signal.target
+            if getattr(cfg, "ENABLE_FIXED_TARGET", False):
+                stop_price, target_price = fixed_levels_from_fill(
+                    signal.direction,
+                    confirmed_entry_price,
+                    getattr(cfg, "STOP_LOSS_PERCENT", 0.45),
+                    getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
+                )
+            open_positions[symbol] = {
+                "direction": signal.direction,
+                "qty": confirmed_qty,
+                "entry": confirmed_entry_price,
+                "stop": stop_price,
+                "target": target_price,
+                "exchange": exchange,
+                "peak_price": confirmed_entry_price,
+                "tight_mode": False,
+                "entry_time": str(signal.timestamp),
+                "entry_order_id": result.get("order_id"),
+                "entry_operation_id": result.get("operation_id"),
+                "requested_quantity": result.get("requested_quantity", confirmed_qty),
+                "filled_quantity": confirmed_qty,
+                "entry_fill_status": result.get("status"),
+                "entry_average_price": result.get("average_price"),
+                "entry_confirmation_pending": result.get("entry_confirmation_pending", False),
+                "entry_status_message": result.get("reason"),
+            }
+            save_positions(open_positions)
+            logger.info(f"ENTRY {signal.direction} {exchange}:{symbol} qty={confirmed_qty} "
+                        f"entry={confirmed_entry_price:.2f} stop={stop_price:.2f} "
+                        f"target={signal.target:.2f} | {signal.reason} "
+                        f"[market_alignment: {signal.market_alignment}] "
+                        f"[fill_status: {result.get('status')}]")
+            status_this_cycle.append({
+                "symbol": symbol,
+                "status": f"ENTRY {signal.direction} @ {confirmed_entry_price:.2f}",
+                "confidence": signal.confidence,
+                "confidence": signal.confidence,
+                "market_alignment": signal.market_alignment,
+            })
+            log_signal({
+                "timestamp": str(signal.timestamp), "symbol": symbol,
+                "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
+                "entry_price": signal.entry_price, "direction": signal.direction, "executed": True,
+                "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
+                "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
+                "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
+                "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
+                "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
+                "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
+                "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
+                "news_confidence_score": signal.news_confidence_score,
+                "price_action_score": signal.price_action_score,
+                "market_structure": (signal.price_action_detail or {}).get("market_structure"),
+                "support": (signal.price_action_detail or {}).get("support"),
+                "resistance": (signal.price_action_detail or {}).get("resistance"),
+                "breakout": (signal.price_action_detail or {}).get("breakout"),
+                "pullback": (signal.price_action_detail or {}).get("pullback"),
+                "bos": (signal.price_action_detail or {}).get("bos"),
+                "choch": (signal.price_action_detail or {}).get("choch"),
+            })
+        else:
+            status_this_cycle.append({"symbol": symbol, "status": "signal found, order failed"})
+            log_signal({
+                "timestamp": str(signal.timestamp), "symbol": symbol,
+                "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
+                "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
+                "rejection_reason": result["reason"],
+                "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
+                "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
+                "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
+                "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
+                "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
+                "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
+                "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
+                "news_confidence_score": signal.news_confidence_score,
+                "price_action_score": signal.price_action_score,
+                "market_structure": (signal.price_action_detail or {}).get("market_structure"),
+                "support": (signal.price_action_detail or {}).get("support"),
+                "resistance": (signal.price_action_detail or {}).get("resistance"),
+                "breakout": (signal.price_action_detail or {}).get("breakout"),
+                "pullback": (signal.price_action_detail or {}).get("pullback"),
+                "bos": (signal.price_action_detail or {}).get("bos"),
+                "choch": (signal.price_action_detail or {}).get("choch"),
+            })
 
     logger.info(f"Scan Summary\n------------\nNifty fetches: {nifty_fetches}\n"
                 f"Sector fetches: {sector_fetches}\nSector cache hits: {sector_cache_hits}\n"

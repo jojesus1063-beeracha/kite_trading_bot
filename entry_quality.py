@@ -501,3 +501,108 @@ def validate_live_price(
         adverse_slippage_pct=adverse_slippage_pct,
         reason="fresh live price remains acceptable",
     )
+
+# RANKED_CANDIDATE_EXECUTION
+
+
+def _candidate_number(
+    candidate: dict[str, Any],
+    key: str,
+) -> float:
+    value = candidate.get(key)
+
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if not isfinite(result):
+        return 0.0
+
+    return result
+
+
+def rank_entry_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Rank valid signals from strongest to weakest.
+
+    This introduces no new trade-count or position-count limit.
+    Existing risk controls continue to determine which candidates
+    may execute.
+    """
+
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            -_candidate_number(
+                candidate,
+                "ranking_score",
+            ),
+            -_candidate_number(
+                candidate,
+                "quality_score",
+            ),
+            str(candidate.get("symbol") or ""),
+        ),
+    )
+
+
+def fetch_live_prices(
+    kite,
+    candidates: list[dict[str, Any]],
+) -> dict[str, float]:
+    """
+    Refresh all valid candidate prices in one quote request.
+    """
+
+    instrument_by_symbol: dict[str, str] = {}
+
+    for candidate in candidates:
+        symbol = str(
+            candidate.get("symbol") or ""
+        )
+
+        exchange = str(
+            candidate.get("exchange") or ""
+        )
+
+        if not symbol or not exchange:
+            continue
+
+        instrument_by_symbol[symbol] = (
+            f"{exchange}:{symbol}"
+        )
+
+    if not instrument_by_symbol:
+        return {}
+
+    try:
+        response = kite.quote(
+            list(instrument_by_symbol.values())
+        )
+    except Exception:
+        return {}
+
+    if not isinstance(response, dict):
+        return {}
+
+    prices: dict[str, float] = {}
+
+    for symbol, instrument in (
+        instrument_by_symbol.items()
+    ):
+        quote = response.get(instrument)
+
+        if not isinstance(quote, dict):
+            continue
+
+        price = _strict_market_number(
+            quote.get("last_price")
+        )
+
+        if price is not None:
+            prices[symbol] = price
+
+    return prices
