@@ -64,28 +64,118 @@ def classify_trend(df_15m: pd.DataFrame, cfg=None) -> str:
     return TREND_LABELS[trend]
 
 
-def _fetch_and_classify(kite, token, cfg) -> str:
-    """Shared fetch->indicators->classify path. Fails safe to Sideways."""
+_LAST_MARKET_CANDLES = pd.DataFrame()
+_LAST_SECTOR_CANDLES: dict[str, pd.DataFrame] = {}
+
+
+def clear_relative_strength_cache() -> None:
+    """
+    Clear benchmark snapshots at the beginning of each scan.
+    """
+
+    global _LAST_MARKET_CANDLES
+
+    _LAST_MARKET_CANDLES = pd.DataFrame()
+    _LAST_SECTOR_CANDLES.clear()
+
+
+def get_cached_market_candles() -> pd.DataFrame:
+    return _LAST_MARKET_CANDLES.copy()
+
+
+def get_cached_sector_candles(
+    sector_name: str | None,
+) -> pd.DataFrame:
+    if sector_name is None:
+        return pd.DataFrame()
+
+    candles = _LAST_SECTOR_CANDLES.get(
+        sector_name
+    )
+
+    if candles is None:
+        return pd.DataFrame()
+
+    return candles.copy()
+
+
+def _fetch_classified_context(
+    kite,
+    token,
+    cfg,
+) -> tuple[str, pd.DataFrame]:
+    """
+    Fetch, enrich and classify one benchmark.
+
+    Returns its trend and the same candles so relative-strength
+    ranking requires no duplicate historical-data request.
+    """
+
     from data_feed import fetch_candles
+
     try:
-        df_15m = fetch_candles(kite, token, cfg.TREND_TIMEFRAME, lookback_days=5)
+        df_15m = fetch_candles(
+            kite,
+            token,
+            cfg.TREND_TIMEFRAME,
+            lookback_days=5,
+        )
+
         if df_15m.empty:
-            return "Sideways"
-        df_15m, _ = add_indicators(df_15m, df_15m.copy(), cfg)
-        return classify_trend(df_15m, cfg)
+            return "Sideways", pd.DataFrame()
+
+        df_15m, _ = add_indicators(
+            df_15m,
+            df_15m.copy(),
+            cfg,
+        )
+
+        return (
+            classify_trend(
+                df_15m,
+                cfg,
+            ),
+            df_15m,
+        )
     except Exception:
-        return "Sideways"
+        return "Sideways", pd.DataFrame()
+
+
+def _fetch_and_classify(
+    kite,
+    token,
+    cfg,
+) -> str:
+    """
+    Backward-compatible trend-only wrapper.
+    """
+
+    trend, _ = _fetch_classified_context(
+        kite,
+        token,
+        cfg,
+    )
+
+    return trend
 
 
 def get_market_trend(kite, cfg) -> str:
     """
-    Fetches live Nifty 50 15m data and classifies it. Isolated: does
-    not touch the trading pipeline, does not affect any signal or
-    confidence yet -- proves the live fetch -> classify path works.
-    Fails safe to "Sideways" on any error (never raises into a caller
-    that might be mid-scan).
+    Fetch and classify Nifty 50 once and retain its candles for
+    relative-strength ranking during the current scan.
     """
-    return _fetch_and_classify(kite, NIFTY50_TOKEN, cfg)
+
+    global _LAST_MARKET_CANDLES
+
+    trend, candles = _fetch_classified_context(
+        kite,
+        NIFTY50_TOKEN,
+        cfg,
+    )
+
+    _LAST_MARKET_CANDLES = candles
+
+    return trend
 
 
 def sector_for_symbol(symbol: str):
@@ -93,20 +183,45 @@ def sector_for_symbol(symbol: str):
     return SECTOR_MAP.get(symbol)
 
 
-def get_sector_trend(kite, symbol: str, cfg) -> str:
+def get_sector_trend(
+    kite,
+    symbol: str,
+    cfg,
+) -> str:
     """
-    Fetches the live sector-index trend for `symbol`'s mapped sector.
-    Falls back to "Sideways" if the symbol has no sector mapping, or
-    on any fetch error -- same fail-safe philosophy as get_market_trend.
-    Still isolated: not wired into the trading pipeline yet.
+    Fetch and classify a mapped sector once and retain its candles
+    for relative-strength ranking during the current scan.
     """
-    sector_name = sector_for_symbol(symbol)
+
+    sector_name = sector_for_symbol(
+        symbol
+    )
+
     if sector_name is None:
         return "Sideways"
-    token = SECTOR_INDEX_TOKENS.get(sector_name)
+
+    token = SECTOR_INDEX_TOKENS.get(
+        sector_name
+    )
+
     if token is None:
+        _LAST_SECTOR_CANDLES[
+            sector_name
+        ] = pd.DataFrame()
+
         return "Sideways"
-    return _fetch_and_classify(kite, token, cfg)
+
+    trend, candles = _fetch_classified_context(
+        kite,
+        token,
+        cfg,
+    )
+
+    _LAST_SECTOR_CANDLES[
+        sector_name
+    ] = candles
+
+    return trend
 
 
 def compute_market_alignment(direction: str, market_trend: str, sector_trend: str) -> str:

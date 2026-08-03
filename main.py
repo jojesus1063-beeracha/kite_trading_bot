@@ -29,6 +29,12 @@ from price_action import evaluate_price_action
 from entry_quality import assess_entry_quality, fetch_live_prices, rank_entry_candidates, validate_live_price
 from entry_confirmation import assess_entry_context
 from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
+from market_trend import (
+    clear_relative_strength_cache,
+    get_cached_market_candles,
+    get_cached_sector_candles,
+)
+from relative_strength import assess_relative_strength
 from signal_log import log_signal
 from risk_manager import RiskManager
 from executor import place_entry_order, place_exit_order, place_force_exit_order, cap_quantity_by_margin
@@ -81,12 +87,19 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
     sector_fetches = 0
     sector_cache_hits = 0
     sector_cache = {}
+    sector_candle_cache = {}
+
+    clear_relative_strength_cache()
+    market_df_15m = pd.DataFrame()
+
     try:
         market_trend = get_market_trend(kite, cfg)
+        market_df_15m = get_cached_market_candles()
         nifty_fetches = 1
     except Exception as e:
         logger.warning(f"Market trend fetch failed, using UNKNOWN: {e}")
         market_trend = "UNKNOWN"
+        market_df_15m = pd.DataFrame()
 
     for symbol in symbols_to_check:
         if symbol not in tokens:
@@ -122,16 +135,27 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
 
         if signal:
             _snapshot_row = latest_completed_15m_row(df_15m, signal.timestamp)
+            sector = None
+            sector_df_15m = pd.DataFrame()
+
             try:
                 sector = sector_for_symbol(symbol)
                 if sector is None:
                     sector_trend = "UNKNOWN"
                 elif sector in sector_cache:
                     sector_trend = sector_cache[sector]
+                    sector_df_15m = sector_candle_cache.get(
+                        sector,
+                        pd.DataFrame(),
+                    )
                     sector_cache_hits += 1
                 else:
                     sector_trend = get_sector_trend(kite, symbol, cfg)
+                    sector_df_15m = get_cached_sector_candles(
+                        sector
+                    )
                     sector_cache[sector] = sector_trend
+                    sector_candle_cache[sector] = sector_df_15m
                     sector_fetches += 1
                 signal.market_alignment = (
                     "UNKNOWN"
@@ -220,6 +244,20 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 )
                 continue
 
+            relative_strength = assess_relative_strength(
+                signal,
+                df_15m,
+                market_df_15m,
+                sector_df_15m,
+            )
+
+            signal.relative_strength_score = (
+                relative_strength.score_adjustment
+            )
+            signal.relative_strength_detail = (
+                relative_strength.detail
+            )
+
             if getattr(cfg, "ENABLE_NEWS_FILTER", False):
                 try:
                     company_name = get_company_name(kite, symbol, exchange)
@@ -263,6 +301,9 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 + float(quality.score)
                 + float(
                     entry_context.score_adjustment
+                )
+                + float(
+                    relative_strength.score_adjustment
                 ),
                 2,
             )
@@ -282,6 +323,12 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "entry_context_detail": (
                         entry_context.detail
                     ),
+                    "relative_strength_score": (
+                        relative_strength.score_adjustment
+                    ),
+                    "relative_strength_detail": (
+                        relative_strength.detail
+                    ),
                 }
             )
 
@@ -296,7 +343,13 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 f"| confirmations="
                 f"{entry_context.detail.get('confirmation_count')} "
                 f"| adx_state="
-                f"{entry_context.detail.get('adx_state')}"
+                f"{entry_context.detail.get('adx_state')} "
+                f"| relative_strength="
+                f"{relative_strength.score_adjustment:+.2f} "
+                f"| market_edge="
+                f"{relative_strength.detail.get('market_edge_pct')} "
+                f"| sector_edge="
+                f"{relative_strength.detail.get('sector_edge_pct')}"
             )
         else:
             status_this_cycle.append({"symbol": symbol, "status": "no signal"})
