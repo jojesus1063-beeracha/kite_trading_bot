@@ -25,6 +25,7 @@ from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_
 from patterns import is_bear_trap, is_bull_trap
 from news_filter import evaluate_news, get_news_confidence
 from price_action import evaluate_price_action
+from entry_quality import assess_entry_quality
 from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
 from signal_log import log_signal
 from risk_manager import RiskManager
@@ -159,6 +160,34 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             _base_score += pa_score
             signal.price_action_score = pa_score
             signal.price_action_detail = pa_detail
+
+            quality = assess_entry_quality(
+                signal,
+                df_5m,
+            )
+
+            signal.entry_quality_score = quality.score
+            signal.entry_quality_detail = quality.detail
+
+            if not quality.accepted:
+                logger.info(
+                    f"{symbol}: skipped -- poor entry location "
+                    f"| quality_score={quality.score:.2f} "
+                    f"| {quality.reason} "
+                    f"| detail={quality.detail}"
+                )
+
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "skipped, poor entry location: "
+                            + quality.reason
+                        ),
+                    }
+                )
+                continue
+
             if getattr(cfg, "ENABLE_NEWS_FILTER", False):
                 try:
                     company_name = get_company_name(kite, symbol, exchange)
