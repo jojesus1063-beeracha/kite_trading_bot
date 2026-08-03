@@ -9,6 +9,7 @@ the application logger and the trading pipeline continues unchanged.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -32,10 +33,17 @@ def record_validation_event(
     """
 
     try:
+        effective_log_dir = (
+            log_dir
+            or os.environ.get(
+                "KITE_VALIDATION_LOG_DIR"
+            )
+        )
+
         append_validation_event(
             event_type,
             payload,
-            log_dir=log_dir,
+            log_dir=effective_log_dir,
         )
 
         return True
@@ -91,27 +99,60 @@ def candidate_snapshot(
     candidate: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    Extract validation-safe ranking fields from a candidate dictionary.
+    Extract stable fields from the candidate dictionary.
+
+    run_full_scan stores the quality value as quality_score. Older
+    callers may use entry_quality_score. Both are normalised into the
+    validation field entry_quality_score.
     """
 
-    fields = (
-        "symbol",
-        "ranking_score",
-        "entry_quality_score",
-        "entry_quality_detail",
-        "entry_context_score",
-        "entry_context_detail",
-        "relative_strength_score",
-        "relative_strength_detail",
+    signal = candidate.get("signal")
+
+    entry_quality_score = candidate.get(
+        "entry_quality_score"
     )
 
-    snapshot = {
-        field: candidate.get(field)
-        for field in fields
+    if entry_quality_score is None:
+        entry_quality_score = candidate.get(
+            "quality_score"
+        )
+
+    entry_quality_detail = candidate.get(
+        "entry_quality_detail"
+    )
+
+    if (
+        entry_quality_detail is None
+        and signal is not None
+    ):
+        entry_quality_detail = getattr(
+            signal,
+            "entry_quality_detail",
+            None,
+        )
+
+    return {
+        "symbol": candidate.get("symbol"),
+        "ranking_score": candidate.get(
+            "ranking_score"
+        ),
+        "entry_quality_score":
+            entry_quality_score,
+        "entry_quality_detail":
+            entry_quality_detail,
+        "entry_context_score": candidate.get(
+            "entry_context_score"
+        ),
+        "entry_context_detail": candidate.get(
+            "entry_context_detail"
+        ),
+        "relative_strength_score":
+            candidate.get(
+                "relative_strength_score"
+            ),
+        "relative_strength_detail":
+            candidate.get(
+                "relative_strength_detail"
+            ),
+        "signal": signal_snapshot(signal),
     }
-
-    snapshot["signal"] = signal_snapshot(
-        candidate.get("signal")
-    )
-
-    return snapshot

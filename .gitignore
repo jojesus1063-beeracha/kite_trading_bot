@@ -30,3 +30,6 @@ pending_orders.json
 pending_orders.json.lock
 runtime/auto_watchlist/
 runtime/
+
+# Paper-validation runtime ledger
+validation_events/
