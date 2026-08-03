@@ -57,28 +57,30 @@ for node in ast.walk(run_full_scan):
 
     event_calls.append(node)
 
-check(
-    "Exactly one validation event is currently connected",
-    len(event_calls) == 1,
-)
+event_types = []
 
-event_type = None
-
-if event_calls:
-    call = event_calls[0]
-
+for call in event_calls:
     if (
         call.args
         and isinstance(
             call.args[0],
             ast.Constant,
         )
+        and isinstance(
+            call.args[0].value,
+            str,
+        )
     ):
-        event_type = call.args[0].value
+        event_types.append(
+            call.args[0].value
+        )
 
 check(
-    "Connected event is candidate_collected",
-    event_type == "candidate_collected",
+    "Candidate collection event remains connected once",
+    event_types.count(
+        "candidate_collected"
+    )
+    == 1,
 )
 
 candidate_snapshot_calls = [

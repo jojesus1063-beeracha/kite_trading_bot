@@ -38,6 +38,7 @@ from relative_strength import assess_relative_strength
 from validation_recorder import (
     candidate_snapshot,
     record_validation_event,
+    signal_snapshot,
 )
 from signal_log import log_signal
 from risk_manager import RiskManager
@@ -323,6 +324,18 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                             f"(trading against market/sector trend)")
                 status_this_cycle.append({"symbol": symbol,
                                           "status": f"skipped, misaligned ({signal.market_alignment})"})
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **signal_snapshot(signal),
+                        "reason_code": "MARKET_ALIGNMENT_FILTER",
+                        "reason": "market/sector alignment filter rejected signal",
+                        "market_trend": market_trend,
+                        "sector": sector_for_symbol(symbol),
+                        "market_alignment": signal.market_alignment,
+                    },
+                )
+
                 continue
 
             # News filter: additional risk layer only -- never generates
@@ -360,6 +373,19 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                         ),
                     }
                 )
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **signal_snapshot(signal),
+                        "reason_code": "ENTRY_OVEREXTENDED",
+                        "reason": quality.reason,
+                        "entry_quality_score": quality.score,
+                        "entry_quality_detail": quality.detail,
+                        "market_trend": market_trend,
+                        "sector": sector_for_symbol(symbol),
+                    },
+                )
+
                 continue
 
             entry_context = assess_entry_context(
@@ -389,6 +415,19 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                         ),
                     }
                 )
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **signal_snapshot(signal),
+                        "reason_code": "OPPOSING_CHOCH",
+                        "reason": entry_context.reason,
+                        "entry_context_score": entry_context.score_adjustment,
+                        "entry_context_detail": entry_context.detail,
+                        "market_trend": market_trend,
+                        "sector": sector_for_symbol(symbol),
+                    },
+                )
+
                 continue
 
             relative_strength = assess_relative_strength(
@@ -440,6 +479,20 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                         "bos": (signal.price_action_detail or {}).get("bos"),
                         "choch": (signal.price_action_detail or {}).get("choch"),
                     })
+                    record_validation_event(
+                        "candidate_rejected",
+                        {
+                            **signal_snapshot(signal),
+                            "reason_code": "NEWS_FILTER",
+                            "reason": news_reason,
+                            "news_sentiment": signal.news_sentiment,
+                            "news_headline": signal.news_headline,
+                            "news_confidence_score": signal.news_confidence_score,
+                            "market_trend": market_trend,
+                            "sector": sector_for_symbol(symbol),
+                        },
+                    )
+
                     continue
 
 
