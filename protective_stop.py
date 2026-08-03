@@ -63,6 +63,161 @@ def make_protective_stop_tag() -> str:
     return tag
 
 
+def reconcile_protective_stop_submission(
+    kite,
+    *,
+    client_tag,
+    symbol,
+    exchange,
+    stop_side,
+    quantity,
+    product,
+    trigger_price,
+    tick_size,
+    max_wait_seconds=10,
+    poll_interval_seconds=1,
+    sleep_fn=None,
+    clock_fn=None,
+):
+    """
+    Find a protective order that the broker accepted when the
+    place_order response was lost or raised an exception.
+
+    The unique client tag is the primary identity. Order details are
+    also checked so an unrelated order cannot be adopted.
+    """
+
+    sleep_fn = sleep_fn or time.sleep
+    clock_fn = clock_fn or time.monotonic
+
+    started = clock_fn()
+    attempts = 0
+    api_errors = 0
+    last_error = None
+
+    expected_tag = str(client_tag)
+    expected_symbol = str(symbol).upper()
+    expected_exchange = str(exchange).upper()
+    expected_side = str(stop_side).upper()
+    expected_product = str(product).upper()
+    expected_quantity = int(quantity)
+    expected_trigger = float(trigger_price)
+    trigger_tolerance = max(
+        float(tick_size) / 2,
+        0.0000001,
+    )
+
+    while True:
+        attempts += 1
+
+        try:
+            broker_orders = kite.orders()
+        except Exception as exc:
+            broker_orders = []
+            api_errors += 1
+            last_error = str(exc)
+
+            logger.warning(
+                "Protective-stop reconciliation failed "
+                "for tag=%s attempt=%s: %s",
+                expected_tag,
+                attempts,
+                exc,
+            )
+
+        matches = []
+
+        for order in broker_orders or []:
+            try:
+                if str(
+                    order.get("tag") or ""
+                ) != expected_tag:
+                    continue
+
+                if str(
+                    order.get("tradingsymbol") or ""
+                ).upper() != expected_symbol:
+                    continue
+
+                if str(
+                    order.get("exchange") or ""
+                ).upper() != expected_exchange:
+                    continue
+
+                if str(
+                    order.get("transaction_type") or ""
+                ).upper() != expected_side:
+                    continue
+
+                order_type = str(
+                    order.get("order_type") or ""
+                ).upper()
+
+                if order_type not in {"SL-M", "SLM"}:
+                    continue
+
+                if str(
+                    order.get("product") or ""
+                ).upper() != expected_product:
+                    continue
+
+                if int(
+                    order.get("quantity") or 0
+                ) != expected_quantity:
+                    continue
+
+                broker_trigger = float(
+                    order.get("trigger_price") or 0
+                )
+
+                if abs(
+                    broker_trigger - expected_trigger
+                ) > trigger_tolerance:
+                    continue
+
+                if not order.get("order_id"):
+                    continue
+
+                matches.append(order)
+
+            except (
+                TypeError,
+                ValueError,
+                AttributeError,
+            ):
+                continue
+
+        if len(matches) == 1:
+            return {
+                "matched": True,
+                "order_id": str(
+                    matches[0]["order_id"]
+                ),
+                "order": matches[0],
+                "attempts": attempts,
+                "api_error_count": api_errors,
+                "last_error": last_error,
+            }
+
+        if len(matches) > 1:
+            raise ProtectiveStopError(
+                "Multiple broker orders matched protective "
+                f"stop tag {expected_tag}"
+            )
+
+        if clock_fn() - started >= max_wait_seconds:
+            return {
+                "matched": False,
+                "order_id": None,
+                "order": None,
+                "attempts": attempts,
+                "api_error_count": api_errors,
+                "last_error": last_error,
+            }
+
+        sleep_fn(poll_interval_seconds)
+
+
 def calculate_protective_trigger(
     *,
     confirmed_entry_price: float,
@@ -462,29 +617,74 @@ def place_protective_stop(
         )
     except Exception as exc:
         logger.critical(
-            "Protective-stop submission uncertain for "
-            "%s:%s operation=%s: %s",
+            "Protective-stop submission response uncertain for "
+            "%s:%s operation=%s tag=%s: %s",
             exchange,
             symbol,
             operation_id,
+            client_tag,
             exc,
         )
 
-        return {
-            "success": False,
-            "active": False,
-            "triggered": False,
-            "confirmation_pending": True,
-            "status": "SUBMISSION_UNCERTAIN",
-            "reason": str(exc),
-            "operation_id": operation_id,
-            "order_id": None,
-            "client_tag": client_tag,
-            "trigger_price": trigger_price,
-            "requested_quantity": quantity,
-            "filled_quantity": 0,
-            "average_price": None,
-        }
+        reconciliation = (
+            reconcile_protective_stop_submission(
+                kite,
+                client_tag=client_tag,
+                symbol=symbol,
+                exchange=exchange,
+                stop_side=stop_side,
+                quantity=quantity,
+                product=cfg.PRODUCT,
+                trigger_price=trigger_price,
+                tick_size=tick_size,
+                max_wait_seconds=getattr(
+                    cfg,
+                    "PROTECTIVE_STOP_RECONCILE_MAX_WAIT_SECONDS",
+                    10,
+                ),
+                poll_interval_seconds=getattr(
+                    cfg,
+                    "PROTECTIVE_STOP_RECONCILE_POLL_INTERVAL_SECONDS",
+                    1,
+                ),
+            )
+        )
+
+        if not reconciliation["matched"]:
+            return {
+                "success": False,
+                "active": False,
+                "triggered": False,
+                "confirmation_pending": True,
+                "status": "SUBMISSION_UNCERTAIN",
+                "reason": (
+                    "submission exception and no uniquely "
+                    "tagged broker order was found: "
+                    f"{exc}"
+                ),
+                "operation_id": operation_id,
+                "order_id": None,
+                "client_tag": client_tag,
+                "trigger_price": trigger_price,
+                "requested_quantity": quantity,
+                "filled_quantity": 0,
+                "average_price": None,
+                "reconciliation_attempts": (
+                    reconciliation["attempts"]
+                ),
+                "reconciliation_api_errors": (
+                    reconciliation["api_error_count"]
+                ),
+            }
+
+        order_id = reconciliation["order_id"]
+
+        logger.warning(
+            "Recovered protective-stop broker order %s "
+            "using unique tag=%s",
+            order_id,
+            client_tag,
+        )
 
     try:
         attach_protective_stop_order_id(
@@ -564,4 +764,13 @@ def place_protective_stop(
         "pending_quantity": verification.pending_quantity,
         "average_price": verification.average_price,
         "verified_at": verification.verified_at.isoformat(),
+        "submission_reconciled": (
+            "reconciliation" in locals()
+            and reconciliation.get("matched", False)
+        ),
+        "reconciliation_attempts": (
+            reconciliation.get("attempts")
+            if "reconciliation" in locals()
+            else 0
+        ),
     }

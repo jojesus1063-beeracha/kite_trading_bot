@@ -24,9 +24,13 @@ class FakeKite:
         history,
         *,
         submission_error=None,
+        reconcile_after_error=False,
     ):
         self.history = history
         self.submission_error = submission_error
+        self.reconcile_after_error = (
+            reconcile_after_error
+        )
         self.place_calls = []
 
     def place_order(self, **kwargs):
@@ -40,6 +44,32 @@ class FakeKite:
     def order_history(self, order_id):
         return self.history
 
+    def orders(self):
+        if (
+            not self.reconcile_after_error
+            or not self.place_calls
+        ):
+            return []
+
+        submitted = self.place_calls[-1]
+
+        return [{
+            "order_id": "RECOVERED-STOP-1",
+            "tag": submitted["tag"],
+            "tradingsymbol": (
+                submitted["tradingsymbol"]
+            ),
+            "exchange": submitted["exchange"],
+            "transaction_type": (
+                submitted["transaction_type"]
+            ),
+            "order_type": submitted["order_type"],
+            "product": submitted["product"],
+            "quantity": submitted["quantity"],
+            "trigger_price": submitted["trigger_price"],
+            "status": "TRIGGER PENDING",
+        }]
+
 
 cfg = SimpleNamespace(
     PAPER_TRADING=False,
@@ -48,6 +78,8 @@ cfg = SimpleNamespace(
     MARKET_PROTECTION=-1,
     PROTECTIVE_STOP_VERIFY_MAX_WAIT_SECONDS=0,
     PROTECTIVE_STOP_VERIFY_POLL_INTERVAL_SECONDS=0,
+    PROTECTIVE_STOP_RECONCILE_MAX_WAIT_SECONDS=0,
+    PROTECTIVE_STOP_RECONCILE_POLL_INTERVAL_SECONDS=0,
 )
 
 assert calculate_protective_trigger(
@@ -181,6 +213,47 @@ else:
     raise AssertionError(
         "Live broker stop was permitted in PAPER mode"
     )
+
+with TemporaryDirectory() as directory:
+    path = Path(directory) / "stops.json"
+
+    recovered = place_protective_stop(
+        FakeKite(
+            active_history,
+            submission_error=RuntimeError(
+                "response lost after broker acceptance"
+            ),
+            reconcile_after_error=True,
+        ),
+        symbol="RELIANCE",
+        position_direction="BUY",
+        quantity=2,
+        exchange="NSE",
+        confirmed_entry_price=3000,
+        stop_loss_percent=0.45,
+        tick_size=0.05,
+        cfg=cfg,
+        store_path=path,
+    )
+
+    assert recovered["success"] is True
+    assert recovered["active"] is True
+    assert recovered["submission_reconciled"] is True
+    assert recovered["order_id"] == (
+        "RECOVERED-STOP-1"
+    )
+    assert recovered["reconciliation_attempts"] == 1
+
+    recovered_records = (
+        list_unresolved_protective_stops(path)
+    )
+
+    assert len(recovered_records) == 1
+    assert recovered_records[0]["order_id"] == (
+        "RECOVERED-STOP-1"
+    )
+    assert recovered_records[0]["active"] is True
+
 
 with TemporaryDirectory() as directory:
     path = Path(directory) / "stops.json"
