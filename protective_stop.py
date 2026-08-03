@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -47,6 +48,19 @@ class ProtectiveStopVerificationResult:
     verified_at: datetime
     history_attempts: int
     api_error_count: int
+
+
+def make_protective_stop_tag() -> str:
+    """Generate a unique Kite-compatible client tag."""
+
+    tag = "KBS" + uuid.uuid4().hex[:17]
+
+    if len(tag) != 20 or not tag.isalnum():
+        raise ProtectiveStopError(
+            "Generated protective-stop tag is invalid"
+        )
+
+    return tag
 
 
 def calculate_protective_trigger(
@@ -411,6 +425,8 @@ def place_protective_stop(
         tick_size=tick_size,
     )
 
+    client_tag = make_protective_stop_tag()
+
     operation_id = create_protective_stop_intent(
         symbol=symbol,
         exchange=exchange,
@@ -418,6 +434,7 @@ def place_protective_stop(
         stop_side=stop_side,
         requested_quantity=quantity,
         trigger_price=trigger_price,
+        client_tag=client_tag,
         path=store_path,
     )
 
@@ -441,7 +458,7 @@ def place_protective_stop(
                 "DAY",
             ),
             market_protection=market_protection,
-            tag="kitebot-stop",
+            tag=client_tag,
         )
     except Exception as exc:
         logger.critical(
@@ -462,6 +479,7 @@ def place_protective_stop(
             "reason": str(exc),
             "operation_id": operation_id,
             "order_id": None,
+            "client_tag": client_tag,
             "trigger_price": trigger_price,
             "requested_quantity": quantity,
             "filled_quantity": 0,
@@ -494,6 +512,7 @@ def place_protective_stop(
             "reason": str(exc),
             "operation_id": operation_id,
             "order_id": str(order_id),
+            "client_tag": client_tag,
             "trigger_price": trigger_price,
             "requested_quantity": quantity,
             "filled_quantity": 0,
@@ -538,6 +557,7 @@ def place_protective_stop(
         "reason": verification.status_message,
         "operation_id": operation_id,
         "order_id": str(order_id),
+        "client_tag": client_tag,
         "trigger_price": trigger_price,
         "requested_quantity": quantity,
         "filled_quantity": verification.filled_quantity,

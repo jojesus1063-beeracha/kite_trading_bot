@@ -23,6 +23,7 @@ with TemporaryDirectory() as directory:
         stop_side="SELL",
         requested_quantity=4,
         trigger_price=1493.25,
+        client_tag="KBS12345678901234567",
         path=path,
     )
 
@@ -38,6 +39,7 @@ with TemporaryDirectory() as directory:
             stop_side="SELL",
             requested_quantity=4,
             trigger_price=1493.25,
+            client_tag="KBS12345678901234567",
             path=path,
         )
     except UnresolvedProtectiveStopExistsError:
@@ -82,6 +84,9 @@ with TemporaryDirectory() as directory:
     )
 
     assert record["order_id"] == "STOP-1"
+    assert record["client_tag"] == (
+        "KBS12345678901234567"
+    )
     assert record["active"] is True
     assert record["last_known_status"] == (
         "TRIGGER PENDING"

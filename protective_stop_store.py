@@ -189,6 +189,7 @@ def create_protective_stop_intent(
     stop_side: str,
     requested_quantity: int,
     trigger_price: float,
+    client_tag: str,
     path=None,
 ) -> str:
     direction = str(position_direction).upper()
@@ -228,6 +229,17 @@ def create_protective_stop_intent(
             "trigger price must be positive"
         )
 
+    if (
+        not isinstance(client_tag, str)
+        or not client_tag
+        or not client_tag.isalnum()
+        or len(client_tag) > 20
+    ):
+        raise InvalidProtectiveStopRecordError(
+            "client tag must be alphanumeric "
+            "and no longer than 20 characters"
+        )
+
     store_path = _path(path)
 
     with _file_lock(store_path):
@@ -249,6 +261,7 @@ def create_protective_stop_intent(
         data["stops"].append({
             "operation_id": operation_id,
             "order_id": None,
+            "client_tag": client_tag,
             "symbol": symbol,
             "exchange": exchange,
             "position_direction": direction,

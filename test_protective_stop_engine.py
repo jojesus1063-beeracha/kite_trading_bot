@@ -103,7 +103,9 @@ with TemporaryDirectory() as directory:
     assert call["product"] == "MIS"
     assert call["trigger_price"] == 1493.25
     assert call["market_protection"] == -1
-    assert call["tag"] == "kitebot-stop"
+    assert call["tag"].isalnum()
+    assert len(call["tag"]) == 20
+    assert result["client_tag"] == call["tag"]
 
     unresolved = list_unresolved_protective_stops(
         path
