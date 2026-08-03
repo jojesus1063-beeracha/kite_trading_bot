@@ -45,6 +45,7 @@ from costs import net_pnl_for_trade
 from trade_levels import fixed_levels_from_fill
 from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
+from cooperative_position_monitor import CooperativeScanMonitor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("main")
@@ -65,6 +66,110 @@ def past_square_off() -> bool:
     return now >= cutoff
 
 
+
+def _cooperative_position_check_if_due(
+    kite,
+    tokens,
+    exchange_map,
+    open_positions,
+    risk,
+    monitor,
+):
+    """
+    Run the existing position-exit checks between scan operations.
+
+    This stays single-threaded, preventing concurrent mutation of
+    positions, risk state, broker orders and persistence files.
+    """
+
+    if not open_positions:
+        return []
+
+    if not monitor.due():
+        return []
+
+    started_at = time.monotonic()
+    checked_symbols = []
+
+    for position_symbol in list(
+        open_positions.keys()
+    ):
+        if position_symbol not in open_positions:
+            continue
+
+        if position_symbol not in tokens:
+            logger.error(
+                "Cooperative position check skipped "
+                f"{position_symbol}: token unavailable"
+            )
+            continue
+
+        try:
+            check_position_exit(
+                kite,
+                position_symbol,
+                tokens,
+                exchange_map,
+                open_positions,
+                risk,
+                check_trend=False,
+            )
+
+            checked_symbols.append(
+                position_symbol
+            )
+        except Exception as exc:
+            logger.exception(
+                "Cooperative position check failed "
+                f"for {position_symbol}: {exc}"
+            )
+
+    monitor.mark_checked()
+
+    elapsed = (
+        time.monotonic()
+        - started_at
+    )
+
+    warning_seconds = float(
+        getattr(
+            cfg,
+            "POSITION_CHECK_WARNING_SECONDS",
+            5,
+        )
+    )
+
+    critical_seconds = float(
+        getattr(
+            cfg,
+            "POSITION_CHECK_CRITICAL_SECONDS",
+            15,
+        )
+    )
+
+    if elapsed > critical_seconds:
+        logger.error(
+            "CRITICAL: cooperative position check "
+            f"took {elapsed:.1f}s"
+        )
+    elif elapsed > warning_seconds:
+        logger.warning(
+            "Cooperative position check "
+            f"took {elapsed:.1f}s"
+        )
+
+    logger.info(
+        "Cooperative position check during scan "
+        f"| checked={len(checked_symbols)} "
+        f"| remaining_open={len(open_positions)} "
+        f"| elapsed={elapsed:.1f}s "
+        f"| completed_checks="
+        f"{monitor.completed_checks}"
+    )
+
+    return checked_symbols
+
+
 def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
     """
     One full pass over the watchlist: manage open positions (via
@@ -79,6 +184,20 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
     """
     symbols_to_check = list(dict.fromkeys(symbols + list(open_positions.keys())))
     status_this_cycle = []
+
+    # Symbols with positions at scan start cannot be reopened during
+    # the same scan if a cooperative stop/target check closes them.
+    protected_position_symbols = set(
+        open_positions.keys()
+    )
+
+    cooperative_monitor = CooperativeScanMonitor(
+        interval_seconds=getattr(
+            cfg,
+            "POSITION_CHECK_SECONDS",
+            25,
+        )
+    )
     entry_candidates = []
 
 
@@ -102,6 +221,30 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
         market_df_15m = pd.DataFrame()
 
     for symbol in symbols_to_check:
+        _cooperative_position_check_if_due(
+            kite,
+            tokens,
+            exchange_map,
+            open_positions,
+            risk,
+            cooperative_monitor,
+        )
+
+        if (
+            symbol in protected_position_symbols
+            and symbol not in open_positions
+        ):
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": (
+                        "position closed during "
+                        "cooperative scan monitoring"
+                    ),
+                }
+            )
+            continue
+
         if symbol not in tokens:
             continue
         token = tokens[symbol]
@@ -354,6 +497,17 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
         else:
             status_this_cycle.append({"symbol": symbol, "status": "no signal"})
 
+    # A complete watchlist pass can exceed the configured monitoring
+    # interval, so check existing positions before ranking candidates.
+    _cooperative_position_check_if_due(
+        kite,
+        tokens,
+        exchange_map,
+        open_positions,
+        risk,
+        cooperative_monitor,
+    )
+
     ranked_candidates = rank_entry_candidates(
         entry_candidates
     )
@@ -375,7 +529,33 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
         ranked_candidates,
         start=1,
     ):
+        # Entry verification can take several seconds. Recheck existing
+        # positions before processing each ranked entry candidate.
+        _cooperative_position_check_if_due(
+            kite,
+            tokens,
+            exchange_map,
+            open_positions,
+            risk,
+            cooperative_monitor,
+        )
+
         symbol = candidate["symbol"]
+
+        if (
+            symbol in protected_position_symbols
+            and symbol not in open_positions
+        ):
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": (
+                        "candidate skipped after "
+                        "same-scan position exit"
+                    ),
+                }
+            )
+            continue
         exchange = candidate["exchange"]
         signal = candidate["signal"]
         df_5m = candidate["df_5m"]
