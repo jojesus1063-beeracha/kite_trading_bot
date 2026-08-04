@@ -34,11 +34,14 @@ from news_filter import evaluate_news, get_news_confidence
 from price_action import evaluate_price_action
 from entry_quality import assess_entry_quality, fetch_live_prices, rank_entry_candidates, validate_live_price
 from entry_confirmation import assess_entry_context
-from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
 from market_trend import (
     clear_relative_strength_cache,
+    compute_market_alignment,
     get_cached_market_candles,
     get_cached_sector_candles,
+    get_market_trend_diagnostic,
+    get_sector_trend_diagnostic,
+    sector_for_symbol,
 )
 from relative_strength import assess_relative_strength
 from validation_recorder import (
@@ -115,6 +118,9 @@ _TRADE_ANALYTICS_FIELDS = (
     "adx_delta",
     "relative_strength_score",
     "relative_strength_detail",
+    "market_trend_reason",
+    "sector_trend",
+    "sector_trend_reason",
     "mfe_pct",
     "mae_pct",
 )
@@ -279,18 +285,32 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
     sector_fetches = 0
     sector_cache_hits = 0
     sector_cache = {}
+    sector_reason_cache = {}
     sector_candle_cache = {}
 
     clear_relative_strength_cache()
     market_df_15m = pd.DataFrame()
 
     try:
-        market_trend = get_market_trend(kite, cfg)
+        (
+            market_trend,
+            market_trend_reason,
+        ) = get_market_trend_diagnostic(
+            kite,
+            cfg,
+        )
         market_df_15m = get_cached_market_candles()
         nifty_fetches = 1
+        if market_trend_reason != "OK":
+            logger.warning(
+                "Market trend diagnostic fallback "
+                f"| trend={market_trend} "
+                f"| reason={market_trend_reason}"
+            )
     except Exception as e:
         logger.warning(f"Market trend fetch failed, using UNKNOWN: {e}")
         market_trend = "UNKNOWN"
+        market_trend_reason = "FETCH_ERROR"
         market_df_15m = pd.DataFrame()
 
     for symbol in symbols_to_check:
@@ -363,6 +383,7 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             _snapshot_row = latest_completed_15m_row(df_15m, signal.timestamp)
             sector = None
             sector_df_15m = pd.DataFrame()
+            sector_trend_reason = "UNMAPPED"
 
             try:
                 sector = sector_for_symbol(symbol)
@@ -370,19 +391,35 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     sector_trend = "UNKNOWN"
                 elif sector in sector_cache:
                     sector_trend = sector_cache[sector]
+                    sector_trend_reason = sector_reason_cache[sector]
                     sector_df_15m = sector_candle_cache.get(
                         sector,
                         pd.DataFrame(),
                     )
                     sector_cache_hits += 1
                 else:
-                    sector_trend = get_sector_trend(kite, symbol, cfg)
+                    (
+                        sector_trend,
+                        sector_trend_reason,
+                    ) = get_sector_trend_diagnostic(
+                        kite,
+                        symbol,
+                        cfg,
+                    )
                     sector_df_15m = get_cached_sector_candles(
                         sector
                     )
                     sector_cache[sector] = sector_trend
+                    sector_reason_cache[sector] = sector_trend_reason
                     sector_candle_cache[sector] = sector_df_15m
                     sector_fetches += 1
+                if sector_trend_reason != "OK":
+                    logger.info(
+                        f"{symbol}: sector trend diagnostic fallback "
+                        f"| sector={sector} "
+                        f"| trend={sector_trend} "
+                        f"| reason={sector_trend_reason}"
+                    )
                 signal.market_alignment = (
                     "UNKNOWN"
                     if sector_trend == "UNKNOWN"
@@ -395,6 +432,8 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             except Exception as e:
                 logger.warning(f"Market alignment computation failed for {symbol}, using UNKNOWN: {e}")
                 signal.market_alignment = "UNKNOWN"
+                sector_trend = "UNKNOWN"
+                sector_trend_reason = "FETCH_ERROR"
 
             if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and \
                signal.market_alignment not in ("ALIGNED", "STRONG_ALIGNMENT"):
@@ -409,7 +448,10 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                         "reason_code": "MARKET_ALIGNMENT_FILTER",
                         "reason": "market/sector alignment filter rejected signal",
                         "market_trend": market_trend,
-                        "sector": sector_for_symbol(symbol),
+                        "market_trend_reason": market_trend_reason,
+                        "sector": sector,
+                        "sector_trend": sector_trend,
+                        "sector_trend_reason": sector_trend_reason,
                         "market_alignment": signal.market_alignment,
                     },
                 )
@@ -460,7 +502,10 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                         "entry_quality_score": quality.score,
                         "entry_quality_detail": quality.detail,
                         "market_trend": market_trend,
-                        "sector": sector_for_symbol(symbol),
+                        "market_trend_reason": market_trend_reason,
+                        "sector": sector,
+                        "sector_trend": sector_trend,
+                        "sector_trend_reason": sector_trend_reason,
                     },
                 )
 
@@ -502,7 +547,10 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                         "entry_context_score": entry_context.score_adjustment,
                         "entry_context_detail": entry_context.detail,
                         "market_trend": market_trend,
-                        "sector": sector_for_symbol(symbol),
+                        "market_trend_reason": market_trend_reason,
+                        "sector": sector,
+                        "sector_trend": sector_trend,
+                        "sector_trend_reason": sector_trend_reason,
                     },
                 )
 
@@ -541,7 +589,11 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                                               "status": f"skipped, negative news ({signal.news_headline})"})
                     log_signal({
                         "timestamp": str(signal.timestamp), "symbol": symbol,
-                        "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                        "market_trend": market_trend,
+                        "market_trend_reason": market_trend_reason,
+                        "sector": sector,
+                        "sector_trend": sector_trend,
+                        "sector_trend_reason": sector_trend_reason,
                         "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
                         "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
                         "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
@@ -567,7 +619,10 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                             "news_headline": signal.news_headline,
                             "news_confidence_score": signal.news_confidence_score,
                             "market_trend": market_trend,
-                            "sector": sector_for_symbol(symbol),
+                            "market_trend_reason": market_trend_reason,
+                            "sector": sector,
+                            "sector_trend": sector_trend,
+                            "sector_trend_reason": sector_trend_reason,
                         },
                     )
 
@@ -608,6 +663,11 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "relative_strength_detail": (
                         relative_strength.detail
                     ),
+                    "market_trend": market_trend,
+                    "market_trend_reason": market_trend_reason,
+                    "sector": sector,
+                    "sector_trend": sector_trend,
+                    "sector_trend_reason": sector_trend_reason,
                 }
             )
 
@@ -638,9 +698,10 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                         entry_candidates[-1]
                     ),
                     "market_trend": market_trend,
-                    "sector": sector_for_symbol(
-                        symbol
-                    ),
+                    "market_trend_reason": market_trend_reason,
+                    "sector": sector,
+                    "sector_trend": sector_trend,
+                    "sector_trend_reason": sector_trend_reason,
                     "exchange": exchange,
                 },
             )
@@ -749,8 +810,15 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             "signal_timestamp": signal.timestamp,
             "technical_confidence": signal.confidence,
             "market_alignment": signal.market_alignment,
-            "market_trend": market_trend,
-            "sector": sector_for_symbol(symbol),
+            "market_trend": candidate.get("market_trend"),
+            "market_trend_reason": candidate.get(
+                "market_trend_reason"
+            ),
+            "sector": candidate.get("sector"),
+            "sector_trend": candidate.get("sector_trend"),
+            "sector_trend_reason": candidate.get(
+                "sector_trend_reason"
+            ),
             "exchange": exchange,
         }
 
@@ -780,6 +848,13 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             ),
             "relative_strength_detail": candidate.get(
                 "relative_strength_detail"
+            ),
+            "market_trend_reason": candidate.get(
+                "market_trend_reason"
+            ),
+            "sector_trend": candidate.get("sector_trend"),
+            "sector_trend_reason": candidate.get(
+                "sector_trend_reason"
             ),
         }
 
@@ -1026,7 +1101,11 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 "timestamp": str(signal.timestamp), "symbol": symbol,
                 "entry_operation_id": result.get("operation_id"),
                 "entry_order_id": result.get("order_id"),
-                "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                "market_trend": candidate.get("market_trend"),
+                "market_trend_reason": candidate.get("market_trend_reason"),
+                "sector": candidate.get("sector"),
+                "sector_trend": candidate.get("sector_trend"),
+                "sector_trend_reason": candidate.get("sector_trend_reason"),
                 "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
                 "entry_price": signal.entry_price, "direction": signal.direction, "executed": True,
                 "confirmed_entry_price": confirmed_entry_price,
@@ -1054,7 +1133,11 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 "timestamp": str(signal.timestamp), "symbol": symbol,
                 "entry_operation_id": result.get("operation_id"),
                 "entry_order_id": result.get("order_id"),
-                "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                "market_trend": candidate.get("market_trend"),
+                "market_trend_reason": candidate.get("market_trend_reason"),
+                "sector": candidate.get("sector"),
+                "sector_trend": candidate.get("sector_trend"),
+                "sector_trend_reason": candidate.get("sector_trend_reason"),
                 "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
                 "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
                 **signal_analytics,

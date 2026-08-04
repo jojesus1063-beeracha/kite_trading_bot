@@ -99,16 +99,17 @@ def get_cached_sector_candles(
     return candles.copy()
 
 
-def _fetch_classified_context(
+def _fetch_classified_context_diagnostic(
     kite,
     token,
     cfg,
-) -> tuple[str, pd.DataFrame]:
+) -> tuple[str, pd.DataFrame, str]:
     """
-    Fetch, enrich and classify one benchmark.
+    Fetch, enrich and classify one benchmark with a reason code.
 
-    Returns its trend and the same candles so relative-strength
-    ranking requires no duplicate historical-data request.
+    The trend remains fail-safe and backward compatible: every failure
+    still resolves to ``Sideways`` with empty candles.  The third return
+    value only explains why that fallback was used.
     """
 
     from data_feed import fetch_candles
@@ -120,10 +121,13 @@ def _fetch_classified_context(
             cfg.TREND_TIMEFRAME,
             lookback_days=5,
         )
+    except Exception:
+        return "Sideways", pd.DataFrame(), "FETCH_ERROR"
 
-        if df_15m.empty:
-            return "Sideways", pd.DataFrame()
+    if not isinstance(df_15m, pd.DataFrame) or df_15m.empty:
+        return "Sideways", pd.DataFrame(), "EMPTY_DATA"
 
+    try:
         df_15m, _ = add_indicators(
             df_15m,
             df_15m.copy(),
@@ -136,9 +140,26 @@ def _fetch_classified_context(
                 cfg,
             ),
             df_15m,
+            "OK",
         )
     except Exception:
-        return "Sideways", pd.DataFrame()
+        return "Sideways", pd.DataFrame(), "INDICATOR_ERROR"
+
+
+def _fetch_classified_context(
+    kite,
+    token,
+    cfg,
+) -> tuple[str, pd.DataFrame]:
+    """Backward-compatible context wrapper without diagnostics."""
+
+    trend, candles, _ = _fetch_classified_context_diagnostic(
+        kite,
+        token,
+        cfg,
+    )
+
+    return trend, candles
 
 
 def _fetch_and_classify(
@@ -159,21 +180,36 @@ def _fetch_and_classify(
     return trend
 
 
-def get_market_trend(kite, cfg) -> str:
+def get_market_trend_diagnostic(
+    kite,
+    cfg,
+) -> tuple[str, str]:
     """
-    Fetch and classify Nifty 50 once and retain its candles for
-    relative-strength ranking during the current scan.
+    Return Nifty 50 trend plus its diagnostic reason.
     """
 
     global _LAST_MARKET_CANDLES
 
-    trend, candles = _fetch_classified_context(
+    trend, candles, reason = _fetch_classified_context_diagnostic(
         kite,
         NIFTY50_TOKEN,
         cfg,
     )
 
     _LAST_MARKET_CANDLES = candles
+
+    return trend, reason
+
+
+def get_market_trend(kite, cfg) -> str:
+    """
+    Backward-compatible Nifty trend-only wrapper.
+    """
+
+    trend, _ = get_market_trend_diagnostic(
+        kite,
+        cfg,
+    )
 
     return trend
 
@@ -183,14 +219,18 @@ def sector_for_symbol(symbol: str):
     return SECTOR_MAP.get(symbol)
 
 
-def get_sector_trend(
+def get_sector_trend_diagnostic(
     kite,
     symbol: str,
     cfg,
-) -> str:
+) -> tuple[str, str]:
     """
-    Fetch and classify a mapped sector once and retain its candles
-    for relative-strength ranking during the current scan.
+    Return a sector trend plus its diagnostic reason.
+
+    Its trend value deliberately preserves the historical public
+    behavior: unmapped and unavailable sectors remain ``Sideways``.
+    ``main.py`` separately keeps its established ``UNKNOWN`` treatment
+    for unmapped symbols when calculating market alignment.
     """
 
     sector_name = sector_for_symbol(
@@ -198,7 +238,7 @@ def get_sector_trend(
     )
 
     if sector_name is None:
-        return "Sideways"
+        return "Sideways", "UNMAPPED"
 
     token = SECTOR_INDEX_TOKENS.get(
         sector_name
@@ -209,9 +249,9 @@ def get_sector_trend(
             sector_name
         ] = pd.DataFrame()
 
-        return "Sideways"
+        return "Sideways", "MISSING_TOKEN"
 
-    trend, candles = _fetch_classified_context(
+    trend, candles, reason = _fetch_classified_context_diagnostic(
         kite,
         token,
         cfg,
@@ -221,35 +261,23 @@ def get_sector_trend(
         sector_name
     ] = candles
 
+    return trend, reason
+
+
+def get_sector_trend(
+    kite,
+    symbol: str,
+    cfg,
+) -> str:
+    """Backward-compatible sector trend-only wrapper."""
+
+    trend, _ = get_sector_trend_diagnostic(
+        kite,
+        symbol,
+        cfg,
+    )
+
     return trend
-
-
-def compute_market_alignment(direction: str, market_trend: str, sector_trend: str) -> str:
-    """
-    Pure function: compares the trade's direction against market and
-    sector trend, returns "ALIGNED" / "NEUTRAL" / "OPPOSED".
-
-    ALIGNED: both market AND sector trend match the trade direction
-             (Bullish for BUY, Bearish for SELL).
-    OPPOSED: EITHER market OR sector trend actively contradicts the
-             trade direction (the stronger of two negative signals wins
-             -- any real opposition is treated as OPPOSED, not averaged
-             away by a Sideways reading elsewhere).
-    NEUTRAL: everything else (e.g. one Sideways + one matching, or
-             both Sideways) -- no strong signal either way.
-
-    Used to adjust Signal.confidence -- never to block a trade outright
-    (that decision belongs to the caller, per the "confidence not
-    filter" design principle).
-    """
-    wanted = "Bullish" if direction == "BUY" else "Bearish"
-    opposed_label = "Bearish" if direction == "BUY" else "Bullish"
-
-    if market_trend == opposed_label or sector_trend == opposed_label:
-        return "OPPOSED"
-    if market_trend == wanted and sector_trend == wanted:
-        return "ALIGNED"
-    return "NEUTRAL"
 
 
 def compute_market_alignment(direction: str, market_trend: str, sector_trend: str) -> str:
