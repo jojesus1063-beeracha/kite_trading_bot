@@ -16,6 +16,7 @@ import pandas as pd
 
 import logging
 import time
+import uuid
 from datetime import datetime
 
 import config as cfg
@@ -93,6 +94,40 @@ def past_square_off() -> bool:
     now = datetime.now().time()
     cutoff = datetime.strptime(cfg.FORCE_SQUARE_OFF_TIME, "%H:%M").time()
     return now >= cutoff
+
+
+_TRADE_ANALYTICS_FIELDS = (
+    "signal_id",
+    "entry_operation_id",
+    "entry_order_id",
+    "entry_time",
+    "candidate_rank",
+    "candidate_count",
+    "ranking_score",
+    "entry_quality_score",
+    "entry_quality_detail",
+    "entry_context_score",
+    "entry_context_detail",
+    "confirmation_count",
+    "adx_state",
+    "adx_current",
+    "adx_previous",
+    "adx_delta",
+    "relative_strength_score",
+    "relative_strength_detail",
+    "mfe_pct",
+    "mae_pct",
+)
+
+
+def _trade_analytics_from_position(position):
+    """Copy reporting-only entry context into a closed-trade record."""
+
+    return {
+        field: position.get(field)
+        for field in _TRADE_ANALYTICS_FIELDS
+        if position.get(field) is not None
+    }
 
 
 
@@ -560,6 +595,7 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "snapshot_row": _snapshot_row,
                     "ranking_score": ranking_score,
                     "quality_score": quality.score,
+                    "quality_detail": quality.detail,
                     "entry_context_score": (
                         entry_context.score_adjustment
                     ),
@@ -694,6 +730,7 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             "candidate_count": len(ranked_candidates),
             "ranking_score": candidate.get("ranking_score"),
             "entry_quality_score": candidate.get("quality_score"),
+            "entry_quality_detail": candidate.get("quality_detail"),
             "entry_context_score": candidate.get(
                 "entry_context_score"
             ),
@@ -715,6 +752,35 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             "market_trend": market_trend,
             "sector": sector_for_symbol(symbol),
             "exchange": exchange,
+        }
+
+        entry_context_detail = (
+            candidate.get("entry_context_detail")
+            if isinstance(candidate.get("entry_context_detail"), dict)
+            else {}
+        )
+        signal_analytics = {
+            "signal_id": str(uuid.uuid4()),
+            "candidate_rank": candidate_rank,
+            "candidate_count": len(ranked_candidates),
+            "ranking_score": candidate.get("ranking_score"),
+            "entry_quality_score": candidate.get("quality_score"),
+            "entry_quality_detail": candidate.get("quality_detail"),
+            "entry_context_score": candidate.get("entry_context_score"),
+            "entry_context_detail": entry_context_detail,
+            "confirmation_count": entry_context_detail.get(
+                "confirmation_count"
+            ),
+            "adx_state": entry_context_detail.get("adx_state"),
+            "adx_current": entry_context_detail.get("adx_current"),
+            "adx_previous": entry_context_detail.get("adx_previous"),
+            "adx_delta": entry_context_detail.get("adx_delta"),
+            "relative_strength_score": candidate.get(
+                "relative_strength_score"
+            ),
+            "relative_strength_detail": candidate.get(
+                "relative_strength_detail"
+            ),
         }
 
         if (
@@ -882,6 +948,7 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             signal,
             cfg,
             tick_size=tick_size,
+            signal_analytics=signal_analytics,
         )
         result = place_entry_order(
             kite,
@@ -900,6 +967,7 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 exchange,
                 cfg,
                 tick_size=tick_size,
+                signal_analytics=signal_analytics,
             )
             open_positions[symbol] = position
 
@@ -956,9 +1024,13 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             })
             log_signal({
                 "timestamp": str(signal.timestamp), "symbol": symbol,
+                "entry_operation_id": result.get("operation_id"),
+                "entry_order_id": result.get("order_id"),
                 "market_trend": market_trend, "sector": sector_for_symbol(symbol),
                 "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
                 "entry_price": signal.entry_price, "direction": signal.direction, "executed": True,
+                "confirmed_entry_price": confirmed_entry_price,
+                **signal_analytics,
                 "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
                 "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
                 "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
@@ -980,9 +1052,12 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             status_this_cycle.append({"symbol": symbol, "status": "signal found, order failed"})
             log_signal({
                 "timestamp": str(signal.timestamp), "symbol": symbol,
+                "entry_operation_id": result.get("operation_id"),
+                "entry_order_id": result.get("order_id"),
                 "market_trend": market_trend, "sector": sector_for_symbol(symbol),
                 "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
                 "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
+                **signal_analytics,
                 "rejection_reason": result["reason"],
                 "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
                 "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
@@ -1259,6 +1334,7 @@ def _apply_confirmed_protective_stop_fill(
             exchange=exchange,
             gross_pnl=gross_pnl,
             costs=costs,
+            analytics=_trade_analytics_from_position(position),
         )
         position["last_exit_price"] = incremental_price
         position["last_exit_pnl"] = pnl
@@ -1976,6 +2052,7 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             exchange=exchange,
             gross_pnl=gross_pnl,
             costs=costs,
+            analytics=_trade_analytics_from_position(pos),
         )
 
         remaining_qty = requested_qty - confirmed_qty
@@ -2602,6 +2679,7 @@ def apply_force_exit_result(
         exchange=exchange,
         gross_pnl=gross_pnl,
         costs=costs,
+        analytics=_trade_analytics_from_position(position),
     )
 
     position[
@@ -3074,6 +3152,7 @@ def recover_unresolved_exits(
             exchange=exchange,
             gross_pnl=gross_pnl,
             costs=costs,
+            analytics=_trade_analytics_from_position(position),
         )
 
         remaining_quantity = (
@@ -3554,6 +3633,7 @@ def recover_unresolved_force_exits(
             exchange=exchange,
             gross_pnl=gross_pnl,
             costs=costs,
+            analytics=_trade_analytics_from_position(position),
         )
 
         remaining_quantity = (

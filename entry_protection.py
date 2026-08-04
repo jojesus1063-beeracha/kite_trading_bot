@@ -8,10 +8,46 @@ from protective_stop import place_protective_stop
 from trade_levels import fixed_levels_from_fill
 
 
-def build_entry_plan(signal, cfg, *, tick_size=0.05):
-    """Capture the strategy values needed to reconstruct a fill on restart."""
+SIGNAL_ANALYTICS_FIELDS = {
+    "signal_id",
+    "candidate_rank",
+    "candidate_count",
+    "ranking_score",
+    "entry_quality_score",
+    "entry_quality_detail",
+    "entry_context_score",
+    "entry_context_detail",
+    "confirmation_count",
+    "adx_state",
+    "adx_current",
+    "adx_previous",
+    "adx_delta",
+    "relative_strength_score",
+    "relative_strength_detail",
+}
+
+
+def _validated_signal_analytics(signal_analytics):
+    if not isinstance(signal_analytics, dict):
+        return {}
 
     return {
+        key: value
+        for key, value in signal_analytics.items()
+        if key in SIGNAL_ANALYTICS_FIELDS
+    }
+
+
+def build_entry_plan(
+    signal,
+    cfg,
+    *,
+    tick_size=0.05,
+    signal_analytics=None,
+):
+    """Capture the strategy values needed to reconstruct a fill on restart."""
+
+    plan = {
         "signal_entry_price": float(signal.entry_price),
         "signal_stop_price": float(signal.stop_loss),
         "signal_target_price": float(signal.target),
@@ -28,6 +64,13 @@ def build_entry_plan(signal, cfg, *, tick_size=0.05):
         "tick_size": float(tick_size),
     }
 
+    if signal_analytics:
+        plan["signal_analytics"] = _validated_signal_analytics(
+            signal_analytics
+        )
+
+    return plan
+
 
 def build_confirmed_position(
     signal,
@@ -36,6 +79,7 @@ def build_confirmed_position(
     cfg,
     *,
     tick_size=0.05,
+    signal_analytics=None,
 ):
     """Create local state from broker-confirmed quantity and price only."""
 
@@ -69,7 +113,7 @@ def build_confirmed_position(
     protection_state = "PAPER" if is_paper else "PENDING"
     missing_live_average = not is_paper and broker_average is None
 
-    return {
+    position = {
         "direction": signal.direction,
         "qty": confirmed_qty,
         "entry": confirmed_entry_price,
@@ -110,6 +154,11 @@ def build_confirmed_position(
         "automated_exit_blocked": not is_paper,
         "manual_reconciliation_required": missing_live_average,
     }
+
+    if signal_analytics:
+        position.update(_validated_signal_analytics(signal_analytics))
+
+    return position
 
 
 def build_recovered_position(order_record, execution_result, cfg):
@@ -155,7 +204,7 @@ def build_recovered_position(order_record, execution_result, cfg):
                 "PLAN_UNRESOLVED" if manual else "PENDING"
             )
 
-    return {
+    position = {
         "direction": order_record["side"],
         "qty": filled,
         "entry": entry_price,
@@ -188,6 +237,13 @@ def build_recovered_position(order_record, execution_result, cfg):
         "automated_exit_blocked": True,
         "manual_reconciliation_required": manual,
     }
+
+    signal_analytics = metadata.get("signal_analytics")
+
+    if isinstance(signal_analytics, dict):
+        position.update(_validated_signal_analytics(signal_analytics))
+
+    return position
 
 
 def apply_protective_stop_result(position, result):
