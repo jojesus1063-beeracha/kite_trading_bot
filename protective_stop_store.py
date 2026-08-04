@@ -190,6 +190,8 @@ def create_protective_stop_intent(
     requested_quantity: int,
     trigger_price: float,
     client_tag: str,
+    tick_size: float | None = None,
+    entry_operation_id: str | None = None,
     path=None,
 ) -> str:
     direction = str(position_direction).upper()
@@ -229,6 +231,11 @@ def create_protective_stop_intent(
             "trigger price must be positive"
         )
 
+    if tick_size is not None and float(tick_size) <= 0:
+        raise InvalidProtectiveStopRecordError(
+            "tick size must be positive"
+        )
+
     if (
         not isinstance(client_tag, str)
         or not client_tag
@@ -262,12 +269,18 @@ def create_protective_stop_intent(
             "operation_id": operation_id,
             "order_id": None,
             "client_tag": client_tag,
+            "entry_operation_id": entry_operation_id,
             "symbol": symbol,
             "exchange": exchange,
             "position_direction": direction,
             "stop_side": side,
             "requested_quantity": requested_quantity,
             "trigger_price": float(trigger_price),
+            "tick_size": (
+                float(tick_size)
+                if tick_size is not None
+                else None
+            ),
             "filled_quantity": 0,
             "pending_quantity": requested_quantity,
             "cancelled_quantity": 0,
