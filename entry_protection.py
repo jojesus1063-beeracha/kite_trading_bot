@@ -226,10 +226,9 @@ def apply_protective_stop_result(position, result):
     coverage_complete = active and stop_quantity == position_quantity
     position["entry_protected"] = coverage_complete
 
-    # The current exit engine does not yet cancel/reconcile broker stops
-    # before sending a target exit.  Keep live automated exits blocked until
-    # that separate integration is complete, preventing a double exit.
-    position["automated_exit_blocked"] = True
+    # A fully active stop may now participate in the coordinated exit
+    # state machine. Any uncertainty or coverage mismatch remains blocked.
+    position["automated_exit_blocked"] = not coverage_complete
 
     needs_manual = not coverage_complete
 
@@ -244,6 +243,7 @@ def apply_protective_stop_result(position, result):
 
     if triggered:
         needs_manual = True
+        position["automated_exit_blocked"] = True
 
     position["manual_reconciliation_required"] = needs_manual
     return position

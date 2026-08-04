@@ -282,6 +282,8 @@ def create_protective_stop_intent(
                 else None
             ),
             "filled_quantity": 0,
+            "applied_filled_quantity": 0,
+            "applied_average_price": None,
             "pending_quantity": requested_quantity,
             "cancelled_quantity": 0,
             "average_price": None,
@@ -297,6 +299,17 @@ def create_protective_stop_intent(
             "updated_at": now,
             "verification_attempts": 0,
             "api_error_count": 0,
+            "exit_coordination_requested": False,
+            "exit_coordination_action": None,
+            "exit_coordination_reason": None,
+            "exit_coordination_quantity": None,
+            "exit_coordination_requested_at": None,
+            "exit_coordination_state": None,
+            "exit_coordination_updated_at": None,
+            "cancel_api_attempted": False,
+            "cancel_api_attempted_at": None,
+            "cancel_api_response_order_id": None,
+            "cancel_api_error": None,
         })
 
         save_protective_stops(data, store_path)
@@ -379,6 +392,14 @@ def update_protective_stop_verification(
                 "Filled quantity exceeds requested quantity"
             )
 
+        if filled < int(
+            record.get("applied_filled_quantity") or 0
+        ):
+            raise InvalidProtectiveStopRecordError(
+                "Broker filled quantity is below the quantity "
+                "already applied locally"
+            )
+
         record["filled_quantity"] = filled
         record["pending_quantity"] = pending
         record["cancelled_quantity"] = cancelled
@@ -401,6 +422,228 @@ def update_protective_stop_verification(
             result.api_error_count
         )
 
+        save_protective_stops(data, store_path)
+
+
+def request_protective_stop_exit_coordination(
+    operation_id: str,
+    *,
+    exit_action: str,
+    exit_reason: str,
+    position_quantity: int,
+    path=None,
+) -> bool:
+    """Persist an exit request before any stop-cancellation side effect.
+
+    Returns ``True`` only when this call created the request. Repeated
+    calls are idempotent. A later FORCE_EXIT may escalate an earlier EXIT,
+    but the stored quantity can never increase beyond the stop quantity.
+    """
+
+    action = str(exit_action).upper()
+
+    if action not in {"EXIT", "FORCE_EXIT"}:
+        raise InvalidProtectiveStopRecordError(
+            "exit action must be EXIT or FORCE_EXIT"
+        )
+
+    if (
+        not isinstance(position_quantity, int)
+        or isinstance(position_quantity, bool)
+        or position_quantity <= 0
+    ):
+        raise InvalidProtectiveStopRecordError(
+            "position quantity must be a positive integer"
+        )
+
+    store_path = _path(path)
+
+    with _file_lock(store_path):
+        data = load_protective_stops(store_path)
+        record = _find(data, operation_id)
+
+        if record is None:
+            raise InvalidProtectiveStopRecordError(
+                f"Unknown operation ID: {operation_id}"
+            )
+
+        requested = int(record["requested_quantity"])
+
+        if position_quantity > requested:
+            raise InvalidProtectiveStopRecordError(
+                "position quantity exceeds protective-stop quantity"
+            )
+
+        created = not bool(
+            record.get("exit_coordination_requested")
+        )
+
+        if created:
+            record["exit_coordination_requested"] = True
+            record["exit_coordination_action"] = action
+            record["exit_coordination_reason"] = str(exit_reason)
+            record["exit_coordination_quantity"] = position_quantity
+            record["exit_coordination_requested_at"] = _now()
+            record["exit_coordination_state"] = "REQUESTED"
+        else:
+            previous_quantity = int(
+                record.get("exit_coordination_quantity")
+                or requested
+            )
+
+            if position_quantity > previous_quantity:
+                raise InvalidProtectiveStopRecordError(
+                    "exit coordination quantity cannot increase"
+                )
+
+            if action == "FORCE_EXIT":
+                record["exit_coordination_action"] = action
+                record["exit_coordination_reason"] = str(
+                    exit_reason
+                )
+
+            record["exit_coordination_quantity"] = position_quantity
+
+        record["exit_coordination_updated_at"] = _now()
+        record["updated_at"] = _now()
+        save_protective_stops(data, store_path)
+
+    return created
+
+
+def reserve_protective_stop_cancel_attempt(
+    operation_id: str,
+    path=None,
+) -> bool:
+    """Reserve the one automatic cancel call before contacting Kite.
+
+    The reservation is deliberately persisted first. If the process dies
+    immediately afterwards, restart recovery verifies broker history and
+    never issues a second blind cancellation request.
+    """
+
+    store_path = _path(path)
+
+    with _file_lock(store_path):
+        data = load_protective_stops(store_path)
+        record = _find(data, operation_id)
+
+        if record is None:
+            raise InvalidProtectiveStopRecordError(
+                f"Unknown operation ID: {operation_id}"
+            )
+
+        if not record.get("exit_coordination_requested"):
+            raise InvalidProtectiveStopRecordError(
+                "exit coordination must be requested before cancellation"
+            )
+
+        if record.get("cancel_api_attempted"):
+            return False
+
+        record["cancel_api_attempted"] = True
+        record["cancel_api_attempted_at"] = _now()
+        record["exit_coordination_state"] = "CANCEL_REQUEST_RESERVED"
+        record["exit_coordination_updated_at"] = _now()
+        record["updated_at"] = _now()
+        save_protective_stops(data, store_path)
+
+    return True
+
+
+def update_protective_stop_exit_coordination(
+    operation_id: str,
+    *,
+    state: str,
+    cancel_response_order_id: str | None = None,
+    cancel_api_error: str | None = None,
+    path=None,
+) -> None:
+    store_path = _path(path)
+
+    with _file_lock(store_path):
+        data = load_protective_stops(store_path)
+        record = _find(data, operation_id)
+
+        if record is None:
+            raise InvalidProtectiveStopRecordError(
+                f"Unknown operation ID: {operation_id}"
+            )
+
+        record["exit_coordination_state"] = str(state)
+        record["exit_coordination_updated_at"] = _now()
+
+        if cancel_response_order_id is not None:
+            record["cancel_api_response_order_id"] = str(
+                cancel_response_order_id
+            )
+
+        if cancel_api_error is not None:
+            record["cancel_api_error"] = str(cancel_api_error)
+
+        record["updated_at"] = _now()
+        save_protective_stops(data, store_path)
+
+
+def mark_protective_stop_fill_applied(
+    operation_id: str,
+    applied_quantity: int,
+    *,
+    applied_average_price: float | None = None,
+    path=None,
+) -> None:
+    """Persist the cumulative stop fill already applied to local state."""
+
+    if (
+        not isinstance(applied_quantity, int)
+        or isinstance(applied_quantity, bool)
+        or applied_quantity < 0
+    ):
+        raise InvalidProtectiveStopRecordError(
+            "applied quantity must be a non-negative integer"
+        )
+
+    if (
+        applied_average_price is not None
+        and float(applied_average_price) <= 0
+    ):
+        raise InvalidProtectiveStopRecordError(
+            "applied average price must be positive"
+        )
+
+    store_path = _path(path)
+
+    with _file_lock(store_path):
+        data = load_protective_stops(store_path)
+        record = _find(data, operation_id)
+
+        if record is None:
+            raise InvalidProtectiveStopRecordError(
+                f"Unknown operation ID: {operation_id}"
+            )
+
+        previous = int(
+            record.get("applied_filled_quantity") or 0
+        )
+        confirmed = int(record.get("filled_quantity") or 0)
+
+        if applied_quantity < previous:
+            raise InvalidProtectiveStopRecordError(
+                "applied stop quantity cannot move backwards"
+            )
+
+        if applied_quantity > confirmed:
+            raise InvalidProtectiveStopRecordError(
+                "applied stop quantity exceeds broker-confirmed quantity"
+            )
+
+        record["applied_filled_quantity"] = applied_quantity
+        record["applied_average_price"] = (
+            float(applied_average_price)
+            if applied_average_price is not None
+            else None
+        )
+        record["updated_at"] = _now()
         save_protective_stops(data, store_path)
 
 

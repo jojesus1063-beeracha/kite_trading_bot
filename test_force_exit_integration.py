@@ -6,7 +6,37 @@ from types import SimpleNamespace
 import main as main_module
 import pending_order_store
 
-from executor import place_force_exit_order
+from executor import place_force_exit_order as _place_force_exit_order
+
+
+def place_force_exit_order(
+    kite,
+    symbol,
+    direction,
+    quantity,
+    exchange,
+    cfg,
+):
+    """Exercise force-exit verification after stop clearance."""
+
+    clearance = {
+        "safe_to_submit_exit": True,
+        "paper": False,
+        "symbol": symbol,
+        "exchange": exchange,
+        "quantity": quantity,
+        "exit_action": "FORCE_EXIT",
+        "protective_stop_state": "CANCELLED",
+    }
+    return _place_force_exit_order(
+        kite,
+        symbol,
+        direction,
+        quantity,
+        exchange,
+        cfg,
+        protection_clearance=clearance,
+    )
 
 
 passed = 0

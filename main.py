@@ -62,8 +62,15 @@ from entry_protection import (
     protect_confirmed_position,
 )
 from protective_stop import recover_protective_stop
+from protective_stop_exit import (
+    coordinate_protective_stop_for_exit,
+    inspect_protective_stop,
+)
 from protective_stop_store import (
+    get_protective_stop,
     list_unresolved_protective_stops,
+    mark_protective_stop_fill_applied,
+    mark_protective_stop_resolved,
 )
 from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
@@ -1032,6 +1039,425 @@ def _trend_reversed(kite, symbol, token, direction):
         return False, None
 
 
+def _apply_confirmed_protective_stop_fill(
+    symbol,
+    position,
+    stop_result,
+    open_positions,
+    risk,
+    exchange,
+    *,
+    positions_path=None,
+    store_path=None,
+):
+    """Apply only the stop-fill delta not already reflected locally."""
+
+    operation_id = stop_result.get("operation_id")
+    record = (
+        get_protective_stop(operation_id, path=store_path)
+        if operation_id
+        else None
+    )
+
+    if record is None:
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
+        position["protective_stop_exit_state"] = (
+            "STOP_RECORD_MISSING"
+        )
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+        return {
+            "success": False,
+            "position_closed": False,
+            "remaining_quantity": int(position.get("qty") or 0),
+            "status": "STOP RECORD MISSING",
+        }
+
+    stop_state = (
+        stop_result.get("stop_state")
+        or stop_result.get("state")
+        or "UNKNOWN"
+    )
+    terminal = stop_state in {
+        "CANCELLED",
+        "REJECTED",
+        "TRIGGERED",
+        "PARTIALLY_TRIGGERED",
+    }
+    total_filled = int(
+        stop_result.get(
+            "stop_filled_quantity",
+            stop_result.get("filled_quantity", 0),
+        )
+        or 0
+    )
+    already_applied = int(
+        record.get("applied_filled_quantity") or 0
+    )
+    newly_confirmed = total_filled - already_applied
+    current_quantity = int(position.get("qty") or 0)
+
+    position["protective_stop_state"] = stop_state
+    position["protective_stop_active"] = bool(
+        stop_result.get("active")
+    )
+    position["protective_stop_confirmation_pending"] = bool(
+        stop_result.get("confirmation_pending")
+    )
+    position["protective_stop_order_id"] = record.get("order_id")
+    position["protective_stop_operation_id"] = operation_id
+    position["protective_stop_status_message"] = (
+        stop_result.get("reason")
+        or stop_result.get("status_message")
+    )
+    position["protective_stop_exit_state"] = stop_result.get(
+        "state"
+    )
+
+    if newly_confirmed < 0 or newly_confirmed > current_quantity:
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
+        position["protective_stop_exit_state"] = (
+            "STOP_FILL_QUANTITY_MISMATCH"
+        )
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+        return {
+            "success": False,
+            "position_closed": False,
+            "remaining_quantity": current_quantity,
+            "status": "STOP FILL QUANTITY MISMATCH",
+        }
+
+    if newly_confirmed == 0:
+        if stop_state == "ACTIVE":
+            position["protective_stop_quantity"] = int(
+                record["requested_quantity"]
+            )
+            position["entry_protected"] = True
+            position["automated_exit_blocked"] = False
+            position["manual_reconciliation_required"] = False
+        elif terminal:
+            position["protective_stop_quantity"] = 0
+            position["entry_protected"] = False
+            position["automated_exit_blocked"] = True
+            position["manual_reconciliation_required"] = not bool(
+                record.get("exit_coordination_requested")
+            )
+
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+
+        if terminal:
+            mark_protective_stop_resolved(
+                operation_id,
+                resolution_reason=stop_state,
+                path=store_path,
+            )
+
+        return {
+            "success": True,
+            "position_closed": False,
+            "remaining_quantity": current_quantity,
+            "status": stop_state,
+            "newly_confirmed": 0,
+        }
+
+    cumulative_average = stop_result.get(
+        "stop_average_price",
+        stop_result.get("average_price"),
+    )
+    incremental_price = None
+
+    if cumulative_average is not None:
+        cumulative_average = float(cumulative_average)
+
+        if cumulative_average > 0:
+            if already_applied == 0:
+                incremental_price = cumulative_average
+            else:
+                previous_average = record.get(
+                    "applied_average_price"
+                )
+
+                if previous_average is not None:
+                    incremental_notional = (
+                        total_filled * cumulative_average
+                        - already_applied * float(previous_average)
+                    )
+                    incremental_price = (
+                        incremental_notional / newly_confirmed
+                    )
+
+                    if incremental_price <= 0:
+                        incremental_price = None
+
+    remaining_quantity = current_quantity - newly_confirmed
+    pnl_recorded = False
+
+    # Reserve the cumulative broker fill in the durable stop store before
+    # recording P&L or changing the local position. A crash after this
+    # point can leave the position conservatively overstated, but restart
+    # will detect the quantity mismatch and block for reconciliation. It
+    # cannot apply the same broker fill or P&L a second time.
+    try:
+        mark_protective_stop_fill_applied(
+            operation_id,
+            total_filled,
+            applied_average_price=(
+                cumulative_average
+                if incremental_price is not None
+                else None
+            ),
+            path=store_path,
+        )
+    except Exception as exc:
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
+        position["protective_stop_exit_state"] = (
+            "STOP_FILL_APPLICATION_RESERVATION_FAILED"
+        )
+        position["protective_stop_status_message"] = str(exc)
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+        return {
+            "success": False,
+            "position_closed": False,
+            "remaining_quantity": current_quantity,
+            "status": "STOP FILL APPLICATION RESERVATION FAILED",
+        }
+
+    if incremental_price is not None:
+        cost_result = net_pnl_for_trade(
+            position["direction"],
+            newly_confirmed,
+            position["entry"],
+            incremental_price,
+        )
+        gross_pnl = cost_result["gross_pnl"]
+        costs = cost_result["costs"]
+        pnl = cost_result["net_pnl"]
+
+        risk.record_trade_result(pnl)
+        record_trade(
+            symbol,
+            position["direction"],
+            newly_confirmed,
+            position["entry"],
+            incremental_price,
+            pnl,
+            "protective_stop",
+            exchange=exchange,
+            gross_pnl=gross_pnl,
+            costs=costs,
+        )
+        position["last_exit_price"] = incremental_price
+        position["last_exit_pnl"] = pnl
+        pnl_recorded = True
+
+    position["protective_stop_applied_filled_quantity"] = (
+        total_filled
+    )
+    position["protective_stop_average_price"] = (
+        cumulative_average
+    )
+    position["protective_stop_quantity"] = 0
+    position["entry_protected"] = False
+    position["automated_exit_blocked"] = True
+
+    if not pnl_recorded:
+        position["manual_reconciliation_required"] = True
+        position["protective_stop_status_message"] = (
+            "confirmed protective-stop fill has no usable average "
+            "price; exposure was reduced but P&L was not fabricated"
+        )
+
+    if remaining_quantity == 0:
+        del open_positions[symbol]
+    else:
+        position["qty"] = remaining_quantity
+
+    save_positions(
+        open_positions,
+        positions_path=positions_path,
+    )
+
+    if terminal and pnl_recorded:
+        mark_protective_stop_resolved(
+            operation_id,
+            resolution_reason=stop_state,
+            path=store_path,
+        )
+
+    logger.info(
+        f"Protective-stop fill applied for {exchange}:{symbol}: "
+        f"newly_confirmed={newly_confirmed}, "
+        f"broker_total={total_filled}, "
+        f"remaining_quantity={remaining_quantity}, "
+        f"state={stop_state}, pnl_recorded={pnl_recorded}"
+    )
+
+    return {
+        "success": True,
+        "position_closed": remaining_quantity == 0,
+        "remaining_quantity": remaining_quantity,
+        "status": stop_state,
+        "newly_confirmed": newly_confirmed,
+        "pnl_recorded": pnl_recorded,
+    }
+
+
+def _prepare_protective_stop_for_exit(
+    kite,
+    symbol,
+    position,
+    open_positions,
+    risk,
+    exchange,
+    exit_action,
+    exit_reason,
+    *,
+    positions_path=None,
+    store_path=None,
+):
+    """Return exact-order clearance only after the stop is terminal."""
+
+    if getattr(cfg, "PAPER_TRADING", False):
+        coordination = coordinate_protective_stop_for_exit(
+            kite,
+            symbol=symbol,
+            position=position,
+            cfg=cfg,
+            exit_action=exit_action,
+            exit_reason=exit_reason,
+            store_path=store_path,
+        )
+        return {
+            "proceed": True,
+            "position_closed": False,
+            "clearance": coordination["clearance"],
+            "status": "PAPER",
+        }
+
+    position["protective_stop_exit_pending"] = True
+    position["protective_stop_exit_action"] = exit_action
+    position["protective_stop_exit_reason"] = exit_reason
+    position["protective_stop_exit_state"] = "REQUESTED"
+    position["automated_exit_blocked"] = True
+    save_positions(
+        open_positions,
+        positions_path=positions_path,
+    )
+
+    coordination = coordinate_protective_stop_for_exit(
+        kite,
+        symbol=symbol,
+        position=position,
+        cfg=cfg,
+        exit_action=exit_action,
+        exit_reason=exit_reason,
+        store_path=store_path,
+    )
+
+    position["protective_stop_exit_state"] = coordination.get(
+        "state"
+    )
+    position["protective_stop_status_message"] = coordination.get(
+        "reason"
+    )
+
+    if not coordination.get("success"):
+        position["manual_reconciliation_required"] = True
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+        return {
+            "proceed": False,
+            "position_closed": False,
+            "clearance": None,
+            "status": coordination.get("state"),
+        }
+
+    applied = _apply_confirmed_protective_stop_fill(
+        symbol,
+        position,
+        coordination,
+        open_positions,
+        risk,
+        exchange,
+        positions_path=positions_path,
+        store_path=store_path,
+    )
+
+    if applied["position_closed"]:
+        return {
+            "proceed": False,
+            "position_closed": True,
+            "clearance": None,
+            "status": "CLOSED_BY_PROTECTIVE_STOP",
+        }
+
+    if symbol not in open_positions:
+        return {
+            "proceed": False,
+            "position_closed": True,
+            "clearance": None,
+            "status": "CLOSED_BY_PROTECTIVE_STOP",
+        }
+
+    position = open_positions[symbol]
+    current_quantity = int(position.get("qty") or 0)
+    clearance = coordination.get("clearance")
+
+    if (
+        not coordination.get("safe_to_submit_exit")
+        or not clearance
+        or int(clearance.get("quantity") or 0) != current_quantity
+    ):
+        position["manual_reconciliation_required"] = True
+        position["protective_stop_exit_state"] = (
+            "EXIT_CLEARANCE_QUANTITY_MISMATCH"
+        )
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+        return {
+            "proceed": False,
+            "position_closed": False,
+            "clearance": None,
+            "status": "EXIT_CLEARANCE_QUANTITY_MISMATCH",
+        }
+
+    position["protective_stop_exit_pending"] = False
+    position["protective_stop_exit_state"] = "CLEARED_FOR_EXIT"
+    position["protective_stop_active"] = False
+    position["protective_stop_quantity"] = 0
+    position["entry_protected"] = False
+    position["automated_exit_blocked"] = True
+    save_positions(
+        open_positions,
+        positions_path=positions_path,
+    )
+
+    return {
+        "proceed": True,
+        "position_closed": False,
+        "clearance": clearance,
+        "status": coordination.get("state"),
+    }
+
+
 def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk, check_trend=False):
     """
     Checks ONE open position for stop-loss/target hit, and closes it if
@@ -1048,24 +1474,159 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
     """
     import pandas as pd
     pos = open_positions[symbol]
+    exchange = pos.get("exchange", exchange_map.get(symbol, "NSE"))
+    resumed_exit_reason = None
+    resumed_exit_action = None
 
-    if (
-        not cfg.PAPER_TRADING
-        and pos.get("automated_exit_blocked", False)
-    ):
-        return (
-            "AUTOMATED EXIT BLOCKED | "
-            f"protection={pos.get('protective_stop_state', 'UNKNOWN')} "
-            "| broker-stop exit coordination is not integrated"
+    if not cfg.PAPER_TRADING:
+        inspection = inspect_protective_stop(
+            kite,
+            symbol=symbol,
+            position=pos,
+            cfg=cfg,
         )
 
-    exchange = pos.get("exchange", exchange_map.get(symbol, "NSE"))
-    token = tokens[symbol]
-    df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=1, trim_incomplete=False)  # real-time price needed for stop/trailing-stop monitoring
-    time.sleep(0.5)
-    if df_5m.empty:
-        return f"position open | {pos['direction']} entry {pos['entry']:.2f} (current price unavailable)"
-    last_price = df_5m.iloc[-1]["close"]
+        if not inspection.get("success"):
+            pos["automated_exit_blocked"] = True
+            pos["manual_reconciliation_required"] = True
+            pos["protective_stop_exit_state"] = inspection.get(
+                "state"
+            )
+            pos["protective_stop_status_message"] = inspection.get(
+                "reason"
+            )
+            save_positions(open_positions)
+            return (
+                "AUTOMATED EXIT BLOCKED | "
+                f"protection={inspection.get('state', 'UNKNOWN')}"
+            )
+
+        stop_state = inspection.get("state")
+
+        if stop_state == "ACTIVE":
+            _apply_confirmed_protective_stop_fill(
+                symbol,
+                pos,
+                inspection,
+                open_positions,
+                risk,
+                exchange,
+            )
+
+            if inspection.get("exit_coordination_requested"):
+                resumed_exit_reason = (
+                    inspection.get("exit_reason")
+                    or pos.get("protective_stop_exit_reason")
+                    or "resumed_exit"
+                )
+                resumed_exit_action = (
+                    inspection.get("exit_action")
+                    or pos.get("protective_stop_exit_action")
+                    or "EXIT"
+                )
+                pos["automated_exit_blocked"] = True
+                pos["protective_stop_exit_pending"] = True
+        elif stop_state in {
+            "CANCELLED",
+            "REJECTED",
+            "TRIGGERED",
+            "PARTIALLY_TRIGGERED",
+        }:
+            applied_stop = _apply_confirmed_protective_stop_fill(
+                symbol,
+                pos,
+                inspection,
+                open_positions,
+                risk,
+                exchange,
+            )
+
+            if applied_stop["position_closed"]:
+                return (
+                    "CLOSED (protective_stop) | "
+                    f"state={stop_state}"
+                )
+
+            pos = open_positions[symbol]
+
+            if inspection.get("exit_coordination_requested"):
+                resumed_exit_reason = (
+                    inspection.get("exit_reason")
+                    or pos.get("protective_stop_exit_reason")
+                    or "resumed_exit"
+                )
+                resumed_exit_action = (
+                    inspection.get("exit_action")
+                    or pos.get("protective_stop_exit_action")
+                    or "EXIT"
+                )
+            elif stop_state in {
+                "TRIGGERED",
+                "PARTIALLY_TRIGGERED",
+            }:
+                resumed_exit_reason = "protective_stop_remainder"
+                resumed_exit_action = "EXIT"
+            else:
+                return (
+                    "AUTOMATED EXIT BLOCKED | protective stop became "
+                    f"{stop_state} without a coordinated exit request"
+                )
+        else:
+            pos["automated_exit_blocked"] = True
+            pos["manual_reconciliation_required"] = True
+            pos["protective_stop_exit_state"] = stop_state
+            save_positions(open_positions)
+            return (
+                "AUTOMATED EXIT BLOCKED | protective-stop verification "
+                f"state={stop_state}"
+            )
+
+        if resumed_exit_action == "FORCE_EXIT":
+            return (
+                "FORCE EXIT COORDINATION PENDING | "
+                f"state={pos.get('protective_stop_exit_state')}"
+            )
+
+        if (
+            pos.get("automated_exit_blocked", False)
+            and resumed_exit_reason is None
+        ):
+            return (
+                "AUTOMATED EXIT BLOCKED | "
+                f"protection={pos.get('protective_stop_state', 'UNKNOWN')}"
+            )
+
+    if resumed_exit_reason is not None:
+        # A durable exit request must resume even when market-data fetches
+        # are unavailable after restart. Live P&L uses the broker-confirmed
+        # market-order average, so no quote is required for this path.
+        last_price = float(pos["entry"])
+        df_5m = pd.DataFrame([{
+            "high": last_price,
+            "low": last_price,
+            "close": last_price,
+        }])
+        check_trend = False
+    else:
+        token = tokens[symbol]
+        df_5m = fetch_candles(
+            kite,
+            token,
+            cfg.ENTRY_TIMEFRAME,
+            lookback_days=1,
+            trim_incomplete=False,
+        )  # real-time price needed for stop/trailing-stop monitoring
+        time.sleep(0.5)
+
+        if df_5m.empty:
+            return (
+                f"position open | {pos['direction']} "
+                f"entry {pos['entry']:.2f} "
+                "(current price unavailable)"
+            )
+
+        last_price = df_5m.iloc[-1]["close"]
+
     direction = pos["direction"]
     hit_hard_stop = (last_price <= pos["stop"]) if direction == "BUY" else (last_price >= pos["stop"])
 
@@ -1166,8 +1727,17 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
                                   and current_adx < getattr(cfg, "ADX_THRESHOLD", 25))
             save_positions(open_positions)
 
-    if hit_hard_stop or hit_trailing_stop or structure_broken or trend_reversed or hit_target:
-        if hit_hard_stop:
+    if (
+        resumed_exit_reason is not None
+        or hit_hard_stop
+        or hit_trailing_stop
+        or structure_broken
+        or trend_reversed
+        or hit_target
+    ):
+        if resumed_exit_reason is not None:
+            result = resumed_exit_reason
+        elif hit_hard_stop:
             result = "stop"
         elif hit_trailing_stop:
             result = "trailing_stop"
@@ -1194,6 +1764,30 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         except Exception:
             pass
 
+        preparation = _prepare_protective_stop_for_exit(
+            kite,
+            symbol,
+            pos,
+            open_positions,
+            risk,
+            exchange,
+            "EXIT",
+            result,
+        )
+
+        if preparation["position_closed"]:
+            return (
+                "CLOSED (protective_stop) | "
+                f"trigger={result}"
+            )
+
+        if not preparation["proceed"]:
+            return (
+                f"EXIT BLOCKED ({result}) | protective_stop="
+                f"{preparation['status']}"
+            )
+
+        pos = open_positions[symbol]
         requested_qty = int(pos["qty"])
 
         exit_result = place_exit_order(
@@ -1203,6 +1797,7 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             requested_qty,
             exchange,
             cfg,
+            protection_clearance=preparation["clearance"],
         )
 
         confirmed_qty = int(
@@ -1233,6 +1828,10 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         )
         pos["exit_status_message"] = exit_result.get("reason")
         pos["exit_reason"] = result
+
+        if not cfg.PAPER_TRADING:
+            pos["automated_exit_blocked"] = True
+            pos["manual_reconciliation_required"] = True
 
         def finalize_terminal_exit_operation():
             """
@@ -1767,6 +2366,10 @@ def apply_force_exit_result(
     )
     position["force_exit_reason"] = "square_off"
 
+    if not cfg.PAPER_TRADING:
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
+
     def finalize_terminal_force_exit():
         operation_id = exit_result.get(
             "operation_id"
@@ -2029,6 +2632,21 @@ def recover_unresolved_exits(
         )
 
         if order_id is None:
+            position = open_positions.get(symbol)
+
+            if position is not None:
+                position["automated_exit_blocked"] = True
+                position["manual_reconciliation_required"] = True
+                position["exit_confirmation_pending"] = True
+                position["exit_status_message"] = (
+                    "exit submission outcome is unknown; broker order "
+                    "ID is unavailable"
+                )
+                save_positions(
+                    open_positions,
+                    positions_path=positions_path,
+                )
+
             logger.error(
                 f"CRITICAL: unresolved EXIT intent for {symbol} "
                 f"has no broker order_id "
@@ -2134,6 +2752,17 @@ def recover_unresolved_exits(
         )
 
         if newly_confirmed < 0:
+            position["automated_exit_blocked"] = True
+            position["manual_reconciliation_required"] = True
+            position["exit_status_message"] = (
+                "broker cumulative exit quantity is below the "
+                "quantity already applied locally"
+            )
+            save_positions(
+                open_positions,
+                positions_path=positions_path,
+            )
+
             logger.error(
                 f"CRITICAL: EXIT recovery quantity moved backwards "
                 f"for {symbol}: broker total={total_confirmed}, "
@@ -2155,6 +2784,7 @@ def recover_unresolved_exits(
             )
 
             position["manual_reconciliation_required"] = True
+            position["automated_exit_blocked"] = True
             position["exit_status_message"] = (
                 "broker exit fill exceeds local remaining quantity"
             )
@@ -2176,6 +2806,11 @@ def recover_unresolved_exits(
         position["exit_status_message"] = (
             execution.status_message
         )
+        # The broker-side protective stop was terminal before this
+        # market order was submitted. If any local quantity remains,
+        # automatic retry would be an unprotected duplicate-exit risk.
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
 
         if newly_confirmed == 0:
             save_positions(
@@ -2465,6 +3100,21 @@ def recover_unresolved_force_exits(
         )
 
         if order_id is None:
+            position = open_positions.get(symbol)
+
+            if position is not None:
+                position["automated_exit_blocked"] = True
+                position["manual_reconciliation_required"] = True
+                position["force_exit_confirmation_pending"] = True
+                position["force_exit_status_message"] = (
+                    "force-exit submission outcome is unknown; broker "
+                    "order ID is unavailable"
+                )
+                save_positions(
+                    open_positions,
+                    positions_path=positions_path,
+                )
+
             logger.error(
                 f"CRITICAL: unresolved FORCE_EXIT intent for "
                 f"{symbol} has no broker order_id "
@@ -2565,6 +3215,7 @@ def recover_unresolved_force_exits(
         )
 
         if newly_confirmed < 0:
+            position["automated_exit_blocked"] = True
             position[
                 "manual_reconciliation_required"
             ] = True
@@ -2591,6 +3242,7 @@ def recover_unresolved_force_exits(
         )
 
         if newly_confirmed > current_quantity:
+            position["automated_exit_blocked"] = True
             position[
                 "manual_reconciliation_required"
             ] = True
@@ -2625,6 +3277,10 @@ def recover_unresolved_force_exits(
             execution.status_message
         )
         position["force_exit_reason"] = "square_off"
+        # Once the coordinated stop is terminal, any remaining live
+        # quantity must not be blindly retried by another market exit.
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
 
         if newly_confirmed == 0:
             save_positions(
@@ -3000,9 +3656,34 @@ def run():
                 except Exception:
                     last_price = pos["entry"]
 
-                requested_quantity = int(
-                    pos["qty"]
+                preparation = _prepare_protective_stop_for_exit(
+                    kite,
+                    symbol,
+                    pos,
+                    open_positions,
+                    risk,
+                    exchange,
+                    "FORCE_EXIT",
+                    "square_off",
                 )
+
+                if preparation["position_closed"]:
+                    logger.info(
+                        f"Force square-off for {exchange}:{symbol} "
+                        "was already completed by the protective stop"
+                    )
+                    continue
+
+                if not preparation["proceed"]:
+                    logger.critical(
+                        f"Force square-off blocked for "
+                        f"{exchange}:{symbol}: protective_stop="
+                        f"{preparation['status']}"
+                    )
+                    continue
+
+                pos = open_positions[symbol]
+                requested_quantity = int(pos["qty"])
 
                 force_result = (
                     place_force_exit_order(
@@ -3012,6 +3693,9 @@ def run():
                         requested_quantity,
                         exchange,
                         cfg,
+                        protection_clearance=(
+                            preparation["clearance"]
+                        ),
                     )
                 )
 
