@@ -39,16 +39,22 @@ mock_kite = MagicMock()
 fetch_call_log = []
 def fake_get_market_trend(kite, cfg_arg):
     fetch_call_log.append("nifty")
-    return "Bullish"
+    return "Bullish", "OK"
 
 def fake_get_sector_trend(kite, symbol, cfg_arg):
     sector = main_module.sector_for_symbol(symbol)
     fetch_call_log.append(f"sector:{sector}")
-    return "Bullish"
+    return "Bullish", "OK"
 
-main_module.get_market_trend = fake_get_market_trend
+main_module.get_market_trend_diagnostic = fake_get_market_trend
 main_module.log_signal = lambda record: True  # isolate from real signal_logs/ during tests
-main_module.get_sector_trend = fake_get_sector_trend
+main_module.get_sector_trend_diagnostic = fake_get_sector_trend
+candidate_events = []
+main_module.record_validation_event = (
+    lambda event_type, payload: candidate_events.append(
+        (event_type, payload)
+    )
+)
 
 # 3 bank stocks (share ONE sector) + 1 IT stock (separate sector)
 test_symbols = ["HDFCBANK", "ICICIBANK", "AXISBANK", "TCS"]
@@ -71,6 +77,19 @@ check("IT sector fetched exactly ONCE for TCS",
       fetch_call_log.count("sector:NIFTY IT") == 1)
 check("Total fetches = 1 nifty + 2 sectors = 3 (not 4 sector fetches, proving cache worked)",
       len(fetch_call_log) == 3)
+check(
+    "Sector diagnostic reason survives cache hits",
+    len([
+        event
+        for event in candidate_events
+        if event[0] == "candidate_collected"
+    ]) == 4
+    and all(
+        payload.get("sector_trend_reason") == "OK"
+        for event_type, payload in candidate_events
+        if event_type == "candidate_collected"
+    ),
+)
 
 print(f"\n{'='*50}")
 print(f"Results: {passed} passed, {failed} failed")
