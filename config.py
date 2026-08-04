@@ -146,10 +146,10 @@ VARIETY = "regular"
 # specific percentage band. Requires kiteconnect Python SDK >= 5.2.0.
 MARKET_PROTECTION = -1
 
-# Square-off: MIS positions must be closed before this time regardless
-# of strategy signals (broker auto-square-off is usually ~15:15-15:20;
-# closing a bit earlier avoids slippage/rejections near the deadline).
-FORCE_SQUARE_OFF_TIME = "15:10"
+# Square-off: start two minutes before Zerodha's earliest 15:10
+# intraday cutoff. The buffer lets protective-stop cancellation and
+# market-exit submission finish before new MIS orders are rejected.
+FORCE_SQUARE_OFF_TIME = "15:08"
 
 # Trading window — don't take new entries in the first/last few minutes
 # of the session (high volatility / low liquidity for stops).

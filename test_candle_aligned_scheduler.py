@@ -162,7 +162,7 @@ original_watchlist = cfg.WATCHLIST
 cfg.WATCHLIST = [{"symbol": "TEST", "exchange": "NSE"}]
 
 # Start the simulated clock at 14:50:00 -- gives us several scan
-# cycles before crossing FORCE_SQUARE_OFF_TIME (15:10)
+# cycles before crossing FORCE_SQUARE_OFF_TIME (15:08)
 FakeDateTime._current = FakeDateTime(2026, 7, 31, 14, 50, 0)
 
 try:
@@ -189,8 +189,11 @@ check("No duplicate scans for the same candle", len(scan_minutes) == len(set(sca
 check("Position monitoring occurred between scans (multiple checks recorded)",
       len(position_check_calls) > len(scan_calls))
 
-check("End-of-day square-off correctly fired (exit order placed past 15:10)",
-      len(exit_orders_placed) >= 1 and all(t.hour == 15 and t.minute >= 10 for t in exit_orders_placed))
+check("End-of-day square-off correctly fired in the 15:08 safety window",
+      len(exit_orders_placed) >= 1 and all(
+          t.hour == 15 and 8 <= t.minute < 10
+          for t in exit_orders_placed
+      ))
 
 print("")
 print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
@@ -279,8 +282,8 @@ check("Real stop-loss test: a genuine exit order was placed (stop-loss actually 
 if exit_orders_placed:
     exit_time = exit_orders_placed[0]
     check("Real stop-loss test: fired BEFORE square-off time (genuine mid-cycle responsiveness, not end-of-day)",
-          exit_time.hour == 14 and exit_time.minute < 60 or (exit_time.hour == 15 and exit_time.minute < 10))
-    print(f'  (exit fired at {exit_time.strftime("%H:%M:%S")}, square-off is 15:10:00)')
+          exit_time.hour == 14 and exit_time.minute < 60 or (exit_time.hour == 15 and exit_time.minute < 8))
+    print(f'  (exit fired at {exit_time.strftime("%H:%M:%S")}, square-off is 15:08:00)')
 
 print("")
 print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
