@@ -62,12 +62,12 @@ def run_scan_for_alignment(
     )
 
     # Mock market and sector trends.
-    main_module.get_market_trend = (
-        lambda kite, cfg_arg: market_trend_val
+    main_module.get_market_trend_diagnostic = (
+        lambda kite, cfg_arg: (market_trend_val, "OK")
     )
 
-    main_module.get_sector_trend = (
-        lambda kite, symbol, cfg_arg: sector_trend_val
+    main_module.get_sector_trend_diagnostic = (
+        lambda kite, symbol, cfg_arg: (sector_trend_val, "OK")
     )
     main_module.sector_for_symbol = lambda symbol: "NIFTY TEST"
 
@@ -179,6 +179,13 @@ status, positions = run_scan_for_alignment(
 check(
     "Filter enabled: BUY vs Bullish market and sector still executes",
     "ENTRY" in status and "TEST" in positions,
+)
+
+check(
+    "Diagnostic fields do not alter the confirmed position",
+    positions.get("TEST", {}).get("market_trend_reason") == "OK"
+    and positions.get("TEST", {}).get("sector_trend") == "Bullish"
+    and positions.get("TEST", {}).get("sector_trend_reason") == "OK",
 )
 
 
