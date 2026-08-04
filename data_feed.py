@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+from api_rate_limiter import HISTORICAL_API_LIMITER
 from scheduler import candle_interval_minutes
 
 
@@ -84,13 +85,34 @@ def trim_incomplete_candles(df, interval_minutes, buffer_seconds=10, now=None):
         return df
     if now is None:
         now = pd.Timestamp.now(tz=df["date"].dt.tz)
+    else:
+        now = pd.Timestamp(now)
+        candle_timezone = df["date"].dt.tz
+
+        if candle_timezone is not None and now.tzinfo is None:
+            now = now.tz_localize(candle_timezone)
+        elif candle_timezone is None and now.tzinfo is not None:
+            now = now.tz_localize(None)
+        elif candle_timezone is not None and now.tzinfo is not None:
+            now = now.tz_convert(candle_timezone)
     candle_end = df["date"] + pd.Timedelta(minutes=interval_minutes)
     eligible_at = candle_end + pd.Timedelta(seconds=buffer_seconds)
     return df[eligible_at <= now].reset_index(drop=True)
 
 
-def fetch_candles(kite, instrument_token: int, interval: str, lookback_days: int = 5,
-                   max_retries: int = 3, trim_incomplete: bool = True) -> pd.DataFrame:
+def fetch_candles(
+    kite,
+    instrument_token: int,
+    interval: str,
+    lookback_days: int = 5,
+    max_retries: int = 3,
+    trim_incomplete: bool = True,
+    *,
+    from_date=None,
+    to_date=None,
+    now=None,
+    rate_limiter=HISTORICAL_API_LIMITER,
+) -> pd.DataFrame:
     """
     Fetch recent historical candles.
     interval: Kite's interval strings, e.g. "5minute", "15minute".
@@ -98,20 +120,36 @@ def fetch_candles(kite, instrument_token: int, interval: str, lookback_days: int
     Retries with exponential backoff on transient failures (e.g. Kite's
     rate limiting) instead of letting the exception crash the whole bot.
     """
-    to_date = datetime.now()
-    from_date = to_date - timedelta(days=lookback_days)
+    effective_to_date = to_date or datetime.now()
+    effective_from_date = (
+        from_date
+        if from_date is not None
+        else effective_to_date - timedelta(days=lookback_days)
+    )
 
     last_exc = None
     for attempt in range(max_retries):
         try:
-            data = kite.historical_data(instrument_token, from_date, to_date, interval)
+            if rate_limiter is not None:
+                rate_limiter.wait()
+
+            data = kite.historical_data(
+                instrument_token,
+                effective_from_date,
+                effective_to_date,
+                interval,
+            )
             df = pd.DataFrame(data)
             if df.empty:
                 return df
             df["date"] = pd.to_datetime(df["date"])
             df = df[["date", "open", "high", "low", "close", "volume"]]
             if trim_incomplete:
-                df = trim_incomplete_candles(df, candle_interval_minutes(interval))
+                df = trim_incomplete_candles(
+                    df,
+                    candle_interval_minutes(interval),
+                    now=now,
+                )
             return df
         except Exception as e:
             last_exc = e
