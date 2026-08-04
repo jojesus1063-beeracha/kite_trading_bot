@@ -16,12 +16,35 @@ import pandas as pd
 from scheduler import candle_interval_minutes
 
 
+_INSTRUMENT_TICK_SIZES = {}
+
+
 def get_instrument_token(kite, symbol: str, exchange: str) -> int:
     instruments = kite.instruments(exchange)
     for inst in instruments:
         if inst["tradingsymbol"] == symbol:
+            tick_size = inst.get("tick_size")
+            if tick_size is not None and float(tick_size) > 0:
+                _INSTRUMENT_TICK_SIZES[(exchange, symbol)] = float(
+                    tick_size
+                )
             return inst["instrument_token"]
     raise ValueError(f"Instrument token not found for {exchange}:{symbol}")
+
+
+def get_cached_instrument_tick_size(
+    symbol: str,
+    exchange: str,
+    default: float = 0.05,
+) -> float:
+    """Return tick size captured during the startup instrument lookup."""
+
+    return float(
+        _INSTRUMENT_TICK_SIZES.get(
+            (exchange, symbol),
+            default,
+        )
+    )
 
 
 def get_company_name(kite, symbol: str, exchange: str) -> str:

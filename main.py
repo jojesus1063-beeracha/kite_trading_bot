@@ -20,7 +20,12 @@ from datetime import datetime
 
 import config as cfg
 from auth import get_kite_client
-from data_feed import get_instrument_token, fetch_candles, get_company_name
+from data_feed import (
+    fetch_candles,
+    get_cached_instrument_tick_size,
+    get_company_name,
+    get_instrument_token,
+)
 from indicators import add_indicators, atr as atr_indicator
 from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_row
 from patterns import is_bear_trap, is_bull_trap
@@ -48,6 +53,18 @@ from position_analytics import build_full_analytics_snapshot
 from daily_report import load_trades as load_todays_trades
 from costs import net_pnl_for_trade
 from trade_levels import fixed_levels_from_fill
+from entry_protection import (
+    apply_protective_stop_result,
+    build_confirmed_position,
+    build_entry_plan,
+    build_recovered_position,
+    needs_initial_stop_recovery,
+    protect_confirmed_position,
+)
+from protective_stop import recover_protective_stop
+from protective_stop_store import (
+    list_unresolved_protective_stops,
+)
 from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
 from cooperative_position_monitor import CooperativeScanMonitor
@@ -205,6 +222,15 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
     )
     entry_candidates = []
 
+    live_entry_safety_block = (
+        not cfg.PAPER_TRADING
+        and any(
+            position.get("automated_exit_blocked", False)
+            or position.get("manual_reconciliation_required", False)
+            for position in open_positions.values()
+        )
+    )
+
 
     # Step 4c: market/sector trend, fetched/cached ONCE per scan cycle.
     nifty_fetches = 0
@@ -260,6 +286,16 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             continue
 
         if symbol not in symbols:
+            continue
+
+        if live_entry_safety_block:
+            status_this_cycle.append({
+                "symbol": symbol,
+                "status": (
+                    "new entries blocked: an existing live position "
+                    "requires broker-stop exit coordination or reconciliation"
+                ),
+            })
             continue
 
         if not within_trading_window():
@@ -674,6 +710,33 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             "exchange": exchange,
         }
 
+        if (
+            not cfg.PAPER_TRADING
+            and any(
+                position.get("automated_exit_blocked", False)
+                or position.get("manual_reconciliation_required", False)
+                for position in open_positions.values()
+            )
+        ):
+            status_this_cycle.append({
+                "symbol": symbol,
+                "status": (
+                    "candidate blocked: live protection lifecycle "
+                    "requires reconciliation or exit coordination"
+                ),
+            })
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    **candidate_event_context,
+                    "reason_code": "LIVE_PROTECTION_SAFETY_BLOCK",
+                    "reason": (
+                        "existing live position blocks further entries"
+                    ),
+                },
+            )
+            continue
+
         if not within_trading_window():
             status_this_cycle.append(
                 {
@@ -804,52 +867,82 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
         qty = risk.position_size(signal.entry_price, planned_stop_price)
         if qty > 0 and not cfg.PAPER_TRADING:
             qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
-        result = place_entry_order(kite, symbol, signal.direction, qty, exchange, cfg)
+        tick_size = get_cached_instrument_tick_size(
+            symbol,
+            exchange,
+        )
+        entry_plan = build_entry_plan(
+            signal,
+            cfg,
+            tick_size=tick_size,
+        )
+        result = place_entry_order(
+            kite,
+            symbol,
+            signal.direction,
+            qty,
+            exchange,
+            cfg,
+            entry_plan=entry_plan,
+        )
         if result["success"]:
             confirmed_qty = result["filled_quantity"]
-            # Confirmed average fill price is the REAL entry price used for the
-            # position/qty tracked below -- but stop/target stay computed from
-            # the ORIGINAL signal price, per explicit requirement: never
-            # silently redesign strategy-derived stop/target because the
-            # actual fill differs from the signal price.
-            confirmed_entry_price = result["average_price"] if result["average_price"] is not None else signal.entry_price
-            stop_price = signal.stop_loss
-            target_price = signal.target
-            if getattr(cfg, "ENABLE_FIXED_TARGET", False):
-                stop_price, target_price = fixed_levels_from_fill(
-                    signal.direction,
-                    confirmed_entry_price,
-                    getattr(cfg, "STOP_LOSS_PERCENT", 0.45),
-                    getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
-                )
-            open_positions[symbol] = {
-                "direction": signal.direction,
-                "qty": confirmed_qty,
-                "entry": confirmed_entry_price,
-                "stop": stop_price,
-                "target": target_price,
-                "exchange": exchange,
-                "peak_price": confirmed_entry_price,
-                "tight_mode": False,
-                "entry_time": str(signal.timestamp),
-                "entry_order_id": result.get("order_id"),
-                "entry_operation_id": result.get("operation_id"),
-                "requested_quantity": result.get("requested_quantity", confirmed_qty),
-                "filled_quantity": confirmed_qty,
-                "entry_fill_status": result.get("status"),
-                "entry_average_price": result.get("average_price"),
-                "entry_confirmation_pending": result.get("entry_confirmation_pending", False),
-                "entry_status_message": result.get("reason"),
-            }
+            position = build_confirmed_position(
+                signal,
+                result,
+                exchange,
+                cfg,
+                tick_size=tick_size,
+            )
+            open_positions[symbol] = position
+
+            # Persist the confirmed exposure before the protective-stop
+            # broker side effect.  A crash in the next instruction therefore
+            # restarts from an explicit PENDING/blocked position, not from a
+            # falsely empty local book.
             save_positions(open_positions)
+
+            if (
+                result.get("operation_id")
+                and result.get("client_tag")
+            ):
+                from pending_order_store import mark_entry_fill_applied
+                mark_entry_fill_applied(
+                    result["operation_id"],
+                    confirmed_qty,
+                )
+
+            protect_confirmed_position(
+                kite,
+                symbol,
+                position,
+                cfg,
+            )
+            save_positions(open_positions)
+
+            confirmed_entry_price = position["entry"]
+            stop_price = position["stop"]
+            target_price = position["target"]
+
+            if not cfg.PAPER_TRADING and not position["entry_protected"]:
+                logger.critical(
+                    f"{symbol}: confirmed entry is NOT safely protected "
+                    f"| state={position['protective_stop_state']} "
+                    "| automated actions blocked; manual reconciliation required"
+                )
+
             logger.info(f"ENTRY {signal.direction} {exchange}:{symbol} qty={confirmed_qty} "
                         f"entry={confirmed_entry_price:.2f} stop={stop_price:.2f} "
-                        f"target={signal.target:.2f} | {signal.reason} "
+                        f"target={target_price:.2f} | {signal.reason} "
                         f"[market_alignment: {signal.market_alignment}] "
-                        f"[fill_status: {result.get('status')}]")
+                        f"[fill_status: {result.get('status')}] "
+                        f"[protection: {position['protective_stop_state']}]")
             status_this_cycle.append({
                 "symbol": symbol,
-                "status": f"ENTRY {signal.direction} @ {confirmed_entry_price:.2f}",
+                "status": (
+                    f"ENTRY {signal.direction} @ {confirmed_entry_price:.2f} "
+                    f"| protection={position['protective_stop_state']}"
+                ),
                 "confidence": signal.confidence,
                 "confidence": signal.confidence,
                 "market_alignment": signal.market_alignment,
@@ -955,6 +1048,17 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
     """
     import pandas as pd
     pos = open_positions[symbol]
+
+    if (
+        not cfg.PAPER_TRADING
+        and pos.get("automated_exit_blocked", False)
+    ):
+        return (
+            "AUTOMATED EXIT BLOCKED | "
+            f"protection={pos.get('protective_stop_state', 'UNKNOWN')} "
+            "| broker-stop exit coordination is not integrated"
+        )
+
     exchange = pos.get("exchange", exchange_map.get(symbol, "NSE"))
     token = tokens[symbol]
     df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=1, trim_incomplete=False)  # real-time price needed for stop/trailing-stop monitoring
@@ -1335,41 +1439,116 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
 
 def recover_unresolved_entries(kite, open_positions, cfg, positions_path=None):
     """
-    Stage 3 restart recovery: inspects unresolved ENTRY operations
-    BEFORE any new scanning begins. For orders with a broker order_id,
-    resumes verification and applies only the NEWLY confirmed delta
-    (exec_result.filled_quantity - quantity_already_applied_locally)
-    -- this is what makes repeated recovery cycles idempotent; running
-    this function twice in a row with no new fills applies a delta of
-    zero both times. For intents with NO order_id at all, submission
-    outcome is genuinely unknown -- never blindly resubmitted, only
-    logged as a critical, requiring deliberate reconciliation.
+    Recover tagged submissions, unresolved broker orders, and terminal
+    fills that were verified but not yet applied locally.  Recovery is
+    idempotent and never resubmits an entry.  Legacy no-ID/no-tag intents
+    remain blocked for manual reconciliation.
     """
-    from pending_order_store import list_unresolved_orders, update_order_verification, mark_order_resolved
+    from types import SimpleNamespace
+
+    from executor import reconcile_entry_submission
+    from pending_order_store import (
+        attach_broker_order_id,
+        list_entry_orders_requiring_local_application,
+        list_unresolved_orders,
+        mark_entry_fill_applied,
+        mark_order_resolved,
+        update_order_verification,
+    )
     from order_verification import verify_order_execution
 
-    unresolved_entries = [o for o in list_unresolved_orders() if o["action"] == "ENTRY"]
-    if not unresolved_entries:
+    unresolved_entries = [
+        order
+        for order in list_unresolved_orders()
+        if order["action"] == "ENTRY"
+    ]
+    unapplied_entries = list_entry_orders_requiring_local_application()
+    entries_by_id = {
+        order["operation_id"]: order
+        for order in unresolved_entries + unapplied_entries
+    }
+
+    if not entries_by_id:
         return
 
-    logger.info(f"Restart recovery: {len(unresolved_entries)} unresolved ENTRY operation(s) found")
+    logger.info(
+        "Restart recovery: %s ENTRY operation(s) require verification "
+        "or local fill application",
+        len(entries_by_id),
+    )
 
-    for op in unresolved_entries:
+    protective_store_path = (
+        f"{positions_path}.protective_stops"
+        if positions_path is not None
+        else None
+    )
+
+    for op in entries_by_id.values():
         symbol = op["symbol"]
         if op["order_id"] is None:
-            logger.error(f"CRITICAL: unresolved ENTRY intent for {symbol} has no broker order_id "
-                        f"(operation_id={op['operation_id']}) -- submission outcome is genuinely "
-                        f"unknown. Requires deliberate reconciliation, NOT automatic resubmission. "
-                        f"Leaving unresolved.")
-            continue
+            client_tag = op.get("client_tag")
 
-        logger.info(f"Resuming verification for unresolved ENTRY: {symbol} (order_id={op['order_id']})")
-        exec_result = verify_order_execution(
-            kite, op["order_id"], op["requested_quantity"],
-            max_wait_seconds=getattr(cfg, "ORDER_VERIFY_MAX_WAIT_SECONDS", 15),
-            poll_interval_seconds=getattr(cfg, "ORDER_VERIFY_POLL_INTERVAL_SECONDS", 1),
-        )
-        update_order_verification(op["operation_id"], exec_result)
+            if not client_tag:
+                logger.error(
+                    f"CRITICAL: unresolved legacy ENTRY intent for {symbol} "
+                    "has no order_id or client tag; manual reconciliation "
+                    "is required and no resubmission will occur"
+                )
+                continue
+
+            reconciliation = reconcile_entry_submission(
+                kite,
+                client_tag=client_tag,
+                symbol=symbol,
+                exchange=op["exchange"],
+                direction=op["side"],
+                quantity=op["requested_quantity"],
+                product=cfg.PRODUCT,
+                order_type=cfg.ORDER_TYPE_ENTRY,
+                max_wait_seconds=getattr(
+                    cfg,
+                    "ENTRY_RECONCILE_MAX_WAIT_SECONDS",
+                    0,
+                ),
+                poll_interval_seconds=getattr(
+                    cfg,
+                    "ENTRY_RECONCILE_POLL_INTERVAL_SECONDS",
+                    1,
+                ),
+            )
+
+            if not reconciliation["matched"]:
+                logger.error(
+                    f"CRITICAL: unresolved ENTRY submission for {symbol} "
+                    f"tag={client_tag}; unique broker match not found. "
+                    "No resubmission will occur."
+                )
+                continue
+
+            op["order_id"] = reconciliation["order_id"]
+            attach_broker_order_id(
+                op["operation_id"],
+                op["order_id"],
+            )
+
+        if not op.get("resolved", False):
+            logger.info(
+                f"Resuming verification for ENTRY: {symbol} "
+                f"(order_id={op['order_id']})"
+            )
+            exec_result = verify_order_execution(
+                kite, op["order_id"], op["requested_quantity"],
+                max_wait_seconds=getattr(cfg, "ORDER_VERIFY_MAX_WAIT_SECONDS", 15),
+                poll_interval_seconds=getattr(cfg, "ORDER_VERIFY_POLL_INTERVAL_SECONDS", 1),
+            )
+            update_order_verification(op["operation_id"], exec_result)
+        else:
+            exec_result = SimpleNamespace(
+                status=op.get("last_known_status"),
+                filled_quantity=int(op.get("filled_quantity") or 0),
+                average_price=op.get("average_price"),
+                terminal=bool(op.get("terminal")),
+            )
 
         already_applied = open_positions.get(symbol, {}).get("filled_quantity", 0)
         newly_confirmed = exec_result.filled_quantity - already_applied
@@ -1381,26 +1560,73 @@ def recover_unresolved_entries(kite, open_positions, cfg, positions_path=None):
                 if exec_result.average_price is not None:
                     open_positions[symbol]["entry"] = exec_result.average_price
                     open_positions[symbol]["entry_average_price"] = exec_result.average_price
+
+                protected_quantity = int(
+                    open_positions[symbol].get(
+                        "protective_stop_quantity",
+                        0,
+                    )
+                    or 0
+                )
+
+                if protected_quantity < exec_result.filled_quantity:
+                    open_positions[symbol]["entry_protected"] = False
+                    open_positions[symbol]["protective_stop_state"] = (
+                        "PROTECTION_QUANTITY_MISMATCH"
+                    )
+                    open_positions[symbol]["manual_reconciliation_required"] = True
+                    open_positions[symbol]["automated_exit_blocked"] = True
                 logger.info(f"Recovery applied +{newly_confirmed} newly confirmed shares to existing "
                             f"{symbol} position (total filled_quantity now {exec_result.filled_quantity})")
             else:
-                logger.error(f"CRITICAL: recovered a filled position for {symbol} with NO local "
-                            f"record before restart -- stop/target are UNKNOWN, requires MANUAL review")
-                open_positions[symbol] = {
-                    "direction": op["side"], "qty": exec_result.filled_quantity,
-                    "entry": exec_result.average_price, "stop": None, "target": None,
-                    "exchange": op["exchange"], "peak_price": exec_result.average_price, "tight_mode": False,
-                    "entry_time": op["created_at"], "entry_order_id": op["order_id"],
-                    "entry_operation_id": op["operation_id"], "requested_quantity": op["requested_quantity"],
-                    "filled_quantity": exec_result.filled_quantity, "entry_fill_status": exec_result.status,
-                    "entry_average_price": exec_result.average_price,
-                    "entry_confirmation_pending": not exec_result.terminal,
-                    "entry_status_message": "recovered after restart with no prior local record -- "
-                                             "stop/target unknown, requires manual review",
-                }
+                open_positions[symbol] = build_recovered_position(
+                    op,
+                    exec_result,
+                    cfg,
+                )
+
+            save_positions(
+                open_positions,
+                positions_path=positions_path,
+            )
+            mark_entry_fill_applied(
+                op["operation_id"],
+                exec_result.filled_quantity,
+            )
+
+            position = open_positions[symbol]
+
+            if (
+                not position.get("manual_reconciliation_required")
+                and not position.get("protective_stop_operation_id")
+            ):
+                protect_confirmed_position(
+                    kite,
+                    symbol,
+                    position,
+                    cfg,
+                    store_path=protective_store_path,
+                )
+                save_positions(
+                    open_positions,
+                    positions_path=positions_path,
+                )
         elif newly_confirmed == 0:
             logger.info(f"Recovery for {symbol}: no NEW fills since last check "
                         f"(idempotent, filled_quantity still {exec_result.filled_quantity})")
+
+            local_quantity = int(
+                open_positions.get(symbol, {}).get(
+                    "filled_quantity",
+                    0,
+                )
+                or 0
+            )
+            if local_quantity >= exec_result.filled_quantity:
+                mark_entry_fill_applied(
+                    op["operation_id"],
+                    exec_result.filled_quantity,
+                )
 
         if exec_result.terminal:
             mark_order_resolved(op["operation_id"], resolution_reason=exec_result.status)
@@ -1413,6 +1639,77 @@ def recover_unresolved_entries(kite, open_positions, cfg, positions_path=None):
                            f"({exec_result.status})")
 
     save_positions(open_positions, positions_path=positions_path)
+
+
+def recover_unresolved_protective_stops(
+    kite,
+    open_positions,
+    cfg,
+    *,
+    positions_path=None,
+    store_path=None,
+):
+    """Recover durable stop intents without submitting another stop."""
+
+    changed = False
+
+    records = list_unresolved_protective_stops(store_path)
+    symbols_with_records = {
+        (record["exchange"], record["symbol"])
+        for record in records
+    }
+
+    for record in records:
+        symbol = record["symbol"]
+        position = open_positions.get(symbol)
+
+        if position is None:
+            logger.critical(
+                f"Protective stop exists for {symbol} without a local "
+                "position; manual reconciliation required"
+            )
+            continue
+
+        result = recover_protective_stop(
+            kite,
+            record,
+            cfg,
+            store_path=store_path,
+        )
+        apply_protective_stop_result(position, result)
+        changed = True
+
+        if not position.get("entry_protected"):
+            logger.critical(
+                f"{symbol}: protective-stop recovery remains unresolved "
+                f"| state={position.get('protective_stop_state')}"
+            )
+
+    # A crash can occur after the confirmed position is persisted but
+    # immediately before place_protective_stop() creates its durable intent.
+    # PENDING + no store record proves there was no stop-side broker call,
+    # because the stop engine always fsyncs its intent before submission.
+    for symbol, position in open_positions.items():
+        key = (position.get("exchange", "NSE"), symbol)
+
+        if needs_initial_stop_recovery(
+            position,
+            has_store_record=key in symbols_with_records,
+        ):
+            protect_confirmed_position(
+                kite,
+                symbol,
+                position,
+                cfg,
+                store_path=store_path,
+            )
+            changed = True
+
+    if changed:
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
 
 
 
@@ -2602,6 +2899,11 @@ def run():
 
     if not cfg.PAPER_TRADING:
         recover_unresolved_entries(
+            kite,
+            open_positions,
+            cfg,
+        )
+        recover_unresolved_protective_stops(
             kite,
             open_positions,
             cfg,

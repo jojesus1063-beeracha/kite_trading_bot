@@ -81,6 +81,7 @@ def run_scan_for_alignment(
         quantity,
         exchange,
         cfg_arg,
+        entry_plan=None,
     ):
         return {
             "success": True,
