@@ -32,6 +32,9 @@ analytics = {
     "adx_state": "RISING",
     "adx_delta": 1.25,
     "relative_strength_score": 4.0,
+    "market_trend_reason": "OK",
+    "sector_trend": "Bearish",
+    "sector_trend_reason": "OK",
     "mfe_pct": 0.31,
     "mae_pct": -0.18,
 }
@@ -69,6 +72,12 @@ check(
     "Closed trade persists MFE and MAE",
     stored["mfe_pct"] == 0.31
     and stored["mae_pct"] == -0.18,
+)
+check(
+    "Closed trade persists market and sector diagnostics",
+    stored["market_trend_reason"] == "OK"
+    and stored["sector_trend"] == "Bearish"
+    and stored["sector_trend_reason"] == "OK",
 )
 
 signals = [
@@ -180,13 +189,16 @@ position = build_confirmed_position(
 
 check(
     "Durable entry plan stores signal analytics for restart recovery",
-    plan["signal_analytics"]["ranking_score"] == 181.5,
+    plan["signal_analytics"]["ranking_score"] == 181.5
+    and plan["signal_analytics"]["sector_trend"] == "Bearish",
 )
 check(
     "Confirmed position carries exact signal analytics",
     position["entry_operation_id"] == operation_id
     and position["signal_id"] == signal_id
-    and position["ranking_score"] == 181.5,
+    and position["ranking_score"] == 181.5
+    and position["market_trend_reason"] == "OK"
+    and position["sector_trend_reason"] == "OK",
 )
 
 order_record = {
