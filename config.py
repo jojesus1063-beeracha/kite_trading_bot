@@ -272,3 +272,62 @@ if os.path.exists(_USER_CONFIG_PATH):
     POSITION_CHECK_CRITICAL_SECONDS = _overrides.get("position_check_critical_seconds", POSITION_CHECK_CRITICAL_SECONDS)
     SCAN_DELAY_WARNING_SECONDS = _overrides.get("scan_delay_warning_seconds", SCAN_DELAY_WARNING_SECONDS)
     SCAN_DELAY_CRITICAL_SECONDS = _overrides.get("scan_delay_critical_seconds", SCAN_DELAY_CRITICAL_SECONDS)
+# ---------------------------------------------------------------------
+# WebSocket candle engine (opt-in infrastructure change)
+# ---------------------------------------------------------------------
+# When False (default): main.py never imports ws_ticker or
+# candle_engine, and behavior is byte-for-byte identical to today --
+# all candles come from data_feed.fetch_candles() (REST) as before.
+#
+# When True: ws_ticker subscribes to the watchlist + sector indices
+# over Kite's WebSocket and candle_engine builds streaming candles
+# from ticks. WS_CANDLE_MODE governs whether those streamed candles
+# are allowed to influence real signals/orders:
+#   "shadow" (default) -- WS candles are built and compared against
+#       the REST path (see candle_engine.ShadowComparator), logged to
+#       ws_shadow_logs/*.jsonl. Signal evaluation and order placement
+#       keep using the existing REST-polling path, completely
+#       unchanged. Safe to run in production for validation.
+#   "live" -- once main.py is explicitly wired to consume
+#       candle_engine.SymbolCandleBuilder output instead of
+#       data_feed.fetch_candles() for the live path. Do not set this
+#       until shadow-mode logs have been reviewed for several
+#       sessions and OHLCV/indicator deltas are within tolerance.
+ENABLE_WS_CANDLES = False
+WS_CANDLE_MODE = "shadow"  # "shadow" or "live" -- ignored while ENABLE_WS_CANDLES is False
+
+# Sector indices to also subscribe to over WebSocket, in addition to
+# WATCHLIST, for market/sector alignment context. Same {"symbol",
+# "exchange"} shape as WATCHLIST entries.
+WS_SECTOR_INDICES = []
+
+# How often (minutes) to run a full from-scratch indicator recompute
+# and compare it against the incrementally-maintained values, per
+# symbol. Kept infrequent since it re-fetches REST history -- this is
+# validation overhead, not part of the trading path.
+WS_INDICATOR_SHADOW_INTERVAL_MINUTES = 30
+
+# A symbol with no WS tick for longer than this many seconds is
+# considered stale; candle_engine/entry_pricing must fall back to the
+# existing REST cache + 12-second buffer for that symbol rather than
+# trusting a stale streamed price. Mirrors the existing "fail safe"
+# pattern used elsewhere (e.g. margin/circuit checks falling back to
+# proceeding-without-check on error, logged as a warning).
+WS_STALE_TICK_SECONDS = 5.0
+
+# Entry pricing (phase 4, not yet wired into executor.py): reject a
+# signal if the most recent tick for that symbol is older than this
+# many seconds at the moment of order submission.
+WS_ENTRY_TICK_MAX_AGE_SECONDS = 2.0
+WS_MAX_SPREAD_PCT = 0.5       # reject entry if bid/ask spread exceeds this % of mid price
+WS_MAX_SLIPPAGE_PCT = 0.15    # marketable-limit cap beyond best bid/ask
+
+# NOT previously present anywhere in this codebase (config.py,
+# strategy.py, executor.py, risk_manager.py all checked) despite the
+# original architecture doc referring to these as "existing" limits.
+# Left as None (disabled) here deliberately -- decide the actual
+# thresholds yourself before enabling; the doc's suggested 0.15%/0.35%
+# are commented out below only as a starting reference point, not a
+# recommendation.
+MAX_ADVERSE_MOVE_PCT = None   # e.g. 0.15
+MAX_ABSOLUTE_DRIFT_PCT = None  # e.g. 0.35

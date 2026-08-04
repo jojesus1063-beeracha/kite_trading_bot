@@ -35,3 +35,4 @@ runtime/
 validation_events/
 protective_stops.json
 protective_stops.json.lock
+ws_shadow_logs/

@@ -3895,6 +3895,16 @@ def run():
     exchange_map = {w["symbol"]: w["exchange"] for w in cfg.WATCHLIST}
     tokens = {s: get_instrument_token(kite, s, exchange_map[s]) for s in symbols}
 
+    # --- Optional WS shadow engine (opt-in, cfg.ENABLE_WS_CANDLES) ---
+    # Runs entirely independently of the REST-based loop below via its
+    # own background thread; never touches run_full_scan(), evaluate(),
+    # or order placement. See ws_integration.py. A no-op (returns None
+    # immediately) when cfg.ENABLE_WS_CANDLES is False, the default.
+    ws_shadow_engine = None
+    if getattr(cfg, "ENABLE_WS_CANDLES", False):
+        from ws_integration import start_ws_shadow_engine
+        ws_shadow_engine = start_ws_shadow_engine(kite, symbols, tokens, exchange_map)
+
     # --- Restore any open positions from before a crash/restart today ---
     open_positions = load_positions()
     if open_positions:
@@ -3977,232 +3987,237 @@ def run():
                     f"scan buffer: {cfg.SCAN_BUFFER_SECONDS}s")
     scan_guard = ScanGuard()
 
-    while True:
-        now = datetime.now()
+    try:
+        while True:
+            now = datetime.now()
 
-        # Force square-off at end of day regardless
-        # of signals. Only broker-confirmed quantities are
-        # removed locally.
-        if past_square_off():
-            for symbol, pos in list(
-                open_positions.items()
-            ):
-                logger.info(
-                    f"Force square-off: {symbol}"
-                )
-
-                exchange = pos.get(
-                    "exchange",
-                    exchange_map.get(symbol, "NSE"),
-                )
-                token = tokens[symbol]
-
-                try:
-                    df_5m = fetch_candles(
-                        kite,
-                        token,
-                        cfg.ENTRY_TIMEFRAME,
-                        lookback_days=1,
-                        trim_incomplete=False,
-                    )
-                    last_price = (
-                        df_5m.iloc[-1]["close"]
-                        if not df_5m.empty
-                        else pos["entry"]
-                    )
-                except Exception:
-                    last_price = pos["entry"]
-
-                preparation = _prepare_protective_stop_for_exit(
-                    kite,
-                    symbol,
-                    pos,
-                    open_positions,
-                    risk,
-                    exchange,
-                    "FORCE_EXIT",
-                    "square_off",
-                )
-
-                if preparation["position_closed"]:
+            # Force square-off at end of day regardless
+            # of signals. Only broker-confirmed quantities are
+            # removed locally.
+            if past_square_off():
+                for symbol, pos in list(
+                    open_positions.items()
+                ):
                     logger.info(
-                        f"Force square-off for {exchange}:{symbol} "
-                        "was already completed by the protective stop"
+                        f"Force square-off: {symbol}"
                     )
-                    continue
 
-                if not preparation["proceed"]:
-                    logger.critical(
-                        f"Force square-off blocked for "
-                        f"{exchange}:{symbol}: protective_stop="
-                        f"{preparation['status']}"
+                    exchange = pos.get(
+                        "exchange",
+                        exchange_map.get(symbol, "NSE"),
                     )
-                    continue
+                    token = tokens[symbol]
 
-                pos = open_positions[symbol]
-                requested_quantity = int(pos["qty"])
+                    try:
+                        df_5m = fetch_candles(
+                            kite,
+                            token,
+                            cfg.ENTRY_TIMEFRAME,
+                            lookback_days=1,
+                            trim_incomplete=False,
+                        )
+                        last_price = (
+                            df_5m.iloc[-1]["close"]
+                            if not df_5m.empty
+                            else pos["entry"]
+                        )
+                    except Exception:
+                        last_price = pos["entry"]
 
-                force_result = (
-                    place_force_exit_order(
+                    preparation = _prepare_protective_stop_for_exit(
                         kite,
                         symbol,
-                        pos["direction"],
-                        requested_quantity,
+                        pos,
+                        open_positions,
+                        risk,
                         exchange,
-                        cfg,
-                        protection_clearance=(
-                            preparation["clearance"]
-                        ),
+                        "FORCE_EXIT",
+                        "square_off",
                     )
-                )
 
-                status = apply_force_exit_result(
-                    symbol,
-                    pos,
-                    force_result,
-                    open_positions,
-                    risk,
-                    exchange,
-                    last_price,
-                )
+                    if preparation["position_closed"]:
+                        logger.info(
+                            f"Force square-off for {exchange}:{symbol} "
+                            "was already completed by the protective stop"
+                        )
+                        continue
+
+                    if not preparation["proceed"]:
+                        logger.critical(
+                            f"Force square-off blocked for "
+                            f"{exchange}:{symbol}: protective_stop="
+                            f"{preparation['status']}"
+                        )
+                        continue
+
+                    pos = open_positions[symbol]
+                    requested_quantity = int(pos["qty"])
+
+                    force_result = (
+                        place_force_exit_order(
+                            kite,
+                            symbol,
+                            pos["direction"],
+                            requested_quantity,
+                            exchange,
+                            cfg,
+                            protection_clearance=(
+                                preparation["clearance"]
+                            ),
+                        )
+                    )
+
+                    status = apply_force_exit_result(
+                        symbol,
+                        pos,
+                        force_result,
+                        open_positions,
+                        risk,
+                        exchange,
+                        last_price,
+                    )
+
+                    logger.info(
+                        f"Force square-off result for "
+                        f"{exchange}:{symbol}: {status}"
+                    )
+
+                if open_positions:
+                    save_positions(open_positions)
+
+                    logger.critical(
+                        "Trading day ended with unresolved "
+                        "or partially closed positions still "
+                        f"persisted: "
+                        f"{list(open_positions.keys())}. "
+                        "They will be reconciled by restart "
+                        "recovery; positions were NOT cleared."
+                    )
+                else:
+                    clear_positions()
 
                 logger.info(
-                    f"Force square-off result for "
-                    f"{exchange}:{symbol}: {status}"
+                    "Trading day complete. Exiting."
                 )
+                break
 
-            if open_positions:
-                save_positions(open_positions)
+            if not cfg.ENABLE_CANDLE_ALIGNED_POLLING:
+                # --- ORIGINAL BEHAVIOR, byte-for-byte unchanged ---
+                status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk)
+                try:
+                    todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
+                    prev_status = load_bot_status()
+                    pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
+                        kite, cfg, open_positions, symbols, start_time,
+                        previous_bot_status=prev_status, todays_trades=todays_trades)
+                    save_bot_status(status_this_cycle, positions=pos_analytics,
+                                    portfolio_summary=portfolio_sum, session_summary=session_sum, health=health)
+                except Exception as e:
+                    logger.warning(f"Analytics snapshot failed this cycle, saving basic status only: {e}")
+                    save_bot_status(status_this_cycle)
 
-                logger.critical(
-                    "Trading day ended with unresolved "
-                    "or partially closed positions still "
-                    f"persisted: "
-                    f"{list(open_positions.keys())}. "
-                    "They will be reconciled by restart "
-                    "recovery; positions were NOT cleared."
-                )
+                if risk.day.halted:
+                    logger.warning(f"Trading halted (no new entries, still managing open positions): {risk.day.halt_reason}")
+
+                time.sleep(POLL_SECONDS)
+                continue
+
+            # --- NEW: candle-aligned scheduler ---
+            interval_min = candle_interval_minutes(cfg.ENTRY_TIMEFRAME)
+            target_scan_time = next_scan_time(datetime.now(), interval_min, cfg.SCAN_BUFFER_SECONDS)
+
+            # Position-monitor sub-loop: lightweight checks only, until it's
+            # time for the next full scan (or the trading day ends).
+            while datetime.now() < target_scan_time and not past_square_off():
+                if open_positions:
+                    pc_start = time.time()
+                    for sym in list(open_positions.keys()):
+                        check_position_exit(kite, sym, tokens, exchange_map, open_positions, risk)
+                    pc_elapsed = time.time() - pc_start
+
+                    if pc_elapsed > cfg.POSITION_CHECK_CRITICAL_SECONDS:
+                        logger.error(f"CRITICAL: position check took {pc_elapsed:.1f}s "
+                                     f"(threshold {cfg.POSITION_CHECK_CRITICAL_SECONDS}s) -- "
+                                     f"possible API/network degradation")
+                    elif pc_elapsed > cfg.POSITION_CHECK_WARNING_SECONDS:
+                        logger.warning(f"Position check took {pc_elapsed:.1f}s "
+                                       f"(threshold {cfg.POSITION_CHECK_WARNING_SECONDS}s)")
+
+                    remaining = max(0, (target_scan_time - datetime.now()).total_seconds())
+                    logger.info(f"Position monitor cycle | {len(open_positions)} open "
+                                f"({', '.join(open_positions.keys())}) | next scan in {remaining:.0f}s")
+                else:
+                    logger.info("No open positions.")
+
+                try:
+                    todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
+                    prev_status = load_bot_status()
+                    pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
+                        kite, cfg, open_positions, symbols, start_time,
+                        previous_bot_status=prev_status, todays_trades=todays_trades)
+                    save_bot_status([], positions=pos_analytics, portfolio_summary=portfolio_sum,
+                                    session_summary=session_sum, health=health)
+                except Exception as e:
+                    logger.warning(f"Analytics snapshot failed this position-monitor cycle: {e}")
+
+                sleep_for = min(cfg.POSITION_CHECK_SECONDS,
+                                 max(0, (target_scan_time - datetime.now()).total_seconds()))
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+
+            if past_square_off():
+                continue  # let the top of the loop handle force square-off
+
+            # Time for the full scan -- but guard against scanning the same
+            # completed candle twice (e.g. if we looped back around fast).
+            current_candle = last_completed_candle_close(datetime.now(), interval_min)
+            if scan_guard.should_scan(current_candle):
+                scan_delay = (datetime.now() - target_scan_time).total_seconds()
+                if scan_delay > cfg.SCAN_DELAY_CRITICAL_SECONDS:
+                    logger.error(f"CRITICAL: full scan starting {scan_delay:.0f}s late "
+                                 f"(threshold {cfg.SCAN_DELAY_CRITICAL_SECONDS}s) -- "
+                                 f"scheduler may be falling behind")
+                elif scan_delay > cfg.SCAN_DELAY_WARNING_SECONDS:
+                    logger.warning(f"Full scan starting {scan_delay:.0f}s late "
+                                   f"(threshold {cfg.SCAN_DELAY_WARNING_SECONDS}s)")
+
+                logger.info(f"Entry scan starting (5-minute candle) | last completed candle: {current_candle.strftime('%H:%M')}")
+                scan_start = time.time()
+                status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk)
+                scan_elapsed = time.time() - scan_start
+                try:
+                    todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
+                    prev_status = load_bot_status()
+                    pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
+                        kite, cfg, open_positions, symbols, start_time,
+                        previous_bot_status=prev_status, todays_trades=todays_trades)
+                    save_bot_status(status_this_cycle, positions=pos_analytics,
+                                    portfolio_summary=portfolio_sum, session_summary=session_sum, health=health)
+                except Exception as e:
+                    logger.warning(f"Analytics snapshot failed this cycle, saving basic status only: {e}")
+                    save_bot_status(status_this_cycle)
+                scan_guard.mark_scanned(current_candle)
+
+                if scan_elapsed > cfg.SCHEDULER_CRITICAL_SCAN_SECONDS:
+                    logger.error(f"CRITICAL: full scan took {scan_elapsed:.1f}s "
+                                 f"(threshold {cfg.SCHEDULER_CRITICAL_SCAN_SECONDS}s) -- "
+                                 f"consider reducing watchlist size or investigating API latency")
+                elif scan_elapsed > cfg.SCHEDULER_WARNING_SCAN_SECONDS:
+                    logger.warning(f"Full scan took {scan_elapsed:.1f}s "
+                                   f"(threshold {cfg.SCHEDULER_WARNING_SCAN_SECONDS}s)")
+
+                next_target = next_scan_time(datetime.now(), interval_min, cfg.SCAN_BUFFER_SECONDS)
+                logger.info(f"Entry scan completed (5-minute candle) | took {scan_elapsed:.1f}s | next scan: {next_target.strftime('%H:%M:%S')}")
             else:
-                clear_positions()
-
-            logger.info(
-                "Trading day complete. Exiting."
-            )
-            break
-
-        if not cfg.ENABLE_CANDLE_ALIGNED_POLLING:
-            # --- ORIGINAL BEHAVIOR, byte-for-byte unchanged ---
-            status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk)
-            try:
-                todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
-                prev_status = load_bot_status()
-                pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
-                    kite, cfg, open_positions, symbols, start_time,
-                    previous_bot_status=prev_status, todays_trades=todays_trades)
-                save_bot_status(status_this_cycle, positions=pos_analytics,
-                                portfolio_summary=portfolio_sum, session_summary=session_sum, health=health)
-            except Exception as e:
-                logger.warning(f"Analytics snapshot failed this cycle, saving basic status only: {e}")
-                save_bot_status(status_this_cycle)
+                logger.info(f"Skipped duplicate scan for candle {current_candle.strftime('%H:%M')}")
 
             if risk.day.halted:
                 logger.warning(f"Trading halted (no new entries, still managing open positions): {risk.day.halt_reason}")
 
-            time.sleep(POLL_SECONDS)
-            continue
 
-        # --- NEW: candle-aligned scheduler ---
-        interval_min = candle_interval_minutes(cfg.ENTRY_TIMEFRAME)
-        target_scan_time = next_scan_time(datetime.now(), interval_min, cfg.SCAN_BUFFER_SECONDS)
-
-        # Position-monitor sub-loop: lightweight checks only, until it's
-        # time for the next full scan (or the trading day ends).
-        while datetime.now() < target_scan_time and not past_square_off():
-            if open_positions:
-                pc_start = time.time()
-                for sym in list(open_positions.keys()):
-                    check_position_exit(kite, sym, tokens, exchange_map, open_positions, risk)
-                pc_elapsed = time.time() - pc_start
-
-                if pc_elapsed > cfg.POSITION_CHECK_CRITICAL_SECONDS:
-                    logger.error(f"CRITICAL: position check took {pc_elapsed:.1f}s "
-                                 f"(threshold {cfg.POSITION_CHECK_CRITICAL_SECONDS}s) -- "
-                                 f"possible API/network degradation")
-                elif pc_elapsed > cfg.POSITION_CHECK_WARNING_SECONDS:
-                    logger.warning(f"Position check took {pc_elapsed:.1f}s "
-                                   f"(threshold {cfg.POSITION_CHECK_WARNING_SECONDS}s)")
-
-                remaining = max(0, (target_scan_time - datetime.now()).total_seconds())
-                logger.info(f"Position monitor cycle | {len(open_positions)} open "
-                            f"({', '.join(open_positions.keys())}) | next scan in {remaining:.0f}s")
-            else:
-                logger.info("No open positions.")
-
-            try:
-                todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
-                prev_status = load_bot_status()
-                pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
-                    kite, cfg, open_positions, symbols, start_time,
-                    previous_bot_status=prev_status, todays_trades=todays_trades)
-                save_bot_status([], positions=pos_analytics, portfolio_summary=portfolio_sum,
-                                session_summary=session_sum, health=health)
-            except Exception as e:
-                logger.warning(f"Analytics snapshot failed this position-monitor cycle: {e}")
-
-            sleep_for = min(cfg.POSITION_CHECK_SECONDS,
-                             max(0, (target_scan_time - datetime.now()).total_seconds()))
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-
-        if past_square_off():
-            continue  # let the top of the loop handle force square-off
-
-        # Time for the full scan -- but guard against scanning the same
-        # completed candle twice (e.g. if we looped back around fast).
-        current_candle = last_completed_candle_close(datetime.now(), interval_min)
-        if scan_guard.should_scan(current_candle):
-            scan_delay = (datetime.now() - target_scan_time).total_seconds()
-            if scan_delay > cfg.SCAN_DELAY_CRITICAL_SECONDS:
-                logger.error(f"CRITICAL: full scan starting {scan_delay:.0f}s late "
-                             f"(threshold {cfg.SCAN_DELAY_CRITICAL_SECONDS}s) -- "
-                             f"scheduler may be falling behind")
-            elif scan_delay > cfg.SCAN_DELAY_WARNING_SECONDS:
-                logger.warning(f"Full scan starting {scan_delay:.0f}s late "
-                               f"(threshold {cfg.SCAN_DELAY_WARNING_SECONDS}s)")
-
-            logger.info(f"Entry scan starting (5-minute candle) | last completed candle: {current_candle.strftime('%H:%M')}")
-            scan_start = time.time()
-            status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk)
-            scan_elapsed = time.time() - scan_start
-            try:
-                todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
-                prev_status = load_bot_status()
-                pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
-                    kite, cfg, open_positions, symbols, start_time,
-                    previous_bot_status=prev_status, todays_trades=todays_trades)
-                save_bot_status(status_this_cycle, positions=pos_analytics,
-                                portfolio_summary=portfolio_sum, session_summary=session_sum, health=health)
-            except Exception as e:
-                logger.warning(f"Analytics snapshot failed this cycle, saving basic status only: {e}")
-                save_bot_status(status_this_cycle)
-            scan_guard.mark_scanned(current_candle)
-
-            if scan_elapsed > cfg.SCHEDULER_CRITICAL_SCAN_SECONDS:
-                logger.error(f"CRITICAL: full scan took {scan_elapsed:.1f}s "
-                             f"(threshold {cfg.SCHEDULER_CRITICAL_SCAN_SECONDS}s) -- "
-                             f"consider reducing watchlist size or investigating API latency")
-            elif scan_elapsed > cfg.SCHEDULER_WARNING_SCAN_SECONDS:
-                logger.warning(f"Full scan took {scan_elapsed:.1f}s "
-                               f"(threshold {cfg.SCHEDULER_WARNING_SCAN_SECONDS}s)")
-
-            next_target = next_scan_time(datetime.now(), interval_min, cfg.SCAN_BUFFER_SECONDS)
-            logger.info(f"Entry scan completed (5-minute candle) | took {scan_elapsed:.1f}s | next scan: {next_target.strftime('%H:%M:%S')}")
-        else:
-            logger.info(f"Skipped duplicate scan for candle {current_candle.strftime('%H:%M')}")
-
-        if risk.day.halted:
-            logger.warning(f"Trading halted (no new entries, still managing open positions): {risk.day.halt_reason}")
-
+    finally:
+        if ws_shadow_engine is not None:
+            ws_shadow_engine.stop()
 
 if __name__ == "__main__":
     run()
