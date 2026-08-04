@@ -238,6 +238,9 @@ scan_source = ast.get_source_segment(
     source,
     scan,
 ) or ""
+protection_source = Path("entry_protection.py").read_text(
+    encoding="utf-8"
+)
 
 check(
     "Confirmed fill quantity is preserved",
@@ -253,16 +256,16 @@ check(
 check(
     "Position stores confirmed quantity",
     '"qty": confirmed_qty'
-    in scan_source,
+    in protection_source,
 )
 
 check(
     "Fixed levels still use confirmed fill",
     (
         "fixed_levels_from_fill("
-        in scan_source
+        in protection_source
         and "confirmed_entry_price"
-        in scan_source
+        in protection_source
     ),
 )
 
