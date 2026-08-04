@@ -515,6 +515,7 @@ def place_protective_stop(
     stop_loss_percent,
     tick_size,
     cfg,
+    entry_operation_id=None,
     store_path=None,
 ):
     if getattr(cfg, "PAPER_TRADING", True):
@@ -590,6 +591,8 @@ def place_protective_stop(
         requested_quantity=quantity,
         trigger_price=trigger_price,
         client_tag=client_tag,
+        tick_size=tick_size,
+        entry_operation_id=entry_operation_id,
         path=store_path,
     )
 
@@ -773,4 +776,152 @@ def place_protective_stop(
             if "reconciliation" in locals()
             else 0
         ),
+    }
+
+
+def recover_protective_stop(
+    kite,
+    record,
+    cfg,
+    *,
+    store_path=None,
+):
+    """Resume one durable protective-stop operation without resubmitting.
+
+    An intent without an order ID is reconciled by its unique broker tag.
+    An intent with an order ID is verified directly.  Neither path ever
+    calls ``place_order``.
+    """
+
+    if getattr(cfg, "PAPER_TRADING", True):
+        raise ProtectiveStopError(
+            "Protective-stop recovery is live-only"
+        )
+
+    order_id = record.get("order_id")
+    submission_reconciled = False
+    reconciliation_attempts = 0
+
+    if order_id is None:
+        try:
+            reconciliation = reconcile_protective_stop_submission(
+                kite,
+                client_tag=record["client_tag"],
+                symbol=record["symbol"],
+                exchange=record["exchange"],
+                stop_side=record["stop_side"],
+                quantity=int(record["requested_quantity"]),
+                product=cfg.PRODUCT,
+                trigger_price=float(record["trigger_price"]),
+                tick_size=float(record.get("tick_size") or 0.05),
+                max_wait_seconds=getattr(
+                    cfg,
+                    "PROTECTIVE_STOP_RECONCILE_MAX_WAIT_SECONDS",
+                    10,
+                ),
+                poll_interval_seconds=getattr(
+                    cfg,
+                    "PROTECTIVE_STOP_RECONCILE_POLL_INTERVAL_SECONDS",
+                    1,
+                ),
+            )
+        except ProtectiveStopError as exc:
+            return {
+                "success": False,
+                "active": False,
+                "triggered": False,
+                "confirmation_pending": True,
+                "status": "SUBMISSION_AMBIGUOUS",
+                "state": "SUBMISSION_AMBIGUOUS",
+                "reason": str(exc),
+                "operation_id": record["operation_id"],
+                "order_id": None,
+                "client_tag": record["client_tag"],
+                "trigger_price": float(record["trigger_price"]),
+                "requested_quantity": int(record["requested_quantity"]),
+                "filled_quantity": 0,
+                "average_price": None,
+                "submission_reconciled": False,
+                "reconciliation_attempts": 1,
+            }
+
+        reconciliation_attempts = reconciliation["attempts"]
+
+        if not reconciliation["matched"]:
+            return {
+                "success": False,
+                "active": False,
+                "triggered": False,
+                "confirmation_pending": True,
+                "status": "SUBMISSION_UNCERTAIN",
+                "state": "SUBMISSION_UNCERTAIN",
+                "reason": (
+                    "no uniquely tagged broker protective stop was found"
+                ),
+                "operation_id": record["operation_id"],
+                "order_id": None,
+                "client_tag": record["client_tag"],
+                "trigger_price": float(record["trigger_price"]),
+                "requested_quantity": int(record["requested_quantity"]),
+                "filled_quantity": 0,
+                "average_price": None,
+                "submission_reconciled": False,
+                "reconciliation_attempts": reconciliation_attempts,
+            }
+
+        order_id = reconciliation["order_id"]
+        submission_reconciled = True
+        attach_protective_stop_order_id(
+            record["operation_id"],
+            str(order_id),
+            path=store_path,
+        )
+
+    verification = verify_protective_stop_active(
+        kite,
+        str(order_id),
+        int(record["requested_quantity"]),
+        max_wait_seconds=getattr(
+            cfg,
+            "PROTECTIVE_STOP_VERIFY_MAX_WAIT_SECONDS",
+            15,
+        ),
+        poll_interval_seconds=getattr(
+            cfg,
+            "PROTECTIVE_STOP_VERIFY_POLL_INTERVAL_SECONDS",
+            1,
+        ),
+    )
+
+    update_protective_stop_verification(
+        record["operation_id"],
+        verification,
+        path=store_path,
+    )
+
+    return {
+        "success": (
+            verification.active
+            or verification.state
+            in {"TRIGGERED", "PARTIALLY_TRIGGERED"}
+        ),
+        "active": verification.active,
+        "triggered": verification.state
+        in {"TRIGGERED", "PARTIALLY_TRIGGERED"},
+        "confirmation_pending": verification.state
+        in {"TIMEOUT", "UNKNOWN"},
+        "status": verification.status,
+        "state": verification.state,
+        "reason": verification.status_message,
+        "operation_id": record["operation_id"],
+        "order_id": str(order_id),
+        "client_tag": record["client_tag"],
+        "trigger_price": float(record["trigger_price"]),
+        "requested_quantity": int(record["requested_quantity"]),
+        "filled_quantity": verification.filled_quantity,
+        "pending_quantity": verification.pending_quantity,
+        "average_price": verification.average_price,
+        "verified_at": verification.verified_at.isoformat(),
+        "submission_reconciled": submission_reconciled,
+        "reconciliation_attempts": reconciliation_attempts,
     }
