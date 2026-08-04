@@ -28,24 +28,48 @@ SECTOR_INDEX_TOKENS = {
 # Watchlist symbol -> sector index tradingsymbol. Manually maintained --
 # Kite does not provide this mapping. Symbols not listed here have no
 # sector-level trend (get_sector_trend falls back to "Sideways").
+#
+# The August 2026 expansion uses the official Nifty 500 industry
+# classification and maps a symbol only when an existing, broker-verified
+# sector token is an exact sector match. NIFTY INFRA is limited to the
+# telecom, shipping, port and railway groups explicitly covered by that
+# index. Unsupported industries remain deliberately unmapped instead of
+# being assigned to a convenient but misleading proxy.
 SECTOR_MAP = {
     "HDFCBANK": "NIFTY BANK", "ICICIBANK": "NIFTY BANK", "AXISBANK": "NIFTY BANK",
     "KOTAKBANK": "NIFTY BANK", "SBIN": "NIFTY BANK", "INDUSINDBK": "NIFTY BANK",
-    "BANDHANBNK": "NIFTY BANK", "IDFCFIRSTB": "NIFTY BANK",
+    "BANDHANBNK": "NIFTY BANK", "IDFCFIRSTB": "NIFTY BANK", "FEDERALBNK": "NIFTY BANK",
     "PNB": "NIFTY PSU BANK", "CANBK": "NIFTY PSU BANK", "UNIONBANK": "NIFTY PSU BANK",
     "TCS": "NIFTY IT", "INFY": "NIFTY IT", "HCLTECH": "NIFTY IT", "WIPRO": "NIFTY IT",
-    "TECHM": "NIFTY IT",
+    "TECHM": "NIFTY IT", "CYIENT": "NIFTY IT", "NETWEB": "NIFTY IT",
     "MARUTI": "NIFTY AUTO", "TVSMOTOR": "NIFTY AUTO", "EICHERMOT": "NIFTY AUTO",
     "HEROMOTOCO": "NIFTY AUTO", "M&M": "NIFTY AUTO", "BAJAJ-AUTO": "NIFTY AUTO",
+    "ATHERENERG": "NIFTY AUTO", "RKFORGE": "NIFTY AUTO", "EXIDEIND": "NIFTY AUTO",
+    "GABRIEL": "NIFTY AUTO",
     "SUNPHARMA": "NIFTY PHARMA", "DRREDDY": "NIFTY PHARMA", "CIPLA": "NIFTY PHARMA",
-    "TATASTEEL": "NIFTY METAL", "JSWSTEEL": "NIFTY METAL",
+    "TATASTEEL": "NIFTY METAL", "JSWSTEEL": "NIFTY METAL", "GMDCLTD": "NIFTY METAL",
+    "SAIL": "NIFTY METAL", "NATIONALUM": "NIFTY METAL", "JAINREC": "NIFTY METAL",
+    "HINDZINC": "NIFTY METAL", "VEDL": "NIFTY METAL", "GRAVITA": "NIFTY METAL",
     "ONGC": "NIFTY ENERGY", "NTPC": "NIFTY ENERGY", "POWERGRID": "NIFTY ENERGY",
+    "CHENNPETRO": "NIFTY ENERGY", "TORNTPOWER": "NIFTY ENERGY",
     "ITC": "NIFTY FMCG", "HINDUNILVR": "NIFTY FMCG", "NESTLEIND": "NIFTY FMCG",
-    "BRIGADE": "NIFTY REALTY",
+    "GODFRYPHLP": "NIFTY FMCG", "DOMS": "NIFTY FMCG", "DABUR": "NIFTY FMCG",
+    "BALRAMCHIN": "NIFTY FMCG", "LTFOODS": "NIFTY FMCG",
+    "BRIGADE": "NIFTY REALTY", "DLF": "NIFTY REALTY", "PRESTIGE": "NIFTY REALTY",
+    "ZEEL": "NIFTY MEDIA",
     "BAJFINANCE": "NIFTY FIN SERVICE", "BAJAJFINSV": "NIFTY FIN SERVICE",
     "SHRIRAMFIN": "NIFTY FIN SERVICE", "IREDA": "NIFTY FIN SERVICE",
     "IRFC": "NIFTY FIN SERVICE", "HUDCO": "NIFTY FIN SERVICE",
+    "TATAINVEST": "NIFTY FIN SERVICE", "ANANDRATHI": "NIFTY FIN SERVICE",
+    "PINELABS": "NIFTY FIN SERVICE", "LICI": "NIFTY FIN SERVICE",
+    "PAYTM": "NIFTY FIN SERVICE", "GROWW": "NIFTY FIN SERVICE",
+    "CAMS": "NIFTY FIN SERVICE", "CDSL": "NIFTY FIN SERVICE",
+    "NAM-INDIA": "NIFTY FIN SERVICE", "M&MFIN": "NIFTY FIN SERVICE",
+    "PNBHOUSING": "NIFTY FIN SERVICE", "360ONE": "NIFTY FIN SERVICE",
+    "MCX": "NIFTY FIN SERVICE", "MANAPPURAM": "NIFTY FIN SERVICE",
     "LT": "NIFTY INFRA", "NBCC": "NIFTY INFRA", "NCC": "NIFTY INFRA",
+    "SCI": "NIFTY INFRA", "GESHIP": "NIFTY INFRA", "JSWINFRA": "NIFTY INFRA",
+    "HFCL": "NIFTY INFRA", "JWL": "NIFTY INFRA",
 }
 
 TREND_LABELS = {"UP": "Bullish", "DOWN": "Bearish", None: "Sideways"}
