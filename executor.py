@@ -7,8 +7,130 @@ market data before risking capital.
 """
 
 import logging
+import time
+import uuid
 
 logger = logging.getLogger("executor")
+
+
+def make_entry_tag() -> str:
+    """Return a unique Kite-compatible identity for one entry intent."""
+
+    tag = "KBE" + uuid.uuid4().hex[:17]
+
+    if len(tag) != 20 or not tag.isalnum():
+        raise RuntimeError("Generated entry tag is invalid")
+
+    return tag
+
+
+def reconcile_entry_submission(
+    kite,
+    *,
+    client_tag,
+    symbol,
+    exchange,
+    direction,
+    quantity,
+    product,
+    order_type,
+    max_wait_seconds=0,
+    poll_interval_seconds=1,
+    sleep_fn=None,
+    clock_fn=None,
+):
+    """Recover a uniquely tagged entry after a lost submit response.
+
+    A tag match alone is not enough: all immutable order details must
+    agree.  Zero or multiple matches remain unresolved and are never
+    converted into a second submission.
+    """
+
+    sleep_fn = sleep_fn or time.sleep
+    clock_fn = clock_fn or time.monotonic
+    started = clock_fn()
+    attempts = 0
+    api_errors = 0
+    last_error = None
+
+    expected = {
+        "tag": str(client_tag),
+        "symbol": str(symbol).upper(),
+        "exchange": str(exchange).upper(),
+        "side": str(direction).upper(),
+        "quantity": int(quantity),
+        "product": str(product).upper(),
+        "order_type": str(order_type).upper(),
+    }
+
+    while True:
+        attempts += 1
+
+        try:
+            broker_orders = kite.orders()
+        except Exception as exc:
+            broker_orders = []
+            api_errors += 1
+            last_error = str(exc)
+
+        matches = []
+
+        for order in broker_orders or []:
+            try:
+                if str(order.get("tag") or "") != expected["tag"]:
+                    continue
+                if str(order.get("tradingsymbol") or "").upper() != expected["symbol"]:
+                    continue
+                if str(order.get("exchange") or "").upper() != expected["exchange"]:
+                    continue
+                if str(order.get("transaction_type") or "").upper() != expected["side"]:
+                    continue
+                if int(order.get("quantity") or 0) != expected["quantity"]:
+                    continue
+                if str(order.get("product") or "").upper() != expected["product"]:
+                    continue
+                if str(order.get("order_type") or "").upper() != expected["order_type"]:
+                    continue
+                if not order.get("order_id"):
+                    continue
+                matches.append(order)
+            except (TypeError, ValueError, AttributeError):
+                continue
+
+        if len(matches) == 1:
+            return {
+                "matched": True,
+                "ambiguous": False,
+                "order_id": str(matches[0]["order_id"]),
+                "order": matches[0],
+                "attempts": attempts,
+                "api_error_count": api_errors,
+                "last_error": last_error,
+            }
+
+        if len(matches) > 1:
+            return {
+                "matched": False,
+                "ambiguous": True,
+                "order_id": None,
+                "order": None,
+                "attempts": attempts,
+                "api_error_count": api_errors,
+                "last_error": "multiple broker orders matched the entry tag",
+            }
+
+        if clock_fn() - started >= max_wait_seconds:
+            return {
+                "matched": False,
+                "ambiguous": False,
+                "order_id": None,
+                "order": None,
+                "attempts": attempts,
+                "api_error_count": api_errors,
+                "last_error": last_error,
+            }
+
+        sleep_fn(poll_interval_seconds)
 
 
 def _check_sufficient_margin(kite, symbol, direction, quantity, exchange, cfg):
@@ -138,7 +260,15 @@ def cap_quantity_by_margin(kite, symbol: str, direction: str, quantity: int, exc
         return quantity
 
 
-def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange: str, cfg):
+def place_entry_order(
+    kite,
+    symbol: str,
+    direction: str,
+    quantity: int,
+    exchange: str,
+    cfg,
+    entry_plan=None,
+):
     """
     Stage 3: entries are only ever tracked based on a BROKER-CONFIRMED
     fill, never on kite.place_order()'s return value alone (which only
@@ -200,8 +330,18 @@ def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange
     if has_unresolved_order(symbol, exchange, "ENTRY"):
         return _rejected("ENTRY_BLOCKED_PENDING_ORDER")
 
+    client_tag = make_entry_tag()
+
     try:
-        operation_id = create_order_intent(symbol, exchange, "ENTRY", direction, quantity)
+        operation_id = create_order_intent(
+            symbol,
+            exchange,
+            "ENTRY",
+            direction,
+            quantity,
+            client_tag=client_tag,
+            metadata=entry_plan,
+        )
     except UnresolvedOrderExistsError:
         return _rejected("ENTRY_BLOCKED_PENDING_ORDER")
     except Exception as e:
@@ -218,6 +358,7 @@ def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange
             product=cfg.PRODUCT,
             order_type=cfg.ORDER_TYPE_ENTRY,
             market_protection=cfg.MARKET_PROTECTION,
+            tag=client_tag,
         )
     except Exception as e:
         # Submission outcome is genuinely UNCERTAIN -- the network call could
@@ -225,14 +366,77 @@ def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange
         # resubmit blindly. The intent stays unresolved (order_id=None) for
         # deliberate reconciliation/recovery, not automatic retry.
         logger.error(f"CRITICAL: order submission uncertain for {symbol} "
-                     f"(operation_id={operation_id}): {e}")
-        return {"success": False, "order_id": None, "operation_id": operation_id,
-                "status": "SUBMISSION_UNCERTAIN",
-                "reason": f"submission exception, broker outcome unknown: {e}",
-                "requested_quantity": quantity, "filled_quantity": 0, "average_price": None,
-                "entry_confirmation_pending": True, "resolved": False}
+                     f"(operation_id={operation_id}, tag={client_tag}): {e}")
 
-    attach_broker_order_id(operation_id, order_id)
+        reconciliation = reconcile_entry_submission(
+            kite,
+            client_tag=client_tag,
+            symbol=symbol,
+            exchange=exchange,
+            direction=direction,
+            quantity=quantity,
+            product=cfg.PRODUCT,
+            order_type=cfg.ORDER_TYPE_ENTRY,
+            max_wait_seconds=getattr(
+                cfg,
+                "ENTRY_RECONCILE_MAX_WAIT_SECONDS",
+                0,
+            ),
+            poll_interval_seconds=getattr(
+                cfg,
+                "ENTRY_RECONCILE_POLL_INTERVAL_SECONDS",
+                1,
+            ),
+        )
+
+        if not reconciliation["matched"]:
+            status = (
+                "SUBMISSION_AMBIGUOUS"
+                if reconciliation["ambiguous"]
+                else "SUBMISSION_UNCERTAIN"
+            )
+            return {
+                "success": False,
+                "order_id": None,
+                "operation_id": operation_id,
+                "client_tag": client_tag,
+                "status": status,
+                "reason": (
+                    "submission exception; broker outcome remains unresolved: "
+                    f"{e}"
+                ),
+                "requested_quantity": quantity,
+                "filled_quantity": 0,
+                "average_price": None,
+                "entry_confirmation_pending": True,
+                "resolved": False,
+            }
+
+        order_id = reconciliation["order_id"]
+        logger.warning(
+            f"Recovered entry order {order_id} for {symbol} using tag={client_tag}"
+        )
+
+    try:
+        attach_broker_order_id(operation_id, order_id)
+    except Exception as exc:
+        logger.critical(
+            f"Entry order ID persistence uncertain for {symbol}: "
+            f"order={order_id} operation={operation_id}: {exc}"
+        )
+        return {
+            "success": False,
+            "order_id": str(order_id),
+            "operation_id": operation_id,
+            "client_tag": client_tag,
+            "status": "PERSISTENCE_UNCERTAIN",
+            "reason": str(exc),
+            "requested_quantity": quantity,
+            "filled_quantity": 0,
+            "average_price": None,
+            "entry_confirmation_pending": True,
+            "resolved": False,
+        }
     logger.info(f"[LIVE] Placed {direction} order {order_id} for {quantity} {exchange}:{symbol} "
                 f"(operation_id={operation_id})")
 
@@ -249,20 +453,23 @@ def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange
 
     if exec_result.status == "COMPLETE":
         logger.info(f"ENTRY CONFIRMED: {symbol} {direction} {filled}@{exec_result.average_price}")
-        return {"success": True, "order_id": order_id, "operation_id": operation_id, "status": "COMPLETE",
+        return {"success": True, "order_id": order_id, "operation_id": operation_id,
+                "client_tag": client_tag, "status": "COMPLETE",
                 "reason": None, "requested_quantity": quantity, "filled_quantity": filled,
                 "average_price": exec_result.average_price, "entry_confirmation_pending": False, "resolved": True}
 
     if exec_result.status == "PARTIALLY_FILLED" and exec_result.terminal:
         logger.info(f"ENTRY CONFIRMED (terminal partial fill): {symbol} {direction} "
                     f"{filled}/{quantity}@{exec_result.average_price}")
-        return {"success": True, "order_id": order_id, "operation_id": operation_id, "status": "PARTIALLY_FILLED",
+        return {"success": True, "order_id": order_id, "operation_id": operation_id,
+                "client_tag": client_tag, "status": "PARTIALLY_FILLED",
                 "reason": "terminal partial fill", "requested_quantity": quantity, "filled_quantity": filled,
                 "average_price": exec_result.average_price, "entry_confirmation_pending": False, "resolved": True}
 
     if exec_result.status in ("REJECTED", "CANCELLED"):
         logger.warning(f"ENTRY {exec_result.status}: {symbol} {direction} -- {exec_result.status_message}")
-        return {"success": False, "order_id": order_id, "operation_id": operation_id, "status": exec_result.status,
+        return {"success": False, "order_id": order_id, "operation_id": operation_id,
+                "client_tag": client_tag, "status": exec_result.status,
                 "reason": exec_result.status_message, "requested_quantity": quantity, "filled_quantity": 0,
                 "average_price": None, "entry_confirmation_pending": False, "resolved": True}
 
@@ -272,13 +479,15 @@ def place_entry_order(kite, symbol: str, direction: str, quantity: int, exchange
     if filled > 0:
         logger.warning(f"ENTRY CONFIRMATION PENDING: {symbol} {direction} -- {filled}/{quantity} "
                        f"confirmed so far, remainder still unresolved ({exec_result.status})")
-        return {"success": True, "order_id": order_id, "operation_id": operation_id, "status": exec_result.status,
+        return {"success": True, "order_id": order_id, "operation_id": operation_id,
+                "client_tag": client_tag, "status": exec_result.status,
                 "reason": "partial fill confirmed, remainder still pending", "requested_quantity": quantity,
                 "filled_quantity": filled, "average_price": exec_result.average_price,
                 "entry_confirmation_pending": True, "resolved": False}
 
     logger.warning(f"ENTRY CONFIRMATION PENDING: {symbol} {direction} -- no fill confirmed yet ({exec_result.status})")
-    return {"success": False, "order_id": order_id, "operation_id": operation_id, "status": exec_result.status,
+    return {"success": False, "order_id": order_id, "operation_id": operation_id,
+            "client_tag": client_tag, "status": exec_result.status,
             "reason": "no confirmed fill yet, order still unresolved", "requested_quantity": quantity,
             "filled_quantity": 0, "average_price": None, "entry_confirmation_pending": True, "resolved": False}
 
