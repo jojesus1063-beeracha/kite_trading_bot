@@ -2036,6 +2036,36 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             f"| unrealized {unrealized:+.2f}")
 
 
+def _is_previous_day_mis_entry(order, cfg, now=None):
+    """Return True when an ENTRY record cannot represent today's MIS exposure.
+
+    MIS positions are intraday-only.  A resolved fill from a previous date may
+    still need an accounting marker, but it must never be reconstructed as a
+    live position on a later trading day.  Aware timestamps are converted to
+    the VM's current timezone; legacy naive timestamps are treated as local.
+    """
+
+    if str(getattr(cfg, "PRODUCT", "")).upper() != "MIS":
+        return False
+
+    created_at = order.get("created_at")
+
+    if not isinstance(created_at, str) or not created_at.strip():
+        return False
+
+    try:
+        created = datetime.fromisoformat(created_at)
+    except (TypeError, ValueError):
+        return False
+
+    current = now or datetime.now().astimezone()
+
+    if created.tzinfo is not None:
+        created = created.astimezone(current.tzinfo)
+
+    return created.date() < current.date()
+
+
 def recover_unresolved_entries(kite, open_positions, cfg, positions_path=None):
     """
     Recover tagged submissions, unresolved broker orders, and terminal
@@ -2062,10 +2092,56 @@ def recover_unresolved_entries(kite, open_positions, cfg, positions_path=None):
         if order["action"] == "ENTRY"
     ]
     unapplied_entries = list_entry_orders_requiring_local_application()
-    entries_by_id = {
+    candidate_entries = {
         order["operation_id"]: order
         for order in unresolved_entries + unapplied_entries
     }
+
+    entries_by_id = {}
+    stale_unresolved = []
+
+    for operation_id, order in candidate_entries.items():
+        if not _is_previous_day_mis_entry(order, cfg):
+            entries_by_id[operation_id] = order
+            continue
+
+        confirmed = int(order.get("filled_quantity") or 0)
+        applied = int(order.get("applied_filled_quantity") or 0)
+
+        if not order.get("resolved", False):
+            stale_unresolved.append(order)
+            logger.critical(
+                "Previous-day unresolved MIS ENTRY blocked startup "
+                f"recovery for {order.get('exchange')}:{order.get('symbol')} "
+                f"(operation_id={operation_id}). The record will not be "
+                "verified against today's order book or reconstructed as "
+                "current exposure; manual reconciliation is required."
+            )
+            continue
+
+        if confirmed > applied:
+            mark_entry_fill_applied(
+                operation_id,
+                confirmed,
+            )
+
+        logger.warning(
+            "Previous-day resolved MIS ENTRY suppressed for "
+            f"{order.get('exchange')}:{order.get('symbol')} "
+            f"(operation_id={operation_id}, confirmed={confirmed}, "
+            f"previously_applied={applied}). Historical intraday fills "
+            "will not be reconstructed as today's local position."
+        )
+
+    if stale_unresolved:
+        symbols = sorted({
+            str(order.get("symbol") or "UNKNOWN")
+            for order in stale_unresolved
+        })
+        raise RuntimeError(
+            "previous-day unresolved MIS ENTRY records require manual "
+            f"reconciliation before startup: {symbols}"
+        )
 
     if not entries_by_id:
         return

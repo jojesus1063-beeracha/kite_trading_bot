@@ -1,8 +1,11 @@
 """Focused, broker-free tests for confirmed-entry protection integration."""
 
 import contextlib
+import importlib
 import os
+import sys
 import tempfile
+import types
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -25,6 +28,26 @@ from protective_stop_store import (
     create_protective_stop_intent,
     get_protective_stop,
 )
+
+
+def import_main_for_test():
+    """Import main without requiring optional broker/network packages locally."""
+
+    try:
+        import kiteconnect  # noqa: F401
+    except ModuleNotFoundError:
+        kiteconnect = types.ModuleType("kiteconnect")
+        kiteconnect.KiteConnect = MagicMock
+        sys.modules["kiteconnect"] = kiteconnect
+
+    try:
+        import requests  # noqa: F401
+    except ModuleNotFoundError:
+        requests = types.ModuleType("requests")
+        requests.get = MagicMock()
+        sys.modules["requests"] = requests
+
+    return importlib.import_module("main")
 
 
 @contextlib.contextmanager
@@ -473,6 +496,137 @@ def test_confirmed_fill_remains_recoverable_until_locally_applied():
         assert not pending_order_store.list_entry_orders_requiring_local_application(
             path
         )
+
+
+def test_previous_day_resolved_mis_fill_is_never_reconstructed():
+    from datetime import datetime, timedelta
+
+    main_module = import_main_for_test()
+
+    cfg = entry_cfg()
+
+    with isolated_pending_store() as path:
+        operation_id = pending_order_store.create_order_intent(
+            "AAVAS",
+            "NSE",
+            "ENTRY",
+            "BUY",
+            3,
+            path=path,
+            client_tag="KBE12345678901234567",
+        )
+        pending_order_store.attach_broker_order_id(
+            operation_id,
+            "ENTRY-YESTERDAY-1",
+            path=path,
+        )
+        verification = SimpleNamespace(
+            filled_quantity=3,
+            pending_quantity=0,
+            cancelled_quantity=0,
+            average_price=1448.8,
+            status="COMPLETE",
+            terminal=True,
+            status_message=None,
+            exchange_order_id="EX-YESTERDAY-1",
+            history_attempts=1,
+            api_error_count=0,
+        )
+        pending_order_store.update_order_verification(
+            operation_id,
+            verification,
+            path=path,
+        )
+        pending_order_store.mark_order_resolved(
+            operation_id,
+            path=path,
+        )
+
+        data = pending_order_store.load_pending_orders(path)
+        record = next(
+            item
+            for item in data["orders"]
+            if item["operation_id"] == operation_id
+        )
+        record["created_at"] = (
+            datetime.now() - timedelta(days=1)
+        ).isoformat()
+        pending_order_store.save_pending_orders(data, path)
+
+        open_positions = {}
+        kite = MagicMock()
+
+        main_module.recover_unresolved_entries(
+            kite,
+            open_positions,
+            cfg,
+            positions_path=path + ".positions",
+        )
+
+        assert open_positions == {}
+        assert kite.order_history.call_count == 0
+        assert kite.place_order.call_count == 0
+        assert not pending_order_store.list_entry_orders_requiring_local_application(
+            path
+        )
+
+        updated = pending_order_store.get_order(
+            operation_id,
+            path=path,
+        )
+        assert updated["applied_filled_quantity"] == 3
+
+
+def test_previous_day_unresolved_mis_entry_fails_startup_closed():
+    from datetime import datetime, timedelta
+
+    main_module = import_main_for_test()
+
+    cfg = entry_cfg()
+
+    with isolated_pending_store() as path:
+        operation_id = pending_order_store.create_order_intent(
+            "ASHOKLEY",
+            "NSE",
+            "ENTRY",
+            "BUY",
+            31,
+            path=path,
+            client_tag="KBE12345678901234567",
+        )
+
+        data = pending_order_store.load_pending_orders(path)
+        record = next(
+            item
+            for item in data["orders"]
+            if item["operation_id"] == operation_id
+        )
+        record["created_at"] = (
+            datetime.now() - timedelta(days=1)
+        ).isoformat()
+        pending_order_store.save_pending_orders(data, path)
+
+        open_positions = {}
+        kite = MagicMock()
+
+        try:
+            main_module.recover_unresolved_entries(
+                kite,
+                open_positions,
+                cfg,
+                positions_path=path + ".positions",
+            )
+        except RuntimeError as exc:
+            assert "previous-day unresolved MIS ENTRY" in str(exc)
+        else:
+            raise AssertionError(
+                "previous-day unresolved MIS entry did not block startup"
+            )
+
+        assert open_positions == {}
+        assert kite.orders.call_count == 0
+        assert kite.order_history.call_count == 0
+        assert kite.place_order.call_count == 0
 
 
 class StopRecoveryKite:
