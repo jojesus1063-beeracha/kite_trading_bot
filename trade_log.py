@@ -36,6 +36,9 @@ TRADE_ANALYTICS_FIELDS = {
     "adx_delta",
     "relative_strength_score",
     "relative_strength_detail",
+    "market_trend_reason",
+    "sector_trend",
+    "sector_trend_reason",
     "mfe_pct",
     "mae_pct",
 }
