@@ -27,6 +27,7 @@ from data_feed import (
     get_company_name,
     get_instrument_token,
 )
+from candle_cache import LIVE_CANDLE_CACHE
 from indicators import add_indicators, atr as atr_indicator
 from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_row
 from patterns import is_bear_trap, is_bull_trap
@@ -78,6 +79,7 @@ from protective_stop_store import (
 )
 from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
+from scan_latency import build_entry_timing, select_scan_universe
 from cooperative_position_monitor import CooperativeScanMonitor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -121,6 +123,11 @@ _TRADE_ANALYTICS_FIELDS = (
     "market_trend_reason",
     "sector_trend",
     "sector_trend_reason",
+    "signal_candle_start",
+    "signal_candle_close",
+    "scan_started_at",
+    "order_submitted_at",
+    "entry_delay_seconds",
     "mfe_pct",
     "mae_pct",
 )
@@ -240,7 +247,16 @@ def _cooperative_position_check_if_due(
     return checked_symbols
 
 
-def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
+def run_full_scan(
+    kite,
+    symbols,
+    tokens,
+    exchange_map,
+    open_positions,
+    risk,
+    *,
+    scan_started_at=None,
+):
     """
     One full pass over the watchlist: manage open positions (via
     check_position_exit) and look for new entries on everything else.
@@ -252,8 +268,35 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
     Returns status_this_cycle (list of per-symbol status dicts), same
     as the original loop produced for save_bot_status().
     """
-    symbols_to_check = list(dict.fromkeys(symbols + list(open_positions.keys())))
+    scan_started_at = scan_started_at or datetime.now()
+    (
+        shortlisted_symbols,
+        symbols_to_check,
+        excluded_symbols,
+    ) = select_scan_universe(
+        symbols,
+        open_positions.keys(),
+        getattr(
+            cfg,
+            "ENTRY_SCAN_SHORTLIST_SIZE",
+            30,
+        ),
+    )
     status_this_cycle = []
+    status_this_cycle.extend(
+        {
+            "symbol": symbol,
+            "status": "not in current priority shortlist",
+        }
+        for symbol in excluded_symbols
+    )
+
+    logger.info(
+        "Entry scan universe "
+        f"| watchlist={len(symbols)} "
+        f"| shortlisted={len(shortlisted_symbols)} "
+        f"| open_positions={len(open_positions)}"
+    )
 
     # Symbols with positions at scan start cannot be reopened during
     # the same scan if a cooperative stop/target check closes them.
@@ -368,10 +411,43 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             continue
 
         exchange = exchange_map[symbol]
-        df_15m = fetch_candles(kite, token, cfg.TREND_TIMEFRAME, lookback_days=5)
-        time.sleep(0.5)
-        df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=5)
-        time.sleep(0.5)
+        candle_fetch_time = datetime.now()
+
+        if getattr(
+            cfg,
+            "ENABLE_CANDLE_ALIGNED_POLLING",
+            False,
+        ):
+            df_15m = LIVE_CANDLE_CACHE.get(
+                kite,
+                token,
+                cfg.TREND_TIMEFRAME,
+                lookback_days=5,
+                now=candle_fetch_time,
+                fetcher=fetch_candles,
+            )
+            df_5m = LIVE_CANDLE_CACHE.get(
+                kite,
+                token,
+                cfg.ENTRY_TIMEFRAME,
+                lookback_days=5,
+                now=candle_fetch_time,
+                require_advance=True,
+                fetcher=fetch_candles,
+            )
+        else:
+            df_15m = fetch_candles(
+                kite,
+                token,
+                cfg.TREND_TIMEFRAME,
+                lookback_days=5,
+            )
+            df_5m = fetch_candles(
+                kite,
+                token,
+                cfg.ENTRY_TIMEFRAME,
+                lookback_days=5,
+            )
         if df_15m.empty or df_5m.empty:
             status_this_cycle.append({"symbol": symbol, "status": "no candle data"})
             continue
@@ -783,6 +859,12 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
         signal = candidate["signal"]
         df_5m = candidate["df_5m"]
         _snapshot_row = candidate["snapshot_row"]
+        pre_order_timing = build_entry_timing(
+            signal.timestamp,
+            cfg.ENTRY_TIMEFRAME,
+            scan_started_at=scan_started_at,
+            order_submitted_at=scan_started_at,
+        )
 
         candidate_event_context = {
             "symbol": symbol,
@@ -808,6 +890,15 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             "signal_stop": signal.stop_loss,
             "signal_target": signal.target,
             "signal_timestamp": signal.timestamp,
+            "signal_candle_start": pre_order_timing[
+                "signal_candle_start"
+            ],
+            "signal_candle_close": pre_order_timing[
+                "signal_candle_close"
+            ],
+            "scan_started_at": pre_order_timing[
+                "scan_started_at"
+            ],
             "technical_confidence": signal.confidence,
             "market_alignment": signal.market_alignment,
             "market_trend": candidate.get("market_trend"),
@@ -856,6 +947,15 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             "sector_trend_reason": candidate.get(
                 "sector_trend_reason"
             ),
+            "signal_candle_start": pre_order_timing[
+                "signal_candle_start"
+            ],
+            "signal_candle_close": pre_order_timing[
+                "signal_candle_close"
+            ],
+            "scan_started_at": pre_order_timing[
+                "scan_started_at"
+            ],
         }
 
         if (
@@ -1018,6 +1118,24 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
         tick_size = get_cached_instrument_tick_size(
             symbol,
             exchange,
+        )
+        order_timing = build_entry_timing(
+            signal.timestamp,
+            cfg.ENTRY_TIMEFRAME,
+            scan_started_at=scan_started_at,
+            order_submitted_at=datetime.now(),
+        )
+        signal_analytics.update(order_timing)
+        logger.info(
+            f"{symbol}: entry submission timing "
+            f"| signal_close="
+            f"{order_timing['signal_candle_close']} "
+            f"| scan_started="
+            f"{order_timing['scan_started_at']} "
+            f"| order_submitted="
+            f"{order_timing['order_submitted_at']} "
+            f"| delay_seconds="
+            f"{order_timing['entry_delay_seconds']:.3f}"
         )
         entry_plan = build_entry_plan(
             signal,

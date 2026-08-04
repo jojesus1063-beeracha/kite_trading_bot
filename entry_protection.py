@@ -27,6 +27,11 @@ SIGNAL_ANALYTICS_FIELDS = {
     "market_trend_reason",
     "sector_trend",
     "sector_trend_reason",
+    "signal_candle_start",
+    "signal_candle_close",
+    "scan_started_at",
+    "order_submitted_at",
+    "entry_delay_seconds",
 }
 
 

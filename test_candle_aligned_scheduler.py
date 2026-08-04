@@ -178,9 +178,17 @@ cfg.ENABLE_CANDLE_ALIGNED_POLLING = False
 check("Simulation ran to completion without crashing", ran_to_completion)
 check("At least 3 full scans occurred over the simulated window", len(scan_calls) >= 3)
 
-# Every scan timestamp should land at a 5-min candle boundary + 8s buffer
-all_aligned = all(t.minute % 5 == 0 and t.second == 8 for t in scan_calls)
-check("Every scan occurred exactly at a completed candle boundary + buffer (:X0/:X5 + 8s)", all_aligned)
+# Every scan timestamp should land at a 5-min candle boundary plus the
+# configured broker-finalisation safety buffer.
+all_aligned = all(
+    t.minute % 5 == 0
+    and t.second == cfg.SCAN_BUFFER_SECONDS
+    for t in scan_calls
+)
+check(
+    "Every scan occurred at a completed candle boundary plus the configured buffer",
+    all_aligned,
+)
 
 # No duplicate scans for the same candle
 scan_minutes = [t.minute for t in scan_calls]
