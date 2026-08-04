@@ -174,7 +174,9 @@ PAPER_TRADING = True
 # is byte-for-byte identical either way.
 ENABLE_CANDLE_ALIGNED_POLLING = False
 POSITION_CHECK_SECONDS = 25   # how often to check open positions between scans
-SCAN_BUFFER_SECONDS = 8       # wait this long after a candle closes before scanning
+CANDLE_COMPLETION_BUFFER_SECONDS = 10
+SCAN_BUFFER_SECONDS = 12      # broker finalisation buffer + 2s safety margin
+ENTRY_SCAN_SHORTLIST_SIZE = 30  # top daily auto-watchlist priorities
 
 # Sanity-check thresholds -- purely observational, log-only. Never skip
 # or alter any trading action based on these; they just surface timing
@@ -259,7 +261,11 @@ if os.path.exists(_USER_CONFIG_PATH):
     ADX_DYNAMIC_STRONG = _overrides.get("adx_dynamic_strong", ADX_DYNAMIC_STRONG)
     ENABLE_CANDLE_ALIGNED_POLLING = _overrides.get("enable_candle_aligned_polling", ENABLE_CANDLE_ALIGNED_POLLING)
     POSITION_CHECK_SECONDS = _overrides.get("position_check_seconds", POSITION_CHECK_SECONDS)
-    SCAN_BUFFER_SECONDS = _overrides.get("scan_buffer_seconds", SCAN_BUFFER_SECONDS)
+    ENTRY_SCAN_SHORTLIST_SIZE = int(_overrides.get("entry_scan_shortlist_size", ENTRY_SCAN_SHORTLIST_SIZE))
+    SCAN_BUFFER_SECONDS = max(
+        int(_overrides.get("scan_buffer_seconds", SCAN_BUFFER_SECONDS)),
+        CANDLE_COMPLETION_BUFFER_SECONDS + 2,
+    )
     SCHEDULER_WARNING_SCAN_SECONDS = _overrides.get("scheduler_warning_scan_seconds", SCHEDULER_WARNING_SCAN_SECONDS)
     SCHEDULER_CRITICAL_SCAN_SECONDS = _overrides.get("scheduler_critical_scan_seconds", SCHEDULER_CRITICAL_SCAN_SECONDS)
     POSITION_CHECK_WARNING_SECONDS = _overrides.get("position_check_warning_seconds", POSITION_CHECK_WARNING_SECONDS)
