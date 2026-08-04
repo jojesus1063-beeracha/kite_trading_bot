@@ -53,6 +53,13 @@ def run_case(exit_result):
         "fetch_candles": main_module.fetch_candles,
         "sleep": main_module.time.sleep,
         "place_exit_order": main_module.place_exit_order,
+        "inspect_stop": main_module.inspect_protective_stop,
+        "apply_stop": (
+            main_module._apply_confirmed_protective_stop_fill
+        ),
+        "prepare_stop": (
+            main_module._prepare_protective_stop_for_exit
+        ),
         "record_trade": main_module.record_trade,
         "save_positions": main_module.save_positions,
         "fixed_target": getattr(
@@ -111,6 +118,39 @@ def run_case(exit_result):
             )
         )
 
+        main_module.inspect_protective_stop = (
+            lambda *args, **kwargs: {
+                "success": True,
+                "state": "ACTIVE",
+                "active": True,
+                "confirmation_pending": False,
+                "exit_coordination_requested": False,
+            }
+        )
+        main_module._apply_confirmed_protective_stop_fill = (
+            lambda *args, **kwargs: {
+                "success": True,
+                "position_closed": False,
+                "remaining_quantity": 10,
+                "status": "ACTIVE",
+            }
+        )
+        main_module._prepare_protective_stop_for_exit = (
+            lambda *args, **kwargs: {
+                "proceed": True,
+                "position_closed": False,
+                "clearance": {
+                    "safe_to_submit_exit": True,
+                    "symbol": "TEST",
+                    "exchange": "NSE",
+                    "quantity": 10,
+                    "exit_action": "EXIT",
+                    "protective_stop_state": "CANCELLED",
+                },
+                "status": "STOP_TERMINAL_CANCELLED",
+            }
+        )
+
         def fake_record_trade(*args, **kwargs):
             trades.append(
                 {
@@ -151,6 +191,15 @@ def run_case(exit_result):
         main_module.time.sleep = originals["sleep"]
         main_module.place_exit_order = originals[
             "place_exit_order"
+        ]
+        main_module.inspect_protective_stop = originals[
+            "inspect_stop"
+        ]
+        main_module._apply_confirmed_protective_stop_fill = originals[
+            "apply_stop"
+        ]
+        main_module._prepare_protective_stop_for_exit = originals[
+            "prepare_stop"
         ]
         main_module.record_trade = originals[
             "record_trade"

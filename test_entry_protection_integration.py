@@ -155,6 +155,8 @@ def test_full_fill_places_one_stop_for_confirmed_quantity():
     assert calls[0]["quantity"] == 10
     assert calls[0]["confirmed_entry_price"] == 101.0
     assert position["entry_protected"] is True
+    assert position["automated_exit_blocked"] is False
+    assert position["manual_reconciliation_required"] is False
     assert position["protective_stop_quantity"] == 10
     assert position["protective_stop_order_id"] == "STOP-1"
 
@@ -269,6 +271,7 @@ def test_active_stop_with_insufficient_quantity_remains_blocked():
         "PROTECTION_QUANTITY_MISMATCH"
     )
     assert position["manual_reconciliation_required"] is True
+    assert position["automated_exit_blocked"] is True
 
 
 def test_main_persists_pending_exposure_before_stop_side_effect():

@@ -501,6 +501,7 @@ def _place_exit_order(
     exchange: str,
     cfg,
     action: str,
+    protection_clearance=None,
 ):
     """
     Shared verified execution for normal EXIT and FORCE_EXIT orders.
@@ -517,7 +518,9 @@ def _place_exit_order(
       4. Verify using order_history().
       5. Return only confirmed filled quantity and broker average price.
 
-    Force-square-off integration is intentionally deferred to Stage 5.
+    Live callers must also provide a clearance bound to this exact order.
+    The clearance proves that the broker protective stop reached a
+    terminal state before a potentially competing market exit is sent.
     """
 
     if action not in ("EXIT", "FORCE_EXIT"):
@@ -590,6 +593,19 @@ def _place_exit_order(
             "exit_confirmation_pending": False,
             "resolved": True,
         }
+
+    from protective_stop_exit import valid_exit_clearance
+
+    if not valid_exit_clearance(
+        protection_clearance,
+        symbol=symbol,
+        exchange=exchange,
+        quantity=quantity,
+        exit_action=action,
+    ):
+        return rejected(
+            f"{action}_BLOCKED_PROTECTIVE_STOP_NOT_CLEARED"
+        )
 
     from pending_order_store import (
         create_order_intent,
@@ -792,6 +808,8 @@ def place_exit_order(
     quantity: int,
     exchange: str,
     cfg,
+    *,
+    protection_clearance=None,
 ):
     """Submit and verify a normal strategy-triggered exit."""
     return _place_exit_order(
@@ -802,6 +820,7 @@ def place_exit_order(
         exchange,
         cfg,
         action="EXIT",
+        protection_clearance=protection_clearance,
     )
 
 
@@ -812,6 +831,8 @@ def place_force_exit_order(
     quantity: int,
     exchange: str,
     cfg,
+    *,
+    protection_clearance=None,
 ):
     """Submit and verify an end-of-day forced exit."""
     return _place_exit_order(
@@ -822,4 +843,5 @@ def place_force_exit_order(
         exchange,
         cfg,
         action="FORCE_EXIT",
+        protection_clearance=protection_clearance,
     )

@@ -239,6 +239,14 @@ def run_partial_to_complete_test(tmp):
             )["resolved"] is False,
         )
 
+        check(
+            "1g. Remaining quantity stays blocked from automatic retry",
+            positions["RECOVER"]["automated_exit_blocked"] is True
+            and positions["RECOVER"][
+                "manual_reconciliation_required"
+            ] is True,
+        )
+
         # Running recovery again with exactly the same cumulative
         # broker fill must apply nothing.
         main_module.recover_unresolved_exits(
@@ -397,6 +405,14 @@ def run_rejected_test(tmp):
             )["resolved"] is True,
         )
 
+        check(
+            "4d. Rejected exit leaves the unprotected position blocked",
+            positions["REJECTREC"]["automated_exit_blocked"] is True
+            and positions["REJECTREC"][
+                "manual_reconciliation_required"
+            ] is True,
+        )
+
     finally:
         main_module.save_positions = (
             original_save_positions
@@ -463,6 +479,14 @@ def run_no_order_id_test(tmp):
         pending_order_store.get_order(
             operation_id
         )["resolved"] is False,
+    )
+
+    check(
+        "5d. Unknown submission outcome blocks automatic retry",
+        positions["NOORDERID"]["automated_exit_blocked"] is True
+        and positions["NOORDERID"][
+            "manual_reconciliation_required"
+        ] is True,
     )
 
 
