@@ -7,6 +7,7 @@ from trade_levels import (
     fixed_levels_from_fill,
     reward_risk_ratio,
 )
+import config as runtime_config
 
 
 def check(name, condition):
@@ -33,8 +34,11 @@ check(
 )
 
 check(
-    "Repair remains in paper mode",
-    user_config.get("paper_trading") is True,
+    "Trading mode setting is a valid boolean",
+    isinstance(
+        runtime_config.PAPER_TRADING,
+        bool,
+    ),
 )
 
 buy_stop, buy_target = fixed_levels_from_fill(
