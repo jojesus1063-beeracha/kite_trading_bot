@@ -272,3 +272,17 @@ if os.path.exists(_USER_CONFIG_PATH):
     POSITION_CHECK_CRITICAL_SECONDS = _overrides.get("position_check_critical_seconds", POSITION_CHECK_CRITICAL_SECONDS)
     SCAN_DELAY_WARNING_SECONDS = _overrides.get("scan_delay_warning_seconds", SCAN_DELAY_WARNING_SECONDS)
     SCAN_DELAY_CRITICAL_SECONDS = _overrides.get("scan_delay_critical_seconds", SCAN_DELAY_CRITICAL_SECONDS)
+
+# ---------------------------------------------------------------------
+# WebSocket candle engine (opt-in infrastructure change)
+# ---------------------------------------------------------------------
+ENABLE_WS_CANDLES = False
+WS_CANDLE_MODE = "shadow"  # "shadow" or "live" -- ignored while ENABLE_WS_CANDLES is False
+WS_SECTOR_INDICES = []
+WS_INDICATOR_SHADOW_INTERVAL_MINUTES = 30
+WS_STALE_TICK_SECONDS = 5.0
+WS_ENTRY_TICK_MAX_AGE_SECONDS = 2.0
+WS_MAX_SPREAD_PCT = 0.5
+WS_MAX_SLIPPAGE_PCT = 0.15
+MAX_ADVERSE_MOVE_PCT = None
+MAX_ABSOLUTE_DRIFT_PCT = None
