@@ -297,3 +297,15 @@ EMA200_LOOKBACK = 250
 EMA200_ALLOW_TOUCH = False
 EMA200_MIN_DISTANCE_PCT = 0.10
 EMA200_SLOPE_LOOKBACK = 5
+
+# ---------------------------------------------------------------------
+# EMA200 directional signal eligibility gate (opt-in, distinct from
+# ENABLE_200_EMA_FILTER above). This gate runs after evaluate() creates
+# a candidate signal and rejects directions that conflict with the
+# stock's EMA200 classification. ENABLE_200_EMA_FILTER is the stricter
+# slope-and-distance-aware confirmation. Both can run together.
+# ---------------------------------------------------------------------
+ENABLE_EMA200_WATCHLIST = True
+ENABLE_RVOL_FILTER = True
+RVOL_LOOKBACK = 20
+RVOL_THRESHOLD = 1.5
