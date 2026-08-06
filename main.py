@@ -29,6 +29,8 @@ from data_feed import (
 )
 from candle_cache import LIVE_CANDLE_CACHE
 import candle_provider
+from watchlist_filters import classify_direction_eligibility, format_watchlist_log, NOT_ENABLED
+from rvol import passes_rvol_threshold, format_rvol_log
 from indicators import add_indicators, atr as atr_indicator
 from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_row
 from patterns import is_bear_trap, is_bull_trap
@@ -471,6 +473,31 @@ def run_full_scan(
 
         df_15m, df_5m = add_indicators(df_15m, df_5m, cfg)
         signal = evaluate(symbol, df_15m, df_5m, cfg)
+
+        if signal:
+            eligibility, elig_detail = classify_direction_eligibility(df_15m, cfg)
+            if eligibility not in (NOT_ENABLED, signal.direction):
+                logger.info(format_watchlist_log(symbol, eligibility, elig_detail) +
+                            f" | signal direction={signal.direction} REJECTED -- watchlist ineligible for this side")
+                signal = None
+
+        if signal:
+            rvol_passes, rvol_value, rvol_detail = passes_rvol_threshold(
+                df_5m,
+                cfg,
+            )
+            if not rvol_passes:
+                logger.info(
+                    format_rvol_log(symbol, rvol_value, rvol_detail)
+                    + f" | signal direction={signal.direction} REJECTED -- "
+                      "RVOL confirmation failed"
+                )
+                signal = None
+            elif getattr(cfg, "ENABLE_RVOL_FILTER", False):
+                logger.info(
+                    format_rvol_log(symbol, rvol_value, rvol_detail)
+                    + f" | signal direction={signal.direction} ACCEPTED"
+                )
 
         if signal:
             _snapshot_row = latest_completed_15m_row(df_15m, signal.timestamp)
