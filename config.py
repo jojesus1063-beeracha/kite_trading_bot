@@ -75,12 +75,12 @@ ADX_DYNAMIC_STRONG = 35  # at/above this -> VERY_STRONG
 # ---------------------------------------------------------------------
 RISK_REWARD_MIN = 2.0          # minimum reward:risk ratio (1:2)
 RISK_PER_TRADE_PCT = 1.0       # % of capital risked per trade
-MAX_TRADES_PER_DAY = 4
-MAX_OPEN_POSITIONS = 5          # cap on simultaneous different-symbol positions
+MAX_TRADES_PER_DAY = 100
+MAX_OPEN_POSITIONS = 10          # cap on simultaneous different-symbol positions
 MAX_POSITION_SIZE_PCT = 20.0     # no single position's notional value (qty * entry) exceeds this % of CAPITAL
 CHECK_MARGIN_BEFORE_ENTRY = True # verify real Zerodha margin via order_margins() before placing a live entry order
 MAX_DAILY_LOSS_PCT = 3.0       # kill-switch: stop trading if daily loss exceeds this %
-CAPITAL = float(os.environ.get("TRADING_CAPITAL", "100000"))  # your intraday capital, INR
+CAPITAL = float(os.environ.get("TRADING_CAPITAL", "5000"))  # your intraday capital, INR
 
 # Stop-loss is placed at the low (long) / high (short) of the signal
 # candle, minus/plus a small buffer to avoid getting stopped out by
@@ -125,7 +125,7 @@ SUPPORT_RESISTANCE_LOOKBACK = 30
 MIN_DISTANCE_TO_SR_PERCENT = 0.5
 
 STOP_LOSS_PERCENT = 0.45  # fixed stop measured from confirmed fill
-PROFIT_TARGET_PERCENT = 1.50  # fixed profit target, replaces trailing-stop-based
+PROFIT_TARGET_PERCENT = 0.70  # fixed profit target, replaces trailing-stop-based
                                 # exits entirely when ENABLE_FIXED_TARGET is True
 ENABLE_FIXED_TARGET = True
 ENABLE_TRAILING_STOP = False  # disabled when fixed-target mode is on -- the whole
@@ -172,7 +172,7 @@ PAPER_TRADING = True
 # are checked (stop-loss/target), on a much shorter interval, without
 # fetching/evaluating the rest of the watchlist. Trading logic itself
 # is byte-for-byte identical either way.
-ENABLE_CANDLE_ALIGNED_POLLING = False
+ENABLE_CANDLE_ALIGNED_POLLING = True
 POSITION_CHECK_SECONDS = 25   # how often to check open positions between scans
 CANDLE_COMPLETION_BUFFER_SECONDS = 10
 SCAN_BUFFER_SECONDS = 12      # broker finalisation buffer + 2s safety margin
@@ -276,8 +276,8 @@ if os.path.exists(_USER_CONFIG_PATH):
 # ---------------------------------------------------------------------
 # WebSocket candle engine (opt-in infrastructure change)
 # ---------------------------------------------------------------------
-ENABLE_WS_CANDLES = False
-WS_CANDLE_MODE = "shadow"  # "shadow" or "live" -- ignored while ENABLE_WS_CANDLES is False
+ENABLE_WS_CANDLES = True
+WS_CANDLE_MODE = "live"  # "shadow" or "live" -- ignored while ENABLE_WS_CANDLES is False
 WS_SECTOR_INDICES = []
 WS_INDICATOR_SHADOW_INTERVAL_MINUTES = 30
 WS_STALE_TICK_SECONDS = 5.0

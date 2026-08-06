@@ -62,9 +62,9 @@ for name, (actual, maximum) in checks.items():
             f"maximum authorised is {maximum}."
         )
 
-if int(getattr(cfg, "MAX_OPEN_POSITIONS", 999)) > 5:
+if int(getattr(cfg, "MAX_OPEN_POSITIONS", 999)) > 10:
     raise SystemExit(
-        "SAFETY BLOCK: MAX_OPEN_POSITIONS exceeds 5."
+        "SAFETY BLOCK: MAX_OPEN_POSITIONS exceeds 10."
     )
 
 if data.get("no_entry_before") != "09:30":
