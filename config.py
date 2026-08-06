@@ -305,7 +305,7 @@ EMA200_SLOPE_LOOKBACK = 5
 # stock's EMA200 classification. ENABLE_200_EMA_FILTER is the stricter
 # slope-and-distance-aware confirmation. Both can run together.
 # ---------------------------------------------------------------------
-ENABLE_EMA200_WATCHLIST = False
-ENABLE_RVOL_FILTER = False
+ENABLE_EMA200_WATCHLIST = True
+ENABLE_RVOL_FILTER = True
 RVOL_LOOKBACK = 20
 RVOL_THRESHOLD = 1.5
