@@ -290,7 +290,7 @@ MAX_ABSOLUTE_DRIFT_PCT = None
 # ---------------------------------------------------------------------
 # Higher-timeframe 200 EMA trend confirmation filter (opt-in)
 # ---------------------------------------------------------------------
-ENABLE_200_EMA_FILTER = False
+ENABLE_200_EMA_FILTER = True
 EMA200_TIMEFRAME = "15minute"
 EMA200_PERIOD = 200
 EMA200_LOOKBACK = 250
