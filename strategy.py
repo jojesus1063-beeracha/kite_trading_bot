@@ -1,75 +1,37 @@
-"""
-Strategy engine.
-
-Trend filter (15-min):
-  Uptrend   -> close > ema_fast > ema_slow AND close > vwap
-  Downtrend -> close < ema_fast < ema_slow AND close < vwap
-  If cfg.USE_ADX_FILTER is True, the trend is only considered valid
-  when ADX (14) is above cfg.ADX_THRESHOLD — i.e. there's an actual
-  trend happening, not just price drifting above/below the EMAs in a
-  choppy market. This can be toggled off to compare with/without.
-
-Optional higher-timeframe 200 EMA confirmation (see trend_filters.py):
-  when cfg.ENABLE_200_EMA_FILTER is True, an already-determined BUY/SELL
-  direction must also agree with the 200 EMA's level and slope before a
-  Signal is returned. Defaults to False -- when disabled, this module's
-  behavior is unchanged from before trend_filters.py existed.
-
-Entry trigger (5-min), only taken in the direction of the current
-15-min trend:
-  Long  -> close > ema_entry AND volume > avg_volume * VOLUME_MULTIPLIER
-  Short -> close < ema_entry AND volume > avg_volume * VOLUME_MULTIPLIER
-
-Stop-loss: signal candle's low (long) / high (short), with a small buffer.
-Target: entry + (entry - stop) * RISK_REWARD_MIN  (i.e. minimum 1:2 reward:risk).
-A signal is only valid if that minimum reward:risk is achievable.
-"""
+"""Strategy engine for 15-minute trend and 5-minute entries."""
 
 import logging
-
-from trend_filters import evaluate_200ema_filter, format_rejection_log
-
-logger = logging.getLogger("strategy")
-
 from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
 
-from adx_confidence import resolve_adx_mode, adx_confidence
+from adx_confidence import adx_confidence, resolve_adx_mode
+from trend_filters import evaluate_200ema_filter, format_rejection_log
+from vwap_acceptance import evaluate_vwap_acceptance, format_vwap_acceptance_log
+
+logger = logging.getLogger("strategy")
 
 
 @dataclass
 class Signal:
     symbol: str
-    direction: str        # "BUY" or "SELL"
+    direction: str
     entry_price: float
     stop_loss: float
     target: float
     timestamp: pd.Timestamp
     reason: str
-    confidence: Optional[str] = None  # ADX dynamic-mode tier, or None if not applicable
-    market_alignment: Optional[str] = None  # market_trend.compute_market_alignment() result, or None if not set
-    news_sentiment: Optional[str] = None  # POSITIVE/NEGATIVE/NEUTRAL/UNKNOWN from news_filter.py, or None if not set
+    confidence: Optional[str] = None
+    market_alignment: Optional[str] = None
+    news_sentiment: Optional[str] = None
     news_headline: Optional[str] = None
-    news_confidence_score: Optional[float] = None  # numeric 0-100, technical base + news modifier
+    news_confidence_score: Optional[float] = None
     price_action_score: Optional[float] = None
     price_action_detail: Optional[dict] = None
 
 
 def get_trend(row_15m: pd.Series, cfg=None, require_vwap: bool = True) -> Optional[str]:
-    """
-    require_vwap=True (default): exact original behavior for stocks --
-    VWAP confirmation required, returns None if VWAP is NaN.
-
-    require_vwap=False: for instruments where VWAP is not meaningful
-    (indices like Nifty 50 / sector indices have no real traded volume,
-    so VWAP = cumulative(price*volume)/cumulative(volume) is always NaN
-    for them -- meaning get_trend() could previously NEVER classify an
-    index as UP/DOWN, always silently falling through to None/Sideways
-    regardless of real price action). When False, trend is determined
-    from EMA alignment alone, skipping the VWAP requirement entirely.
-    """
     if pd.isna(row_15m["ema_slow"]):
         return None
     if require_vwap and pd.isna(row_15m["vwap"]):
@@ -78,10 +40,10 @@ def get_trend(row_15m: pd.Series, cfg=None, require_vwap: bool = True) -> Option
     if cfg is not None and resolve_adx_mode(cfg) == "binary":
         adx_value = row_15m.get("adx")
         if pd.isna(adx_value) or adx_value < getattr(cfg, "ADX_THRESHOLD", 25):
-            return None  # market isn't trending strongly enough right now
+            return None
 
-    vwap_up_ok = True if not require_vwap else (row_15m["close"] > row_15m["vwap"])
-    vwap_down_ok = True if not require_vwap else (row_15m["close"] < row_15m["vwap"])
+    vwap_up_ok = True if not require_vwap else row_15m["close"] > row_15m["vwap"]
+    vwap_down_ok = True if not require_vwap else row_15m["close"] < row_15m["vwap"]
 
     if row_15m["close"] > row_15m["ema_fast"] > row_15m["ema_slow"] and vwap_up_ok:
         return "UP"
@@ -91,17 +53,17 @@ def get_trend(row_15m: pd.Series, cfg=None, require_vwap: bool = True) -> Option
 
 
 def latest_completed_15m_row(df_15m: pd.DataFrame, as_of: pd.Timestamp):
-    """Returns the exact row latest_completed_15m_trend() would use to
-    derive its decision -- lets callers log the RAW indicator snapshot
-    behind a trend/signal, not just the derived label, for auditability."""
     completed = df_15m[df_15m["date"] <= as_of]
     if completed.empty:
         return None
     return completed.iloc[-1]
 
 
-def latest_completed_15m_trend(df_15m: pd.DataFrame, as_of: pd.Timestamp, cfg=None) -> Optional[str]:
-    """Trend as of the most recently completed 15-min candle at or before `as_of`."""
+def latest_completed_15m_trend(
+    df_15m: pd.DataFrame,
+    as_of: pd.Timestamp,
+    cfg=None,
+) -> Optional[str]:
     completed = df_15m[df_15m["date"] <= as_of]
     if completed.empty:
         return None
@@ -109,47 +71,44 @@ def latest_completed_15m_trend(df_15m: pd.DataFrame, as_of: pd.Timestamp, cfg=No
 
 
 def get_trend_confidence(row_15m: pd.Series, cfg=None) -> Optional[str]:
-    """
-    Returns the ADX confidence tier for this row, independent of the
-    existing binary USE_ADX_FILTER check in get_trend(). Does not
-    affect get_trend()'s own decision -- purely additive/informational
-    unless the caller (evaluate()) explicitly acts on "dynamic" mode.
-    """
     if cfg is None:
         return None
-    adx_value = row_15m.get("adx")
-    return adx_confidence(adx_value, cfg)
+    return adx_confidence(row_15m.get("adx"), cfg)
 
 
-def latest_completed_15m_confidence(df_15m: pd.DataFrame, as_of: pd.Timestamp, cfg=None) -> Optional[str]:
-    """Companion to latest_completed_15m_trend() -- same row, confidence tier instead of direction."""
+def latest_completed_15m_confidence(
+    df_15m: pd.DataFrame,
+    as_of: pd.Timestamp,
+    cfg=None,
+) -> Optional[str]:
     completed = df_15m[df_15m["date"] <= as_of]
     if completed.empty:
         return None
     return get_trend_confidence(completed.iloc[-1], cfg)
 
 
+def _passes_vwap_acceptance(symbol: str, df_5m: pd.DataFrame, direction: str, cfg) -> bool:
+    status, detail = evaluate_vwap_acceptance(df_5m, direction, cfg)
+    if status == "FAIL":
+        logger.info(format_vwap_acceptance_log(symbol, status, detail))
+        return False
+    if status == "PASS":
+        logger.info(format_vwap_acceptance_log(symbol, status, detail))
+    return True
+
+
 def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Optional[Signal]:
-    """
-    Evaluate the strategy on the latest completed 5-min candle.
-    Returns a Signal if entry conditions are met, else None.
-    """
+    """Evaluate the latest completed 5-minute candle and return a signal."""
     if len(df_5m) < 2 or len(df_15m) < 1:
         return None
 
     curr = df_5m.iloc[-1]
-
     trend = latest_completed_15m_trend(df_15m, curr["date"], cfg)
     if trend is None:
         return None
     if pd.isna(curr["avg_volume"]) or pd.isna(curr["ema_entry"]):
         return None
 
-    # Additive: only affects behavior when cfg.ADX_MODE == "dynamic".
-    # In "off"/"binary" mode (today's default), confidence is computed
-    # for visibility/labeling only and never blocks a trade here --
-    # the existing get_trend() ADX check above already handles binary
-    # mode's pass/fail entirely on its own, unchanged.
     confidence = latest_completed_15m_confidence(df_15m, curr["date"], cfg)
     if resolve_adx_mode(cfg) == "dynamic" and confidence == "REJECTED":
         return None
@@ -157,6 +116,8 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
     volume_ok = curr["volume"] > curr["avg_volume"] * cfg.VOLUME_MULTIPLIER
 
     if trend == "UP" and curr["close"] > curr["ema_entry"] and volume_ok:
+        if not _passes_vwap_acceptance(symbol, df_5m, "BUY", cfg):
+            return None
         ema200_status, ema200_detail = evaluate_200ema_filter(df_15m, "BUY", cfg)
         if ema200_status == "FAIL":
             logger.info(format_rejection_log(symbol, ema200_status, ema200_detail))
@@ -167,7 +128,10 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         if risk <= 0:
             return None
         target = entry + risk * cfg.RISK_REWARD_MIN
-        reason = f"15m uptrend + 5m close above EMA{cfg.ENTRY_EMA} on above-avg volume"
+        reason = (
+            f"15m uptrend + 5m close above EMA{cfg.ENTRY_EMA} "
+            "on above-avg volume + VWAP acceptance"
+        )
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
         if confidence:
@@ -175,6 +139,8 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         return Signal(symbol, "BUY", entry, stop, target, curr["date"], reason, confidence=confidence)
 
     if trend == "DOWN" and curr["close"] < curr["ema_entry"] and volume_ok:
+        if not _passes_vwap_acceptance(symbol, df_5m, "SELL", cfg):
+            return None
         ema200_status, ema200_detail = evaluate_200ema_filter(df_15m, "SELL", cfg)
         if ema200_status == "FAIL":
             logger.info(format_rejection_log(symbol, ema200_status, ema200_detail))
@@ -186,7 +152,10 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         if risk <= 0:
             return None
         target = entry - risk * cfg.RISK_REWARD_MIN
-        reason = f"15m downtrend + 5m close below EMA{cfg.ENTRY_EMA} on above-avg volume"
+        reason = (
+            f"15m downtrend + 5m close below EMA{cfg.ENTRY_EMA} "
+            "on above-avg volume + VWAP acceptance"
+        )
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
         if confidence:
