@@ -286,3 +286,14 @@ WS_MAX_SPREAD_PCT = 0.5
 WS_MAX_SLIPPAGE_PCT = 0.15
 MAX_ADVERSE_MOVE_PCT = None
 MAX_ABSOLUTE_DRIFT_PCT = None
+
+# ---------------------------------------------------------------------
+# Higher-timeframe 200 EMA trend confirmation filter (opt-in)
+# ---------------------------------------------------------------------
+ENABLE_200_EMA_FILTER = False
+EMA200_TIMEFRAME = "15minute"
+EMA200_PERIOD = 200
+EMA200_LOOKBACK = 250
+EMA200_ALLOW_TOUCH = False
+EMA200_MIN_DISTANCE_PCT = 0.10
+EMA200_SLOPE_LOOKBACK = 5

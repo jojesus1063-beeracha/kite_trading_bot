@@ -9,6 +9,12 @@ Trend filter (15-min):
   trend happening, not just price drifting above/below the EMAs in a
   choppy market. This can be toggled off to compare with/without.
 
+Optional higher-timeframe 200 EMA confirmation (see trend_filters.py):
+  when cfg.ENABLE_200_EMA_FILTER is True, an already-determined BUY/SELL
+  direction must also agree with the 200 EMA's level and slope before a
+  Signal is returned. Defaults to False -- when disabled, this module's
+  behavior is unchanged from before trend_filters.py existed.
+
 Entry trigger (5-min), only taken in the direction of the current
 15-min trend:
   Long  -> close > ema_entry AND volume > avg_volume * VOLUME_MULTIPLIER
@@ -18,6 +24,12 @@ Stop-loss: signal candle's low (long) / high (short), with a small buffer.
 Target: entry + (entry - stop) * RISK_REWARD_MIN  (i.e. minimum 1:2 reward:risk).
 A signal is only valid if that minimum reward:risk is achievable.
 """
+
+import logging
+
+from trend_filters import evaluate_200ema_filter, format_rejection_log
+
+logger = logging.getLogger("strategy")
 
 from dataclasses import dataclass
 from typing import Optional
@@ -145,6 +157,10 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
     volume_ok = curr["volume"] > curr["avg_volume"] * cfg.VOLUME_MULTIPLIER
 
     if trend == "UP" and curr["close"] > curr["ema_entry"] and volume_ok:
+        ema200_status, ema200_detail = evaluate_200ema_filter(df_15m, "BUY", cfg)
+        if ema200_status == "FAIL":
+            logger.info(format_rejection_log(symbol, ema200_status, ema200_detail))
+            return None
         entry = curr["close"]
         stop = curr["low"] * (1 - cfg.SL_BUFFER_PCT / 100)
         risk = entry - stop
@@ -159,6 +175,10 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         return Signal(symbol, "BUY", entry, stop, target, curr["date"], reason, confidence=confidence)
 
     if trend == "DOWN" and curr["close"] < curr["ema_entry"] and volume_ok:
+        ema200_status, ema200_detail = evaluate_200ema_filter(df_15m, "SELL", cfg)
+        if ema200_status == "FAIL":
+            logger.info(format_rejection_log(symbol, ema200_status, ema200_detail))
+            return None
         entry = curr["close"]
         sell_buffer = getattr(cfg, "SL_BUFFER_PCT_SELL", None) or cfg.SL_BUFFER_PCT
         stop = curr["high"] * (1 + sell_buffer / 100)
