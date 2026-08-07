@@ -88,7 +88,28 @@ def latest_completed_15m_confidence(
     return get_trend_confidence(completed.iloc[-1], cfg)
 
 
-def _passes_vwap_acceptance(symbol: str, df_5m: pd.DataFrame, direction: str, cfg) -> bool:
+def _passes_vwap_acceptance(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, direction: str, cfg) -> bool:
+    # vwap_acceptance.py requires a "vwap" column on df_5m, but
+    # add_indicators() (indicators.py) only ever computes vwap on
+    # df_15m -- df_5m never gets one. Every call here would otherwise
+    # fail with "missing columns: vwap", 100% of the time, for every
+    # symbol, blocking every signal before any other filter ever runs.
+    #
+    # Fix: reuse the already-computed 15-min VWAP value, broadcast onto
+    # a COPY of df_5m (never mutate the caller's original df_5m, which
+    # is used elsewhere in evaluate() and by the caller after this
+    # returns) so every 5-min row in the acceptance window shares the
+    # same VWAP reference -- consistent with how VWAP is used
+    # everywhere else in this codebase (a single 15-min-derived value,
+    # not a separate 5-min-native calculation).
+    if "vwap" not in df_5m.columns:
+        if df_15m is None or df_15m.empty or "vwap" not in df_15m.columns:
+            status, detail = "FAIL", {"reason": "no 15-minute VWAP available to broadcast onto df_5m"}
+            logger.info(format_vwap_acceptance_log(symbol, status, detail))
+            return False
+        df_5m = df_5m.copy()
+        df_5m["vwap"] = df_15m["vwap"].iloc[-1]
+
     status, detail = evaluate_vwap_acceptance(df_5m, direction, cfg)
     if status == "FAIL":
         logger.info(format_vwap_acceptance_log(symbol, status, detail))
@@ -137,7 +158,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
     volume_ok = curr["volume"] > curr["avg_volume"] * cfg.VOLUME_MULTIPLIER
 
     if trend == "UP" and curr["close"] > curr["ema_entry"] and volume_ok:
-        if not _passes_vwap_acceptance(symbol, df_5m, "BUY", cfg):
+        if not _passes_vwap_acceptance(symbol, df_15m, df_5m, "BUY", cfg):
             mark_filter_status(
                 symbol,
                 "VWAP_ACCEPTANCE",
@@ -180,7 +201,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         return Signal(symbol, "BUY", entry, stop, target, curr["date"], reason, confidence=confidence)
 
     if trend == "DOWN" and curr["close"] < curr["ema_entry"] and volume_ok:
-        if not _passes_vwap_acceptance(symbol, df_5m, "SELL", cfg):
+        if not _passes_vwap_acceptance(symbol, df_15m, df_5m, "SELL", cfg):
             mark_filter_status(
                 symbol,
                 "VWAP_ACCEPTANCE",

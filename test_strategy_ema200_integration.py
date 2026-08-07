@@ -70,6 +70,13 @@ class FakeCfg:
     EMA200_ALLOW_TOUCH = False
     EMA200_MIN_DISTANCE_PCT = 0.10
     EMA200_SLOPE_LOOKBACK = 5
+    # This test predates vwap_acceptance.py (merged later, PR #9) and its
+    # synthetic test data was never designed to also satisfy that filter's
+    # multi-bar VWAP-acceptance window. Disable it here so this file keeps
+    # testing exactly what it was written for -- the 200 EMA filter --
+    # isolated from a different filter added afterward. Same isolation
+    # principle already used for RVOL/watchlist tests this week.
+    ENABLE_VWAP_ACCEPTANCE_FILTER = False
 
 
 # -- Case 1: filter disabled (default) -- must produce a signal exactly --
