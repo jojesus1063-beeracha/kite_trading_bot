@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -24,7 +24,12 @@ with TemporaryDirectory() as tmpdir:
     fd._OUTPUT_PATH = Path(tmpdir) / "latest.json"
     fd.reset_filter_diagnostics()
 
-    scan_time = datetime(2026, 8, 7, 10, 20)
+    now = datetime.now()
+    scan_time = now.replace(
+        minute=now.minute - (now.minute % 5),
+        second=0,
+        microsecond=0,
+    )
 
     fd.mark_filter_status("AAA", "TREND_OR_ADX", scan_time=scan_time)
     fd.mark_filter_status("BBB", "VWAP_ACCEPTANCE", scan_time=scan_time)
@@ -62,7 +67,7 @@ with TemporaryDirectory() as tmpdir:
     fd.mark_filter_status(
         "DDD",
         "ENTRY_EMA_OR_VOLUME",
-        scan_time=datetime(2026, 8, 7, 10, 25),
+        scan_time=scan_time + timedelta(minutes=5),
     )
     summary = fd.get_filter_summary()
     check("new scan bucket resets previous counts", summary == {"ENTRY_EMA_OR_VOLUME": 1})
