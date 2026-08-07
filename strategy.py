@@ -99,19 +99,21 @@ def _passes_vwap_acceptance(symbol: str, df_5m: pd.DataFrame, direction: str, cf
 
 
 def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Optional[Signal]:
-    """Evaluate the latest completed 5-minute candle and return a signal."""
+    """Evaluate the latest completed 5-minute candle and return a signal.
+
+    Calls to mark_filter_status() are observational only. They do not feed
+    back into any strategy predicate or returned Signal.
+    """
     if len(df_5m) < 2 or len(df_15m) < 1:
         mark_filter_status(symbol, "ENTRY_DATA", detail={"reason": "insufficient candle history"})
         return None
 
     curr = df_5m.iloc[-1]
-    scan_time = curr.get("date")
     trend = latest_completed_15m_trend(df_15m, curr["date"], cfg)
     if trend is None:
         mark_filter_status(
             symbol,
             "TREND_OR_ADX",
-            scan_time=scan_time,
             detail={"reason": "15m EMA/VWAP trend or binary ADX requirement not satisfied"},
         )
         return None
@@ -119,7 +121,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         mark_filter_status(
             symbol,
             "ENTRY_DATA",
-            scan_time=scan_time,
             detail={"reason": "avg_volume or entry EMA unavailable"},
         )
         return None
@@ -129,7 +130,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         mark_filter_status(
             symbol,
             "TREND_OR_ADX",
-            scan_time=scan_time,
             detail={"reason": "dynamic ADX confidence rejected trend"},
         )
         return None
@@ -141,7 +141,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             mark_filter_status(
                 symbol,
                 "VWAP_ACCEPTANCE",
-                scan_time=scan_time,
                 detail={"direction": "BUY"},
             )
             return None
@@ -151,7 +150,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             mark_filter_status(
                 symbol,
                 "EMA200_CONFIRMATION",
-                scan_time=scan_time,
                 detail={"direction": "BUY", **(ema200_detail or {})},
             )
             return None
@@ -162,7 +160,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             mark_filter_status(
                 symbol,
                 "INVALID_RISK_GEOMETRY",
-                scan_time=scan_time,
                 detail={"direction": "BUY"},
             )
             return None
@@ -178,7 +175,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         mark_filter_status(
             symbol,
             "STRATEGY_SIGNAL",
-            scan_time=scan_time,
             detail={"direction": "BUY"},
         )
         return Signal(symbol, "BUY", entry, stop, target, curr["date"], reason, confidence=confidence)
@@ -188,7 +184,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             mark_filter_status(
                 symbol,
                 "VWAP_ACCEPTANCE",
-                scan_time=scan_time,
                 detail={"direction": "SELL"},
             )
             return None
@@ -198,7 +193,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             mark_filter_status(
                 symbol,
                 "EMA200_CONFIRMATION",
-                scan_time=scan_time,
                 detail={"direction": "SELL", **(ema200_detail or {})},
             )
             return None
@@ -210,7 +204,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             mark_filter_status(
                 symbol,
                 "INVALID_RISK_GEOMETRY",
-                scan_time=scan_time,
                 detail={"direction": "SELL"},
             )
             return None
@@ -226,7 +219,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         mark_filter_status(
             symbol,
             "STRATEGY_SIGNAL",
-            scan_time=scan_time,
             detail={"direction": "SELL"},
         )
         return Signal(symbol, "SELL", entry, stop, target, curr["date"], reason, confidence=confidence)
@@ -234,7 +226,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
     mark_filter_status(
         symbol,
         "ENTRY_EMA_OR_VOLUME",
-        scan_time=scan_time,
         detail={
             "trend": trend,
             "volume_ok": bool(volume_ok),
