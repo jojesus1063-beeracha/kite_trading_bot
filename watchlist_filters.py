@@ -33,6 +33,7 @@ import logging
 
 import pandas as pd
 
+from filter_diagnostics import mark_filter_status
 from indicators import ema
 
 logger = logging.getLogger("watchlist_filters")
@@ -103,6 +104,16 @@ def classify_direction_eligibility(df_15m: pd.DataFrame, cfg) -> tuple:
 def format_watchlist_log(symbol: str, eligibility: str, detail: dict) -> str:
     if eligibility == NOT_ENABLED:
         return f"{symbol}: EMA200 WATCHLIST | DISABLED"
+
+    # In production main.py this formatter is called on the rejection path
+    # (eligibility conflicts with the already-generated signal direction).
+    # Recording here keeps diagnostics isolated from trade decision logic.
+    mark_filter_status(
+        symbol,
+        "EMA200_DIRECTIONAL",
+        detail={"eligibility": eligibility, **(detail or {})},
+    )
+
     parts = [f"{symbol}: EMA200 WATCHLIST", f"eligibility={eligibility}"]
     if "ema200" in detail:
         parts.append(f"ema200={detail['ema200']}")

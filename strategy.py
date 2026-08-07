@@ -7,6 +7,7 @@ from typing import Optional
 import pandas as pd
 
 from adx_confidence import adx_confidence, resolve_adx_mode
+from filter_diagnostics import mark_filter_status
 from trend_filters import evaluate_200ema_filter, format_rejection_log
 from vwap_acceptance import evaluate_vwap_acceptance, format_vwap_acceptance_log
 
@@ -98,34 +99,69 @@ def _passes_vwap_acceptance(symbol: str, df_5m: pd.DataFrame, direction: str, cf
 
 
 def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Optional[Signal]:
-    """Evaluate the latest completed 5-minute candle and return a signal."""
+    """Evaluate the latest completed 5-minute candle and return a signal.
+
+    Calls to mark_filter_status() are observational only. They do not feed
+    back into any strategy predicate or returned Signal.
+    """
     if len(df_5m) < 2 or len(df_15m) < 1:
+        mark_filter_status(symbol, "ENTRY_DATA", detail={"reason": "insufficient candle history"})
         return None
 
     curr = df_5m.iloc[-1]
     trend = latest_completed_15m_trend(df_15m, curr["date"], cfg)
     if trend is None:
+        mark_filter_status(
+            symbol,
+            "TREND_OR_ADX",
+            detail={"reason": "15m EMA/VWAP trend or binary ADX requirement not satisfied"},
+        )
         return None
     if pd.isna(curr["avg_volume"]) or pd.isna(curr["ema_entry"]):
+        mark_filter_status(
+            symbol,
+            "ENTRY_DATA",
+            detail={"reason": "avg_volume or entry EMA unavailable"},
+        )
         return None
 
     confidence = latest_completed_15m_confidence(df_15m, curr["date"], cfg)
     if resolve_adx_mode(cfg) == "dynamic" and confidence == "REJECTED":
+        mark_filter_status(
+            symbol,
+            "TREND_OR_ADX",
+            detail={"reason": "dynamic ADX confidence rejected trend"},
+        )
         return None
 
     volume_ok = curr["volume"] > curr["avg_volume"] * cfg.VOLUME_MULTIPLIER
 
     if trend == "UP" and curr["close"] > curr["ema_entry"] and volume_ok:
         if not _passes_vwap_acceptance(symbol, df_5m, "BUY", cfg):
+            mark_filter_status(
+                symbol,
+                "VWAP_ACCEPTANCE",
+                detail={"direction": "BUY"},
+            )
             return None
         ema200_status, ema200_detail = evaluate_200ema_filter(df_15m, "BUY", cfg)
         if ema200_status == "FAIL":
             logger.info(format_rejection_log(symbol, ema200_status, ema200_detail))
+            mark_filter_status(
+                symbol,
+                "EMA200_CONFIRMATION",
+                detail={"direction": "BUY", **(ema200_detail or {})},
+            )
             return None
         entry = curr["close"]
         stop = curr["low"] * (1 - cfg.SL_BUFFER_PCT / 100)
         risk = entry - stop
         if risk <= 0:
+            mark_filter_status(
+                symbol,
+                "INVALID_RISK_GEOMETRY",
+                detail={"direction": "BUY"},
+            )
             return None
         target = entry + risk * cfg.RISK_REWARD_MIN
         reason = (
@@ -136,20 +172,40 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             reason += " (ADX-confirmed trend)"
         if confidence:
             reason += f" [ADX confidence: {confidence}]"
+        mark_filter_status(
+            symbol,
+            "STRATEGY_SIGNAL",
+            detail={"direction": "BUY"},
+        )
         return Signal(symbol, "BUY", entry, stop, target, curr["date"], reason, confidence=confidence)
 
     if trend == "DOWN" and curr["close"] < curr["ema_entry"] and volume_ok:
         if not _passes_vwap_acceptance(symbol, df_5m, "SELL", cfg):
+            mark_filter_status(
+                symbol,
+                "VWAP_ACCEPTANCE",
+                detail={"direction": "SELL"},
+            )
             return None
         ema200_status, ema200_detail = evaluate_200ema_filter(df_15m, "SELL", cfg)
         if ema200_status == "FAIL":
             logger.info(format_rejection_log(symbol, ema200_status, ema200_detail))
+            mark_filter_status(
+                symbol,
+                "EMA200_CONFIRMATION",
+                detail={"direction": "SELL", **(ema200_detail or {})},
+            )
             return None
         entry = curr["close"]
         sell_buffer = getattr(cfg, "SL_BUFFER_PCT_SELL", None) or cfg.SL_BUFFER_PCT
         stop = curr["high"] * (1 + sell_buffer / 100)
         risk = stop - entry
         if risk <= 0:
+            mark_filter_status(
+                symbol,
+                "INVALID_RISK_GEOMETRY",
+                detail={"direction": "SELL"},
+            )
             return None
         target = entry - risk * cfg.RISK_REWARD_MIN
         reason = (
@@ -160,6 +216,21 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             reason += " (ADX-confirmed trend)"
         if confidence:
             reason += f" [ADX confidence: {confidence}]"
+        mark_filter_status(
+            symbol,
+            "STRATEGY_SIGNAL",
+            detail={"direction": "SELL"},
+        )
         return Signal(symbol, "SELL", entry, stop, target, curr["date"], reason, confidence=confidence)
 
+    mark_filter_status(
+        symbol,
+        "ENTRY_EMA_OR_VOLUME",
+        detail={
+            "trend": trend,
+            "volume_ok": bool(volume_ok),
+            "close": float(curr["close"]),
+            "ema_entry": float(curr["ema_entry"]),
+        },
+    )
     return None
