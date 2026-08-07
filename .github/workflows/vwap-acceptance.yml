@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - fix-live-strategy-consistency
+      - feature/filter-rejection-diagnostics
+  pull_request:
+    branches:
+      - fix-live-strategy-consistency
   workflow_dispatch:
 
 jobs:
@@ -22,10 +26,14 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Compile changed modules
-        run: python -m py_compile strategy.py vwap_acceptance.py test_vwap_acceptance.py
+        run: |
+          python -m py_compile strategy.py vwap_acceptance.py filter_diagnostics.py show_filter_diagnostics.py test_vwap_acceptance.py test_filter_diagnostics.py
 
       - name: Run VWAP acceptance tests
         run: python test_vwap_acceptance.py
+
+      - name: Run filter diagnostics tests
+        run: python test_filter_diagnostics.py
 
       - name: Run existing EMA200 and RVOL focused tests
         run: |
@@ -34,4 +42,5 @@ jobs:
           python test_watchlist_gate_integration.py
 
       - name: Import production entrypoint
-        run: python -c "import main; print('MAIN IMPORT: PASS')"
+        run: |
+          python -c "import main; print('MAIN IMPORT: PASS')"
