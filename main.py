@@ -4199,7 +4199,13 @@ def run():
                     pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
                         kite, cfg, open_positions, symbols, start_time,
                         previous_bot_status=prev_status, todays_trades=todays_trades)
-                    save_bot_status([], positions=pos_analytics, portfolio_summary=portfolio_sum,
+                    previous_symbols = (
+                        prev_status.get("symbols", [])
+                        if isinstance(prev_status, dict)
+                        else []
+                    )
+                    save_bot_status(previous_symbols, positions=pos_analytics,
+                                    portfolio_summary=portfolio_sum,
                                     session_summary=session_sum, health=health)
                 except Exception as e:
                     logger.warning(f"Analytics snapshot failed this position-monitor cycle: {e}")
