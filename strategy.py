@@ -7,6 +7,7 @@ from typing import Optional
 import pandas as pd
 
 from adx_confidence import adx_confidence, resolve_adx_mode
+from entry_continuation import assess_entry_continuation
 from filter_diagnostics import mark_filter_status
 from trend_filters import evaluate_200ema_filter, format_rejection_log
 from vwap_acceptance import evaluate_vwap_acceptance, format_vwap_acceptance_log
@@ -88,6 +89,40 @@ def latest_completed_15m_confidence(
     return get_trend_confidence(completed.iloc[-1], cfg)
 
 
+def _current_vwap_reference(df_15m: pd.DataFrame, as_of: pd.Timestamp) -> float | None:
+    row = latest_completed_15m_row(df_15m, as_of)
+    if row is None:
+        return None
+    value = row.get("vwap")
+    if pd.isna(value):
+        return None
+    return float(value)
+
+
+def _passes_entry_continuation(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, direction: str, cfg) -> bool:
+    if not getattr(cfg, "ENABLE_ENTRY_CONTINUATION_FILTER", False):
+        return True
+
+    as_of = df_5m.iloc[-1]["date"]
+    result = assess_entry_continuation(
+        df_5m,
+        direction,
+        cfg,
+        vwap_reference=_current_vwap_reference(df_15m, as_of),
+    )
+    if not result.accepted:
+        logger.info(f"{symbol}: ENTRY CONTINUATION | REJECT | {result.reason} | {result.detail}")
+        mark_filter_status(
+            symbol,
+            "ENTRY_CONTINUATION",
+            detail={"direction": direction, "reason": result.reason, **result.detail},
+        )
+        return False
+
+    logger.info(f"{symbol}: ENTRY CONTINUATION | PASS | {result.reason} | {result.detail}")
+    return True
+
+
 def _passes_vwap_acceptance(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, direction: str, cfg) -> bool:
     # vwap_acceptance.py requires a "vwap" column on df_5m, but
     # add_indicators() (indicators.py) only ever computes vwap on
@@ -158,6 +193,8 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
     volume_ok = curr["volume"] > curr["avg_volume"] * cfg.VOLUME_MULTIPLIER
 
     if trend == "UP" and curr["close"] > curr["ema_entry"] and volume_ok:
+        if not _passes_entry_continuation(symbol, df_15m, df_5m, "BUY", cfg):
+            return None
         if not _passes_vwap_acceptance(symbol, df_15m, df_5m, "BUY", cfg):
             mark_filter_status(
                 symbol,
@@ -187,7 +224,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         target = entry + risk * cfg.RISK_REWARD_MIN
         reason = (
             f"15m uptrend + 5m close above EMA{cfg.ENTRY_EMA} "
-            "on above-avg volume + VWAP acceptance"
+            "on above-avg volume + entry continuation + VWAP acceptance"
         )
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
@@ -201,6 +238,8 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         return Signal(symbol, "BUY", entry, stop, target, curr["date"], reason, confidence=confidence)
 
     if trend == "DOWN" and curr["close"] < curr["ema_entry"] and volume_ok:
+        if not _passes_entry_continuation(symbol, df_15m, df_5m, "SELL", cfg):
+            return None
         if not _passes_vwap_acceptance(symbol, df_15m, df_5m, "SELL", cfg):
             mark_filter_status(
                 symbol,
@@ -231,7 +270,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         target = entry - risk * cfg.RISK_REWARD_MIN
         reason = (
             f"15m downtrend + 5m close below EMA{cfg.ENTRY_EMA} "
-            "on above-avg volume + VWAP acceptance"
+            "on above-avg volume + entry continuation + VWAP acceptance"
         )
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
