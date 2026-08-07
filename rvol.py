@@ -16,6 +16,7 @@ import logging
 
 import pandas as pd
 
+from filter_diagnostics import mark_filter_status
 from indicators import average_volume
 
 logger = logging.getLogger("rvol")
@@ -56,7 +57,7 @@ def compute_rvol(df_5m: pd.DataFrame, cfg) -> tuple:
             return OK, None, {"reason": f"insufficient candles for RVOL (have {len(df_5m)}, need {lookback + 1})"}
 
         current_volume = df_5m["volume"].iloc[-1]
-        history_for_average = df_5m.iloc[:-1]  # exclude the current candle from its own baseline
+        history_for_average = df_5m.iloc[:-1]
         avg_series = average_volume(history_for_average, lookback)
         avg_volume = avg_series.iloc[-1]
 
@@ -112,6 +113,26 @@ def passes_rvol_threshold(df_5m: pd.DataFrame, cfg) -> tuple:
 
 
 def format_rvol_log(symbol: str, rvol_value, detail: dict) -> str:
+    """Format the existing log line and record diagnostics only.
+
+    Production main.py calls this formatter only after the RVOL gate has
+    actually been evaluated. Recording here therefore observes the gate
+    without changing the boolean returned by passes_rvol_threshold().
+    """
+    passes = bool(detail.get("passes"))
+    if rvol_value is None or not passes:
+        mark_filter_status(
+            symbol,
+            "RVOL",
+            detail={"rvol": rvol_value, **(detail or {})},
+        )
+    else:
+        mark_filter_status(
+            symbol,
+            "FILTERS_PASSED",
+            detail={"rvol": rvol_value, **(detail or {})},
+        )
+
     if rvol_value is None:
         return f"{symbol}: RVOL | value=N/A | reason={detail.get('reason', 'unknown')}"
     return (f"{symbol}: RVOL | value={rvol_value:.2f} | threshold={detail.get('threshold', 'n/a')} "
