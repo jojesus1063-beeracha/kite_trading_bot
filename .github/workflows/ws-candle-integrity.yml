@@ -1,0 +1,37 @@
+name: WS Candle Integrity Checks
+
+on:
+  push:
+    branches:
+      - fix/ws-partial-candle-shadow
+  pull_request:
+    branches:
+      - fix-live-strategy-consistency
+  workflow_dispatch:
+
+jobs:
+  focused-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile WS candle modules
+        run: python -m py_compile candle_engine.py ws_integration.py test_candle_engine.py test_ws_startup_partial_candle.py
+
+      - name: Run existing candle-engine regression tests
+        run: python test_candle_engine.py
+
+      - name: Run startup-partial candle regression tests
+        run: python test_ws_startup_partial_candle.py
+
+      - name: Import production entrypoint
+        run: python -c "import main; print('MAIN IMPORT: PASS')"
