@@ -472,7 +472,7 @@ def run_full_scan(
             continue
 
         df_15m, df_5m = add_indicators(df_15m, df_5m, cfg)
-        signal = evaluate(symbol, df_15m, df_5m, cfg)
+        signal = evaluate(symbol, df_15m, df_5m, market_df_15m, cfg)
 
         if signal:
             eligibility, elig_detail = classify_direction_eligibility(df_15m, cfg)

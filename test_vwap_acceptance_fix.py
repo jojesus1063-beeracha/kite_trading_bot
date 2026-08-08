@@ -47,20 +47,47 @@ def make_15m_df(n, start_price, drift, vwap_offset=-0.3, adx=30.0):
 
 
 def make_5m_df(entry_close, ema_entry, avg_volume, volume, n_bars=3):
-    """Multiple bars, all closing above ema_entry with rising volume on
-    the last bar -- matches an ordinary qualifying BUY setup, WITHOUT a
-    vwap column, exactly like what add_indicators() actually produces."""
+    """Reshaped for the 3-step pullback trigger (was: simple rising-close
+    breakout). Still deliberately has NO vwap column -- that remains the
+    entire point of this test file (confirming VWAP acceptance broadcasts
+    from the 15m timeframe instead of crashing).
+
+    Only the LAST TWO bars matter to the pullback trigger (prev/curr);
+    any earlier bars are just filler with the same general shape."""
     base = datetime(2026, 8, 7, 14, 45)
+    prev_low = ema_entry - 1.0
+    prev_close = ema_entry + 0.3
+    prev_high = ema_entry + 0.5
+    curr_close = entry_close
     rows = []
-    for i in range(n_bars):
-        c = entry_close - (n_bars - 1 - i) * 0.1
+    for i in range(n_bars - 2):
         rows.append({
             "date": base + timedelta(minutes=5 * i),
-            "open": c - 0.3, "high": c + 0.5, "low": c - 0.5, "close": c,
-            "ema_entry": ema_entry, "avg_volume": avg_volume,
-            "volume": volume if i == n_bars - 1 else avg_volume,
+            "open": prev_close - 0.2, "high": prev_close + 0.2, "low": prev_close - 0.4, "close": prev_close,
+            "ema_entry": ema_entry, "avg_volume": avg_volume, "volume": avg_volume,
         })
+    rows.append({
+        "date": base + timedelta(minutes=5 * (n_bars - 2)),
+        "open": prev_low + 0.2, "high": prev_high, "low": prev_low, "close": prev_close,
+        "ema_entry": ema_entry, "avg_volume": avg_volume, "volume": avg_volume,
+    })
+    rows.append({
+        "date": base + timedelta(minutes=5 * (n_bars - 1)),
+        "open": prev_close, "high": curr_close + 0.3, "low": prev_close - 0.1, "close": curr_close,
+        "ema_entry": ema_entry, "avg_volume": avg_volume, "volume": volume,
+    })
     return pd.DataFrame(rows)
+
+
+def make_index_15m(bullish=True):
+    return pd.DataFrame([{
+        "date": datetime(2026, 8, 7, 14, 45), "close": 25100 if bullish else 24900,
+        "vwap": 25000, "open": 25000, "high": 25150, "low": 24950,
+    }])
+
+
+INDEX_BULLISH = make_index_15m(bullish=True)
+INDEX_BEARISH = make_index_15m(bullish=False)
 
 
 class FakeCfg:
@@ -92,7 +119,7 @@ df_5m = make_5m_df(entry_close=last_15m_close + 2, ema_entry=last_15m_close + 1,
 check("Sanity check: df_5m genuinely has no 'vwap' column, matching real add_indicators() output",
       "vwap" not in df_5m.columns)
 
-signal = evaluate("TESTSYM", df_15m, df_5m, cfg1)
+signal = evaluate("TESTSYM", df_15m, df_5m, INDEX_BULLISH, cfg1)
 check("FIX CONFIRMED: an otherwise-qualifying BUY setup now produces a real signal "
       "(previously always returned None due to the missing-column bug)", signal is not None)
 if signal:
@@ -103,20 +130,22 @@ if signal:
 cfg2 = FakeCfg()
 df_15m_down = make_15m_df(10, 500.0, -0.5, vwap_offset=0.5)
 last_15m_close_down = df_15m_down["close"].iloc[-1]
-df_5m_down = make_5m_df(entry_close=last_15m_close_down - 2, ema_entry=last_15m_close_down - 1,
-                         avg_volume=1000, volume=2000)
-# Rebuild closes as a falling sequence for a valid SELL VWAP-acceptance window
+ema_entry_down = last_15m_close_down - 1
+entry_close_down = last_15m_close_down - 2
 base = datetime(2026, 8, 7, 14, 45)
+# Reshaped for the pullback SELL sequence: prev high above ema_entry
+# (Setup), prev close below ema_entry (Rejection), curr close below
+# prev low (Confirmation) -- still no vwap column on df_5m.
 df_5m_down = pd.DataFrame([
-    {"date": base, "open": last_15m_close_down - 1.5, "high": last_15m_close_down - 1,
-     "low": last_15m_close_down - 2.5, "close": last_15m_close_down - 2.3,
-     "ema_entry": last_15m_close_down - 1, "avg_volume": 1000, "volume": 1000},
-    {"date": base + timedelta(minutes=5), "open": last_15m_close_down - 2.3, "high": last_15m_close_down - 2,
-     "low": last_15m_close_down - 3, "close": last_15m_close_down - 2.5,
-     "ema_entry": last_15m_close_down - 1, "avg_volume": 1000, "volume": 2000},
+    {"date": base, "open": ema_entry_down - 0.1, "high": ema_entry_down + 1.0,
+     "low": ema_entry_down - 0.8, "close": ema_entry_down - 0.3,
+     "ema_entry": ema_entry_down, "avg_volume": 1000, "volume": 1000},
+    {"date": base + timedelta(minutes=5), "open": ema_entry_down - 0.3, "high": ema_entry_down - 0.1,
+     "low": entry_close_down - 0.2, "close": entry_close_down,
+     "ema_entry": ema_entry_down, "avg_volume": 1000, "volume": 2000},
 ])
 
-signal_sell = evaluate("TESTSYM", df_15m_down, df_5m_down, cfg2)
+signal_sell = evaluate("TESTSYM", df_15m_down, df_5m_down, INDEX_BEARISH, cfg2)
 check("FIX CONFIRMED: an otherwise-qualifying SELL setup now produces a real signal",
       signal_sell is not None)
 if signal_sell:
@@ -129,12 +158,16 @@ cfg3 = FakeCfg()
 choppy_5m = pd.DataFrame([
     {"date": base, "open": 99, "high": 101, "low": 98, "close": 100,
      "ema_entry": 99, "avg_volume": 1000, "volume": 1000},
-    {"date": base + timedelta(minutes=5), "open": 100, "high": 102, "low": 95,
-     "close": 96,  # this close is BELOW where a rising-uptrend VWAP would sit -- genuine rejection case
+    {"date": base + timedelta(minutes=5), "open": 100, "high": 103.5, "low": 95,
+     # Confirmation requires close > prev.high (101); this close (103) also
+     # stays BELOW the 15m vwap (104.5, from vwap_offset=-0.5 on a last
+     # close of 105) -- satisfies the new pullback trigger while still
+     # genuinely failing VWAP acceptance, preserving this test's purpose.
+     "close": 103,
      "ema_entry": 99, "avg_volume": 1000, "volume": 2000},
 ])
 df_15m_choppy = make_15m_df(10, 100.0, 0.5, vwap_offset=-0.5)
-signal_choppy = evaluate("TESTSYM", df_15m_choppy, choppy_5m, cfg3)
+signal_choppy = evaluate("TESTSYM", df_15m_choppy, choppy_5m, INDEX_BULLISH, cfg3)
 check("A genuine VWAP-acceptance failure (inconsistent closes) still correctly rejects, "
       "confirming the fix didn't just make the check a no-op", signal_choppy is None)
 
@@ -143,7 +176,7 @@ check("A genuine VWAP-acceptance failure (inconsistent closes) still correctly r
 cfg5 = FakeCfg()
 cfg5.ENABLE_VWAP_ACCEPTANCE_FILTER = False
 check("ENABLE_VWAP_ACCEPTANCE_FILTER=False -> signal still produced even with no vwap column at all",
-      evaluate("TESTSYM", df_15m, df_5m, cfg5) is not None)
+      evaluate("TESTSYM", df_15m, df_5m, INDEX_BULLISH, cfg5) is not None)
 
 print(f"\n{passed} passed, {failed} failed")
 if failed:

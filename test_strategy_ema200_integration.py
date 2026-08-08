@@ -45,15 +45,39 @@ def make_15m_df(n, start_price, drift, adx=30.0):
 
 
 def make_5m_df(entry_close, ema_entry, avg_volume, volume):
+    """Reshaped for the 3-step pullback trigger (was: simple close>ema_entry
+    breakout). Same signature and same relative entry_close/ema_entry gap
+    every call site already uses -- only the internal candle shape changed.
+
+    prev: Setup (low comfortably below ema_entry) + Rejection (close
+          just above ema_entry).
+    curr: Confirmation (close > prev high) using entry_close as the
+          actual entry price, requiring entry_close > ema_entry + 0.5 --
+          true for every existing call site in this file (gap is >=1).
+    """
     base = datetime(2026, 8, 6, 14, 55)
+    prev_low = ema_entry - 1.0
+    prev_close = ema_entry + 0.3
+    prev_high = ema_entry + 0.5
+    curr_close = entry_close
     rows = [
-        {"date": base, "open": entry_close - 1, "high": entry_close + 0.5, "low": entry_close - 1.5,
-         "close": entry_close - 0.5, "ema_entry": ema_entry, "avg_volume": avg_volume, "volume": volume},
-        {"date": base + timedelta(minutes=5), "open": entry_close - 0.5, "high": entry_close + 0.5,
-         "low": entry_close - 1, "close": entry_close, "ema_entry": ema_entry, "avg_volume": avg_volume,
-         "volume": volume * 2},  # above-average volume on the signal candle
+        {"date": base, "open": prev_low + 0.2, "high": prev_high, "low": prev_low,
+         "close": prev_close, "ema_entry": ema_entry, "avg_volume": avg_volume, "volume": avg_volume},
+        {"date": base + timedelta(minutes=5), "open": prev_close, "high": curr_close + 0.3,
+         "low": prev_close - 0.1, "close": curr_close, "ema_entry": ema_entry, "avg_volume": avg_volume,
+         "volume": volume * 2},  # above-average AND above prev volume, matching the new volume gate
     ]
     return pd.DataFrame(rows)
+
+
+def make_index_15m(bullish=True):
+    return pd.DataFrame([{
+        "date": datetime(2026, 8, 6, 14, 55), "close": 25100 if bullish else 24900,
+        "vwap": 25000, "open": 25000, "high": 25150, "low": 24950,
+    }])
+
+
+INDEX_BULLISH = make_index_15m(bullish=True)
 
 
 class FakeCfg:
@@ -86,7 +110,7 @@ cfg1 = FakeCfg()
 df_15m = make_15m_df(30, 100.0, 0.5)   # short df -- well under 200+5, would FAIL the 200 EMA check if it ran
 df_5m = make_5m_df(entry_close=105.0, ema_entry=104.0, avg_volume=1000, volume=1000)
 
-signal = evaluate("TESTSYM", df_15m, df_5m, cfg1)
+signal = evaluate("TESTSYM", df_15m, df_5m, INDEX_BULLISH, cfg1)
 check("Filter disabled (default) -> signal still produced despite df_15m being far too short for EMA200 "
       "(proves the 200 EMA check never even runs when disabled)", signal is not None)
 check("Filter disabled -> signal direction is BUY as the ordinary uptrend logic would produce",
@@ -98,7 +122,7 @@ check("Filter disabled -> signal direction is BUY as the ordinary uptrend logic 
 
 cfg2 = FakeCfg()
 cfg2.ENABLE_200_EMA_FILTER = True
-signal2 = evaluate("TESTSYM", df_15m, df_5m, cfg2)
+signal2 = evaluate("TESTSYM", df_15m, df_5m, INDEX_BULLISH, cfg2)
 check("Filter ENABLED + insufficient candles for EMA200 -> signal blocked (returns None)", signal2 is None)
 
 # -- Case 3: filter enabled, sufficient data, clear uptrend + BUY signal --
@@ -111,7 +135,7 @@ long_uptrend_15m = make_15m_df(260, 50.0, 0.3)  # enough bars, clear rising tren
 last_15m_close = long_uptrend_15m["close"].iloc[-1]
 df_5m_aligned = make_5m_df(entry_close=last_15m_close + 2, ema_entry=last_15m_close + 1, avg_volume=1000, volume=1000)
 
-signal3 = evaluate("TESTSYM", long_uptrend_15m, df_5m_aligned, cfg3)
+signal3 = evaluate("TESTSYM", long_uptrend_15m, df_5m_aligned, INDEX_BULLISH, cfg3)
 check("Filter ENABLED, clear uptrend, aligned BUY signal -> signal produced (200 EMA confirms)",
       signal3 is not None)
 

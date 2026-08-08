@@ -121,7 +121,13 @@ def test_confirmed_fill_builds_levels_from_broker_average():
 
     assert position["entry"] == 101.0
     assert round(position["stop"], 6) == round(101.0 * 0.9955, 6)
-    assert round(position["target"], 6) == round(101.0 * 1.015, 6)
+    # target is now preserved as the signal's own dynamic R:R value
+    # (102.0, from signal()'s target=102.0) rather than recomputed from
+    # the flat PROFIT_TARGET_PERCENT -- this is the Option B fix:
+    # entry_protection.py no longer overwrites signal.target when
+    # ENABLE_FIXED_TARGET is True, only the stop is still recalculated
+    # from the confirmed broker fill price.
+    assert position["target"] == 102.0
     assert position["protective_stop_state"] == "PENDING"
     assert position["automated_exit_blocked"] is True
 

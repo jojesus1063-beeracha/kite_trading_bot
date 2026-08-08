@@ -119,8 +119,28 @@ def _passes_vwap_acceptance(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFra
     return True
 
 
-def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Optional[Signal]:
-    """Evaluate the latest completed 5-minute candle and return a signal.
+def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15m: pd.DataFrame, cfg) -> Optional[Signal]:
+    """
+    3-Step Pullback strategy (Setup / Rejection / Confirmation), replacing
+    the prior momentum/breakout trigger. Preserves, unchanged and in the
+    same logical position, the existing 15m trend/ADX gate, VWAP
+    acceptance (_passes_vwap_acceptance), and 200 EMA confirmation
+    (evaluate_200ema_filter) -- only the trigger condition and the new
+    time/macro-index gates are new.
+
+    df_index_15m is the benchmark index's (NIFTY 50) 15-minute candles,
+    already enriched with indicators (see main.py: market_df_15m =
+    get_cached_market_candles(), fetched once per scan cycle via
+    market_trend.get_market_trend_diagnostic() and reused here, not
+    re-fetched per symbol).
+
+    NOTE on prev["vwap"]: df_5m never has a "vwap" column -- confirmed,
+    add_indicators() (indicators.py) only ever computes vwap on df_15m.
+    Rather than reference a column that cannot exist (which would crash
+    exactly like this morning's VWAP_ACCEPTANCE bug), the current
+    15m-timeframe VWAP value is used for the Setup condition's VWAP
+    check, consistent with how VWAP is used everywhere else in this
+    codebase.
 
     Calls to mark_filter_status() are observational only. They do not feed
     back into any strategy predicate or returned Signal.
@@ -130,6 +150,13 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         return None
 
     curr = df_5m.iloc[-1]
+
+    if curr["date"].time() < pd.Timestamp("09:45").time():
+        mark_filter_status(symbol, "TIME_FILTER", detail={"reason": "Morning volatility settling"})
+        return None
+
+    prev = df_5m.iloc[-2]
+
     trend = latest_completed_15m_trend(df_15m, curr["date"], cfg)
     if trend is None:
         mark_filter_status(
@@ -138,7 +165,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             detail={"reason": "15m EMA/VWAP trend or binary ADX requirement not satisfied"},
         )
         return None
-    if pd.isna(curr["avg_volume"]) or pd.isna(curr["ema_entry"]):
+    if pd.isna(curr["avg_volume"]) or pd.isna(curr["ema_entry"]) or pd.isna(prev["ema_entry"]):
         mark_filter_status(
             symbol,
             "ENTRY_DATA",
@@ -155,9 +182,37 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         )
         return None
 
-    volume_ok = curr["volume"] > curr["avg_volume"] * cfg.VOLUME_MULTIPLIER
+    if df_index_15m is None or df_index_15m.empty:
+        mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail={"reason": "no index data available"})
+        return None
+    index_curr = df_index_15m.iloc[-1]
+    if pd.isna(index_curr.get("vwap")) or pd.isna(index_curr.get("close")):
+        mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail={"reason": "index close/vwap unavailable"})
+        return None
+    index_is_bullish = index_curr["close"] > index_curr["vwap"]
+    index_is_bearish = index_curr["close"] < index_curr["vwap"]
 
-    if trend == "UP" and curr["close"] > curr["ema_entry"] and volume_ok:
+    current_15m_vwap = df_15m[df_15m["date"] <= curr["date"]].iloc[-1]["vwap"] if not df_15m.empty else float("nan")
+
+    volume_ok = curr["volume"] > prev["volume"] and curr["volume"] > (curr["avg_volume"] * cfg.VOLUME_MULTIPLIER)
+
+    if trend == "UP":
+        setup = (prev["low"] <= prev["ema_entry"]) or (not pd.isna(current_15m_vwap) and prev["low"] <= current_15m_vwap)
+        rejection = prev["close"] > prev["ema_entry"]
+        confirmation = curr["close"] > prev["high"]
+
+        if not (setup and rejection and confirmation and volume_ok and index_is_bullish):
+            mark_filter_status(
+                symbol,
+                "PULLBACK_SEQUENCE",
+                detail={
+                    "direction": "BUY", "setup": bool(setup), "rejection": bool(rejection),
+                    "confirmation": bool(confirmation), "volume_ok": bool(volume_ok),
+                    "index_is_bullish": bool(index_is_bullish),
+                },
+            )
+            return None
+
         if not _passes_vwap_acceptance(symbol, df_15m, df_5m, "BUY", cfg):
             mark_filter_status(
                 symbol,
@@ -175,7 +230,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             )
             return None
         entry = curr["close"]
-        stop = curr["low"] * (1 - cfg.SL_BUFFER_PCT / 100)
+        stop = prev["low"] * (1 - cfg.SL_BUFFER_PCT / 100)
         risk = entry - stop
         if risk <= 0:
             mark_filter_status(
@@ -186,8 +241,9 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             return None
         target = entry + risk * cfg.RISK_REWARD_MIN
         reason = (
-            f"15m uptrend + 5m close above EMA{cfg.ENTRY_EMA} "
-            "on above-avg volume + VWAP acceptance"
+            "3-step pullback: tested support, defended level, "
+            f"breakout confirmation above EMA{cfg.ENTRY_EMA} "
+            "on above-avg volume + bullish index + VWAP acceptance"
         )
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
@@ -200,7 +256,23 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         )
         return Signal(symbol, "BUY", entry, stop, target, curr["date"], reason, confidence=confidence)
 
-    if trend == "DOWN" and curr["close"] < curr["ema_entry"] and volume_ok:
+    if trend == "DOWN":
+        setup = (prev["high"] >= prev["ema_entry"]) or (not pd.isna(current_15m_vwap) and prev["high"] >= current_15m_vwap)
+        rejection = prev["close"] < prev["ema_entry"]
+        confirmation = curr["close"] < prev["low"]
+
+        if not (setup and rejection and confirmation and volume_ok and index_is_bearish):
+            mark_filter_status(
+                symbol,
+                "PULLBACK_SEQUENCE",
+                detail={
+                    "direction": "SELL", "setup": bool(setup), "rejection": bool(rejection),
+                    "confirmation": bool(confirmation), "volume_ok": bool(volume_ok),
+                    "index_is_bearish": bool(index_is_bearish),
+                },
+            )
+            return None
+
         if not _passes_vwap_acceptance(symbol, df_15m, df_5m, "SELL", cfg):
             mark_filter_status(
                 symbol,
@@ -219,7 +291,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             return None
         entry = curr["close"]
         sell_buffer = getattr(cfg, "SL_BUFFER_PCT_SELL", None) or cfg.SL_BUFFER_PCT
-        stop = curr["high"] * (1 + sell_buffer / 100)
+        stop = prev["high"] * (1 + sell_buffer / 100)
         risk = stop - entry
         if risk <= 0:
             mark_filter_status(
@@ -230,8 +302,9 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             return None
         target = entry - risk * cfg.RISK_REWARD_MIN
         reason = (
-            f"15m downtrend + 5m close below EMA{cfg.ENTRY_EMA} "
-            "on above-avg volume + VWAP acceptance"
+            "3-step pullback: tested resistance, defended level, "
+            f"breakdown confirmation below EMA{cfg.ENTRY_EMA} "
+            "on above-avg volume + bearish index + VWAP acceptance"
         )
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
@@ -247,11 +320,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
     mark_filter_status(
         symbol,
         "ENTRY_EMA_OR_VOLUME",
-        detail={
-            "trend": trend,
-            "volume_ok": bool(volume_ok),
-            "close": float(curr["close"]),
-            "ema_entry": float(curr["ema_entry"]),
-        },
+        detail={"trend": trend},
     )
     return None

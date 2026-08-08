@@ -111,7 +111,22 @@ def build_confirmed_position(
     target_price = float(signal.target)
 
     if getattr(cfg, "ENABLE_FIXED_TARGET", False):
-        stop_price, target_price = fixed_levels_from_fill(
+        # Option B (deliberate choice over disabling ENABLE_FIXED_TARGET
+        # entirely): only the STOP is recomputed from the confirmed fill
+        # price and STOP_LOSS_PERCENT. target_price is left as the
+        # dynamic Risk:Reward value strategy.py already computed
+        # (risk * cfg.RISK_REWARD_MIN) -- previously this was discarded
+        # and replaced with a flat PROFIT_TARGET_PERCENT, which is why
+        # check_position_exit()'s hit_target check was comparing price
+        # against a fixed 0.7% ceiling instead of the intended 2.5-3x
+        # R:R level. Disabling ENABLE_FIXED_TARGET altogether was
+        # considered and rejected: that would also silently disable
+        # hit_target entirely (confirmed by direct code reading --
+        # hit_target is never assigned outside the ENABLE_FIXED_TARGET
+        # branch), meaning the position would never explicitly exit at
+        # target at all, only via trailing-stop/structure-break/
+        # trend-reversal/square-off.
+        stop_price, _ = fixed_levels_from_fill(
             signal.direction,
             confirmed_entry_price,
             getattr(cfg, "STOP_LOSS_PERCENT", 0.45),
@@ -190,7 +205,14 @@ def build_recovered_position(order_record, execution_result, cfg):
         fixed = bool(metadata.get("fixed_target_enabled"))
 
         if fixed:
-            stop_price, target_price = fixed_levels_from_fill(
+            # Same Option B fix as the primary entry path above: only
+            # recompute the stop from the confirmed average fill price;
+            # preserve the originally-signaled R:R target from metadata
+            # rather than overwriting it with a flat percentage. Falls
+            # back to fixed_levels_from_fill's own target only if no
+            # stored signal target exists (shouldn't happen in practice,
+            # but fails toward a real number rather than None).
+            stop_price, fallback_target = fixed_levels_from_fill(
                 order_record["side"],
                 entry_price,
                 metadata.get(
@@ -202,6 +224,7 @@ def build_recovered_position(order_record, execution_result, cfg):
                     getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
                 ),
             )
+            target_price = metadata.get("signal_target_price", fallback_target)
             manual = False
             protection_state = "PENDING"
         else:
