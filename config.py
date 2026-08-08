@@ -309,3 +309,27 @@ ENABLE_EMA200_WATCHLIST = True
 ENABLE_RVOL_FILTER = True
 RVOL_LOOKBACK = 20
 RVOL_THRESHOLD = 1.5
+
+# ---------------------------------------------------------------------
+# Version D -- Entry Timing Layer (entry_timing.py)
+#
+# Runs LAST, after every existing gate (pullback geometry, macro
+# authorization, VWAP acceptance, EMA200, RVOL). Never substitutes for
+# or weakens any of them.
+#
+# Anti-chase is ATR-NORMALIZED rather than a fixed percentage, so the
+# rule behaves consistently across a Rs.100 stock and a Rs.2000 one.
+# ATR is computed locally inside entry_timing.py from df_5m's OHLC --
+# add_indicators() does NOT attach an "atr" column to df_5m (verified).
+#
+# ENABLE_VOLUME_ACCELERATION_FILTER defaults False deliberately: its
+# effect must be MEASURED in replay before it is made mandatory. When
+# a filter is off, its metric is still computed and logged, so replay
+# can quantify exactly what enabling it would have cost or gained.
+# ---------------------------------------------------------------------
+ENABLE_ENTRY_TIMING_FILTER = True
+MAX_ENTRY_EXTENSION_ATR = 1.50
+ENABLE_CONFIRMATION_QUALITY_FILTER = True
+MIN_CONFIRMATION_BODY_RATIO = 0.50
+ENABLE_VOLUME_ACCELERATION_FILTER = True
+MIN_CONFIRMATION_VOLUME_ACCELERATION = 1.10

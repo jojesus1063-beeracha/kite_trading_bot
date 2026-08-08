@@ -10,6 +10,12 @@ from adx_confidence import adx_confidence, resolve_adx_mode
 from filter_diagnostics import mark_filter_status
 from trend_filters import evaluate_200ema_filter, format_rejection_log
 from vwap_acceptance import evaluate_vwap_acceptance, format_vwap_acceptance_log
+from entry_timing import (
+    evaluate_entry_timing,
+    format_entry_timing_log,
+    INVALID as ENTRY_TIMING_INVALID,
+    NOT_ENABLED as ENTRY_TIMING_NOT_ENABLED,
+)
 
 logger = logging.getLogger("strategy")
 
@@ -119,6 +125,97 @@ def _passes_vwap_acceptance(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFra
     return True
 
 
+def _stock_adx(df_15m: pd.DataFrame, as_of_ts) -> Optional[float]:
+    """The stock's own latest completed 15m ADX -- NOT the index's."""
+    if df_15m is None or df_15m.empty or "date" not in df_15m.columns:
+        return None
+    completed = df_15m[df_15m["date"] <= as_of_ts]
+    if completed.empty or "adx" not in completed.columns:
+        return None
+    value = completed.iloc[-1].get("adx")
+    return None if pd.isna(value) else float(value)
+
+
+def _stock_ema_slope(df_15m: pd.DataFrame, as_of_ts) -> Optional[float]:
+    """1-bar-back slope of the stock's own 15m ema_fast (EMA20 on the
+    configured TREND_EMA_FAST period). Positive = rising, negative =
+    falling. Requires at least 2 completed 15m bars."""
+    if df_15m is None or df_15m.empty or "date" not in df_15m.columns:
+        return None
+    completed = df_15m[df_15m["date"] <= as_of_ts]
+    if len(completed) < 2 or "ema_fast" not in completed.columns:
+        return None
+    curr_ema = completed.iloc[-1]["ema_fast"]
+    prev_ema = completed.iloc[-2]["ema_fast"]
+    if pd.isna(curr_ema) or pd.isna(prev_ema):
+        return None
+    return float(curr_ema - prev_ema)
+
+
+def _macro_authorization(macro_state: str, direction: str, df_15m: pd.DataFrame, curr_5m, cfg) -> tuple:
+    """
+    Three-state macro authorization layer -- separate from, and applied
+    AFTER, the stock's own independently-verified pullback geometry
+    (setup/rejection/confirmation/volume_ok). This function never
+    weakens or substitutes for that geometry; it only decides whether
+    an already-geometry-qualified setup is additionally authorized by
+    the broader index.
+
+    BULLISH + BUY  -> ALLOW (unchanged normal path)
+    BEARISH + SELL -> ALLOW (unchanged normal path)
+    BULLISH + SELL -> HARD REJECT (opposing)
+    BEARISH + BUY  -> HARD REJECT (opposing)
+    NEUTRAL + either -> CONDITIONAL: requires the stock's OWN ADX to
+        meet ADX_THRESHOLD and the stock's OWN 15m EMA20 slope to point
+        the same direction as the trade. Risk:Reward is not
+        independently re-checked here -- it is structurally guaranteed
+        by the existing target formula (entry +/- risk * RISK_REWARD_MIN)
+        computed later in evaluate(), not a separate condition that can
+        fail. VWAP condition is not re-checked here either -- the
+        existing, unchanged VWAP_ACCEPTANCE gate immediately downstream
+        already covers it; duplicating it here would be redundant logic
+        against the same underlying data.
+
+    Returns (decision, detail) where decision is "ALLOW" or "REJECT".
+    """
+    if macro_state == "BULLISH":
+        if direction == "BUY":
+            return "ALLOW", {"macro_state": macro_state, "direction": direction, "decision": "ALLOW_NORMAL"}
+        return "REJECT", {"macro_state": macro_state, "direction": direction,
+                           "decision": "HARD_REJECT", "reason": "NIFTY_OPPOSING"}
+
+    if macro_state == "BEARISH":
+        if direction == "SELL":
+            return "ALLOW", {"macro_state": macro_state, "direction": direction, "decision": "ALLOW_NORMAL"}
+        return "REJECT", {"macro_state": macro_state, "direction": direction,
+                           "decision": "HARD_REJECT", "reason": "NIFTY_OPPOSING"}
+
+    # NEUTRAL -- conditional approval against stricter, stock-specific requirements.
+    as_of = curr_5m["date"]
+    stock_adx = _stock_adx(df_15m, as_of)
+    stock_slope = _stock_ema_slope(df_15m, as_of)
+
+    adx_threshold = getattr(cfg, "ADX_THRESHOLD", 25)
+    adx_ok = stock_adx is not None and stock_adx >= adx_threshold
+    if direction == "BUY":
+        slope_ok = stock_slope is not None and stock_slope > 0
+    else:
+        slope_ok = stock_slope is not None and stock_slope < 0
+
+    detail = {
+        "macro_state": macro_state, "direction": direction,
+        "adx_ok": bool(adx_ok), "adx_value": None if stock_adx is None else round(stock_adx, 2),
+        "adx_threshold": adx_threshold,
+        "ema_slope_ok": bool(slope_ok), "ema_slope_value": None if stock_slope is None else round(stock_slope, 4),
+    }
+
+    if adx_ok and slope_ok:
+        detail["decision"] = "CONDITIONAL_APPROVED"
+        return "ALLOW", detail
+    detail["decision"] = "CONDITIONAL_REJECTED"
+    return "REJECT", detail
+
+
 def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15m: pd.DataFrame, cfg) -> Optional[Signal]:
     """
     3-Step Pullback strategy (Setup / Rejection / Confirmation), replacing
@@ -183,28 +280,21 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         return None
 
     if df_index_15m is None or df_index_15m.empty:
-        mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail={"reason": "no index data available"})
+        mark_filter_status(symbol, "MACRO_INDEX_FILTER",
+                            detail={"reason": "no index data available", "decision": "HARD_REJECT"})
         return None
     index_curr = df_index_15m.iloc[-1]
     # Indices have no real traded volume, so their VWAP is always NaN --
     # confirmed by market_trend.py's own get_trend(..., require_vwap=False)
-    # call ("indices have no real volume, VWAP is always NaN"). Checking
-    # index_curr["close"] > index_curr["vwap"] directly (an earlier
-    # version of this code) meant this gate could never pass, on any
-    # day, unconditionally -- confirmed via a real historical replay
-    # where 100% of MACRO_INDEX_FILTER rejections were "vwap
-    # unavailable", not genuine bearish/bullish disagreement. Use the
+    # call ("indices have no real volume, VWAP is always NaN"). Use the
     # same EMA-only trend classification already proven correct for
     # this exact reason elsewhere in this codebase.
     if "ema_slow" not in index_curr or "ema_fast" not in index_curr:
-        mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail={"reason": "index EMA data unavailable"})
+        mark_filter_status(symbol, "MACRO_INDEX_FILTER",
+                            detail={"reason": "index EMA data unavailable", "decision": "HARD_REJECT"})
         return None
     index_trend = get_trend(index_curr, cfg, require_vwap=False)
-    if index_trend is None:
-        mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail={"reason": "index trend indeterminate"})
-        return None
-    index_is_bullish = index_trend == "UP"
-    index_is_bearish = index_trend == "DOWN"
+    macro_state = {"UP": "BULLISH", "DOWN": "BEARISH"}.get(index_trend, "NEUTRAL")
 
     current_15m_vwap = df_15m[df_15m["date"] <= curr["date"]].iloc[-1]["vwap"] if not df_15m.empty else float("nan")
 
@@ -215,17 +305,22 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         rejection = prev["close"] > prev["ema_entry"]
         confirmation = curr["close"] > prev["high"]
 
-        if not (setup and rejection and confirmation and volume_ok and index_is_bullish):
+        if not (setup and rejection and confirmation and volume_ok):
             mark_filter_status(
                 symbol,
                 "PULLBACK_SEQUENCE",
                 detail={
                     "direction": "BUY", "setup": bool(setup), "rejection": bool(rejection),
                     "confirmation": bool(confirmation), "volume_ok": bool(volume_ok),
-                    "index_is_bullish": bool(index_is_bullish),
                 },
             )
             return None
+
+        macro_decision, macro_detail = _macro_authorization(macro_state, "BUY", df_15m, curr, cfg)
+        mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail=macro_detail)
+        if macro_decision != "ALLOW":
+            return None
+
 
         if not _passes_vwap_acceptance(symbol, df_15m, df_5m, "BUY", cfg):
             mark_filter_status(
@@ -254,6 +349,13 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             )
             return None
         target = entry + risk * cfg.RISK_REWARD_MIN
+
+        timing_class, timing_detail = evaluate_entry_timing(symbol, "BUY", df_5m, curr, prev, cfg)
+        if timing_class != ENTRY_TIMING_NOT_ENABLED:
+            logger.info(format_entry_timing_log(symbol, timing_class, timing_detail))
+            mark_filter_status(symbol, "ENTRY_TIMING", detail=timing_detail)
+        if timing_class == ENTRY_TIMING_INVALID:
+            return None
         reason = (
             "3-step pullback: tested support, defended level, "
             f"breakout confirmation above EMA{cfg.ENTRY_EMA} "
@@ -275,16 +377,20 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         rejection = prev["close"] < prev["ema_entry"]
         confirmation = curr["close"] < prev["low"]
 
-        if not (setup and rejection and confirmation and volume_ok and index_is_bearish):
+        if not (setup and rejection and confirmation and volume_ok):
             mark_filter_status(
                 symbol,
                 "PULLBACK_SEQUENCE",
                 detail={
                     "direction": "SELL", "setup": bool(setup), "rejection": bool(rejection),
                     "confirmation": bool(confirmation), "volume_ok": bool(volume_ok),
-                    "index_is_bearish": bool(index_is_bearish),
                 },
             )
+            return None
+
+        macro_decision, macro_detail = _macro_authorization(macro_state, "SELL", df_15m, curr, cfg)
+        mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail=macro_detail)
+        if macro_decision != "ALLOW":
             return None
 
         if not _passes_vwap_acceptance(symbol, df_15m, df_5m, "SELL", cfg):
@@ -315,6 +421,13 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             )
             return None
         target = entry - risk * cfg.RISK_REWARD_MIN
+
+        timing_class, timing_detail = evaluate_entry_timing(symbol, "SELL", df_5m, curr, prev, cfg)
+        if timing_class != ENTRY_TIMING_NOT_ENABLED:
+            logger.info(format_entry_timing_log(symbol, timing_class, timing_detail))
+            mark_filter_status(symbol, "ENTRY_TIMING", detail=timing_detail)
+        if timing_class == ENTRY_TIMING_INVALID:
+            return None
         reason = (
             "3-step pullback: tested resistance, defended level, "
             f"breakdown confirmation below EMA{cfg.ENTRY_EMA} "
