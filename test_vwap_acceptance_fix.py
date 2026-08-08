@@ -80,9 +80,13 @@ def make_5m_df(entry_close, ema_entry, avg_volume, volume, n_bars=3):
 
 
 def make_index_15m(bullish=True):
+    close = 25100 if bullish else 24900
+    ema_fast = close - 20 if bullish else close + 20
+    ema_slow = close - 50 if bullish else close + 50
     return pd.DataFrame([{
-        "date": datetime(2026, 8, 7, 14, 45), "close": 25100 if bullish else 24900,
-        "vwap": 25000, "open": 25000, "high": 25150, "low": 24950,
+        "date": datetime(2026, 8, 7, 14, 45), "close": close,
+        "vwap": float("nan"), "open": close, "high": close + 50, "low": close - 50,
+        "ema_fast": ema_fast, "ema_slow": ema_slow, "adx": 30.0,
     }])
 
 

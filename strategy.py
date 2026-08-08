@@ -186,11 +186,25 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail={"reason": "no index data available"})
         return None
     index_curr = df_index_15m.iloc[-1]
-    if pd.isna(index_curr.get("vwap")) or pd.isna(index_curr.get("close")):
-        mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail={"reason": "index close/vwap unavailable"})
+    # Indices have no real traded volume, so their VWAP is always NaN --
+    # confirmed by market_trend.py's own get_trend(..., require_vwap=False)
+    # call ("indices have no real volume, VWAP is always NaN"). Checking
+    # index_curr["close"] > index_curr["vwap"] directly (an earlier
+    # version of this code) meant this gate could never pass, on any
+    # day, unconditionally -- confirmed via a real historical replay
+    # where 100% of MACRO_INDEX_FILTER rejections were "vwap
+    # unavailable", not genuine bearish/bullish disagreement. Use the
+    # same EMA-only trend classification already proven correct for
+    # this exact reason elsewhere in this codebase.
+    if "ema_slow" not in index_curr or "ema_fast" not in index_curr:
+        mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail={"reason": "index EMA data unavailable"})
         return None
-    index_is_bullish = index_curr["close"] > index_curr["vwap"]
-    index_is_bearish = index_curr["close"] < index_curr["vwap"]
+    index_trend = get_trend(index_curr, cfg, require_vwap=False)
+    if index_trend is None:
+        mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail={"reason": "index trend indeterminate"})
+        return None
+    index_is_bullish = index_trend == "UP"
+    index_is_bearish = index_trend == "DOWN"
 
     current_15m_vwap = df_15m[df_15m["date"] <= curr["date"]].iloc[-1]["vwap"] if not df_15m.empty else float("nan")
 

@@ -46,9 +46,17 @@ def make_15m(n, start_price, drift, vwap_offset):
 
 
 def make_index_15m(bullish=True):
+    # Matches get_trend(..., require_vwap=False)'s actual requirements:
+    # close/ema_fast/ema_slow alignment, NOT vwap (indices never have
+    # real volume, so vwap is deliberately irrelevant here now).
+    close = 25100 if bullish else 24900
+    ema_fast = close - 20 if bullish else close + 20
+    ema_slow = close - 50 if bullish else close + 50
     return pd.DataFrame([{
-        "date": datetime(2026, 8, 10, 10, 0), "close": 25100 if bullish else 24900,
-        "vwap": 25000, "open": 25000, "high": 25150, "low": 24950,
+        "date": datetime(2026, 8, 10, 10, 0), "close": close,
+        "vwap": float("nan"),  # deliberately NaN -- proves the fix no longer depends on this
+        "open": close, "high": close + 50, "low": close - 50,
+        "ema_fast": ema_fast, "ema_slow": ema_slow, "adx": 30.0,
     }])
 
 
