@@ -192,65 +192,57 @@ def _stock_ema_slope(df_15m: pd.DataFrame, as_of_ts) -> Optional[float]:
 
 def _macro_authorization(macro_state: str, direction: str, df_15m: pd.DataFrame, as_of_ts, cfg) -> tuple:
     """
-    Three-state macro authorization layer -- separate from, and applied
-    AFTER, the stock's own independently-verified pullback geometry
-    (setup/rejection/confirmation/volume_ok). This function never
-    weakens or substitutes for that geometry; it only decides whether
-    an already-geometry-qualified setup is additionally authorized by
-    the broader index.
+    Macro authorization layer.
 
-    BULLISH + BUY  -> ALLOW (unchanged normal path)
-    BEARISH + SELL -> ALLOW (unchanged normal path)
-    BULLISH + SELL -> HARD REJECT (opposing)
-    BEARISH + BUY  -> HARD REJECT (opposing)
-    NEUTRAL + either -> CONDITIONAL: requires the stock's OWN ADX to
-        meet ADX_THRESHOLD and the stock's OWN 15m EMA20 slope to point
-        the same direction as the trade. Risk:Reward is not
-        independently re-checked here -- it is structurally guaranteed
-        by the existing target formula (entry +/- risk * RISK_REWARD_MIN)
-        computed later in evaluate(), not a separate condition that can
-        fail. VWAP condition is not re-checked here either -- the
-        existing, unchanged VWAP_ACCEPTANCE gate immediately downstream
-        already covers it; duplicating it here would be redundant logic
-        against the same underlying data.
+    Only a genuine NEUTRAL macro state is treated as PASS. NEUTRAL does
+    not create a signal by itself; every remaining strategy filter in
+    evaluate() must still pass before a Signal is returned.
 
-    Returns (decision, detail) where decision is "ALLOW" or "REJECT".
+    Missing or invalid macro data must never be converted into NEUTRAL.
+    Those conditions are handled before this function is called.
     """
     if macro_state == "BULLISH":
         if direction == "BUY":
-            return "ALLOW", {"macro_state": macro_state, "direction": direction, "decision": "ALLOW_NORMAL"}
-        return "REJECT", {"macro_state": macro_state, "direction": direction,
-                           "decision": "HARD_REJECT", "reason": "NIFTY_OPPOSING"}
+            return "ALLOW", {
+                "macro_state": macro_state,
+                "direction": direction,
+                "decision": "ALLOW_NORMAL",
+            }
+        return "REJECT", {
+            "macro_state": macro_state,
+            "direction": direction,
+            "decision": "HARD_REJECT",
+            "reason": "NIFTY_OPPOSING",
+        }
 
     if macro_state == "BEARISH":
         if direction == "SELL":
-            return "ALLOW", {"macro_state": macro_state, "direction": direction, "decision": "ALLOW_NORMAL"}
-        return "REJECT", {"macro_state": macro_state, "direction": direction,
-                           "decision": "HARD_REJECT", "reason": "NIFTY_OPPOSING"}
+            return "ALLOW", {
+                "macro_state": macro_state,
+                "direction": direction,
+                "decision": "ALLOW_NORMAL",
+            }
+        return "REJECT", {
+            "macro_state": macro_state,
+            "direction": direction,
+            "decision": "HARD_REJECT",
+            "reason": "NIFTY_OPPOSING",
+        }
 
-    # NEUTRAL -- conditional approval against stricter, stock-specific requirements.
-    stock_adx = _stock_adx(df_15m, as_of_ts)
-    stock_slope = _stock_ema_slope(df_15m, as_of_ts)
+    if macro_state == "NEUTRAL":
+        return "ALLOW", {
+            "macro_state": macro_state,
+            "direction": direction,
+            "decision": "ALLOW_NEUTRAL",
+            "reason": "GENUINE_NEUTRAL_TREATED_AS_PASS",
+        }
 
-    adx_threshold = getattr(cfg, "ADX_THRESHOLD", 25)
-    adx_ok = stock_adx is not None and stock_adx >= adx_threshold
-    if direction == "BUY":
-        slope_ok = stock_slope is not None and stock_slope > 0
-    else:
-        slope_ok = stock_slope is not None and stock_slope < 0
-
-    detail = {
-        "macro_state": macro_state, "direction": direction,
-        "adx_ok": bool(adx_ok), "adx_value": None if stock_adx is None else round(stock_adx, 2),
-        "adx_threshold": adx_threshold,
-        "ema_slope_ok": bool(slope_ok), "ema_slope_value": None if stock_slope is None else round(stock_slope, 4),
+    return "REJECT", {
+        "macro_state": macro_state,
+        "direction": direction,
+        "decision": "REJECT_INVALID_MACRO_STATE",
+        "reason": "UNRECOGNIZED_MACRO_STATE",
     }
-
-    if adx_ok and slope_ok:
-        detail["decision"] = "CONDITIONAL_APPROVED"
-        return "ALLOW", detail
-    detail["decision"] = "CONDITIONAL_REJECTED"
-    return "REJECT", detail
 
 
 def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15m: pd.DataFrame, cfg) -> Optional[Signal]:
