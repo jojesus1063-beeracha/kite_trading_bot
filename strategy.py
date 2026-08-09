@@ -59,8 +59,46 @@ def get_trend(row_15m: pd.Series, cfg=None, require_vwap: bool = True) -> Option
     return None
 
 
+def completed_15m_rows(
+    df_15m: pd.DataFrame,
+    as_of: pd.Timestamp,
+) -> pd.DataFrame:
+    """Return only 15-minute candles whose *end time* is at/before ``as_of``.
+
+    Kite timestamps an OHLC candle with its start time.  Comparing that
+    timestamp directly with ``as_of`` can therefore admit a still-forming
+    candle.  Keep the completion rule here so every strategy consumer uses
+    the same temporal boundary, even if an upstream provider accidentally
+    includes a partial row.
+    """
+    if (
+        df_15m is None
+        or df_15m.empty
+        or "date" not in df_15m.columns
+        or as_of is None
+    ):
+        return pd.DataFrame()
+
+    try:
+        candle_starts = pd.to_datetime(df_15m["date"])
+        decision_time = pd.Timestamp(as_of)
+
+        candle_timezone = candle_starts.dt.tz
+        if candle_timezone is not None and decision_time.tzinfo is None:
+            decision_time = decision_time.tz_localize(candle_timezone)
+        elif candle_timezone is None and decision_time.tzinfo is not None:
+            decision_time = decision_time.tz_localize(None)
+        elif candle_timezone is not None and decision_time.tzinfo is not None:
+            decision_time = decision_time.tz_convert(candle_timezone)
+
+        candle_ends = candle_starts + pd.Timedelta(minutes=15)
+        return df_15m.loc[candle_ends <= decision_time]
+    except (TypeError, ValueError, AttributeError):
+        return pd.DataFrame()
+
+
 def latest_completed_15m_row(df_15m: pd.DataFrame, as_of: pd.Timestamp):
-    completed = df_15m[df_15m["date"] <= as_of]
+    completed = completed_15m_rows(df_15m, as_of)
     if completed.empty:
         return None
     return completed.iloc[-1]
@@ -71,10 +109,10 @@ def latest_completed_15m_trend(
     as_of: pd.Timestamp,
     cfg=None,
 ) -> Optional[str]:
-    completed = df_15m[df_15m["date"] <= as_of]
-    if completed.empty:
+    row = latest_completed_15m_row(df_15m, as_of)
+    if row is None:
         return None
-    return get_trend(completed.iloc[-1], cfg)
+    return get_trend(row, cfg)
 
 
 def get_trend_confidence(row_15m: pd.Series, cfg=None) -> Optional[str]:
@@ -88,10 +126,10 @@ def latest_completed_15m_confidence(
     as_of: pd.Timestamp,
     cfg=None,
 ) -> Optional[str]:
-    completed = df_15m[df_15m["date"] <= as_of]
-    if completed.empty:
+    row = latest_completed_15m_row(df_15m, as_of)
+    if row is None:
         return None
-    return get_trend_confidence(completed.iloc[-1], cfg)
+    return get_trend_confidence(row, cfg)
 
 
 def _passes_vwap_acceptance(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, direction: str, cfg) -> bool:
@@ -129,7 +167,7 @@ def _stock_adx(df_15m: pd.DataFrame, as_of_ts) -> Optional[float]:
     """The stock's own latest completed 15m ADX -- NOT the index's."""
     if df_15m is None or df_15m.empty or "date" not in df_15m.columns:
         return None
-    completed = df_15m[df_15m["date"] <= as_of_ts]
+    completed = completed_15m_rows(df_15m, as_of_ts)
     if completed.empty or "adx" not in completed.columns:
         return None
     value = completed.iloc[-1].get("adx")
@@ -142,7 +180,7 @@ def _stock_ema_slope(df_15m: pd.DataFrame, as_of_ts) -> Optional[float]:
     falling. Requires at least 2 completed 15m bars."""
     if df_15m is None or df_15m.empty or "date" not in df_15m.columns:
         return None
-    completed = df_15m[df_15m["date"] <= as_of_ts]
+    completed = completed_15m_rows(df_15m, as_of_ts)
     if len(completed) < 2 or "ema_fast" not in completed.columns:
         return None
     curr_ema = completed.iloc[-1]["ema_fast"]
@@ -152,7 +190,7 @@ def _stock_ema_slope(df_15m: pd.DataFrame, as_of_ts) -> Optional[float]:
     return float(curr_ema - prev_ema)
 
 
-def _macro_authorization(macro_state: str, direction: str, df_15m: pd.DataFrame, curr_5m, cfg) -> tuple:
+def _macro_authorization(macro_state: str, direction: str, df_15m: pd.DataFrame, as_of_ts, cfg) -> tuple:
     """
     Three-state macro authorization layer -- separate from, and applied
     AFTER, the stock's own independently-verified pullback geometry
@@ -191,9 +229,8 @@ def _macro_authorization(macro_state: str, direction: str, df_15m: pd.DataFrame,
                            "decision": "HARD_REJECT", "reason": "NIFTY_OPPOSING"}
 
     # NEUTRAL -- conditional approval against stricter, stock-specific requirements.
-    as_of = curr_5m["date"]
-    stock_adx = _stock_adx(df_15m, as_of)
-    stock_slope = _stock_ema_slope(df_15m, as_of)
+    stock_adx = _stock_adx(df_15m, as_of_ts)
+    stock_slope = _stock_ema_slope(df_15m, as_of_ts)
 
     adx_threshold = getattr(cfg, "ADX_THRESHOLD", 25)
     adx_ok = stock_adx is not None and stock_adx >= adx_threshold
@@ -254,7 +291,22 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
 
     prev = df_5m.iloc[-2]
 
-    trend = latest_completed_15m_trend(df_15m, curr["date"], cfg)
+    # ``curr["date"]`` is the start of the completed 5-minute entry
+    # candle.  Its close time is the exact information boundary for this
+    # evaluation.  All 15-minute dependencies must have ended by then.
+    evaluation_time = pd.Timestamp(curr["date"]) + pd.Timedelta(minutes=5)
+    completed_stock_15m = completed_15m_rows(df_15m, evaluation_time)
+    completed_stock_row = latest_completed_15m_row(df_15m, evaluation_time)
+
+    if completed_stock_row is None:
+        mark_filter_status(
+            symbol,
+            "TREND_OR_ADX",
+            detail={"reason": "no completed 15m candle available"},
+        )
+        return None
+
+    trend = get_trend(completed_stock_row, cfg)
     if trend is None:
         mark_filter_status(
             symbol,
@@ -270,7 +322,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         )
         return None
 
-    confidence = latest_completed_15m_confidence(df_15m, curr["date"], cfg)
+    confidence = get_trend_confidence(completed_stock_row, cfg)
     if resolve_adx_mode(cfg) == "dynamic" and confidence == "REJECTED":
         mark_filter_status(
             symbol,
@@ -283,7 +335,17 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         mark_filter_status(symbol, "MACRO_INDEX_FILTER",
                             detail={"reason": "no index data available", "decision": "HARD_REJECT"})
         return None
-    index_curr = df_index_15m.iloc[-1]
+    index_curr = latest_completed_15m_row(df_index_15m, evaluation_time)
+    if index_curr is None:
+        mark_filter_status(
+            symbol,
+            "MACRO_INDEX_FILTER",
+            detail={
+                "reason": "no completed index candle available",
+                "decision": "HARD_REJECT",
+            },
+        )
+        return None
     # Indices have no real traded volume, so their VWAP is always NaN --
     # confirmed by market_trend.py's own get_trend(..., require_vwap=False)
     # call ("indices have no real volume, VWAP is always NaN"). Use the
@@ -296,7 +358,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
     index_trend = get_trend(index_curr, cfg, require_vwap=False)
     macro_state = {"UP": "BULLISH", "DOWN": "BEARISH"}.get(index_trend, "NEUTRAL")
 
-    current_15m_vwap = df_15m[df_15m["date"] <= curr["date"]].iloc[-1]["vwap"] if not df_15m.empty else float("nan")
+    current_15m_vwap = completed_stock_row.get("vwap", float("nan"))
 
     volume_ok = curr["volume"] > prev["volume"] and curr["volume"] > (curr["avg_volume"] * cfg.VOLUME_MULTIPLIER)
 
@@ -316,20 +378,26 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             )
             return None
 
-        macro_decision, macro_detail = _macro_authorization(macro_state, "BUY", df_15m, curr, cfg)
+        macro_decision, macro_detail = _macro_authorization(
+            macro_state,
+            "BUY",
+            completed_stock_15m,
+            evaluation_time,
+            cfg,
+        )
         mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail=macro_detail)
         if macro_decision != "ALLOW":
             return None
 
 
-        if not _passes_vwap_acceptance(symbol, df_15m, df_5m, "BUY", cfg):
+        if not _passes_vwap_acceptance(symbol, completed_stock_15m, df_5m, "BUY", cfg):
             mark_filter_status(
                 symbol,
                 "VWAP_ACCEPTANCE",
                 detail={"direction": "BUY"},
             )
             return None
-        ema200_status, ema200_detail = evaluate_200ema_filter(df_15m, "BUY", cfg)
+        ema200_status, ema200_detail = evaluate_200ema_filter(completed_stock_15m, "BUY", cfg)
         if ema200_status == "FAIL":
             logger.info(format_rejection_log(symbol, ema200_status, ema200_detail))
             mark_filter_status(
@@ -388,19 +456,25 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             )
             return None
 
-        macro_decision, macro_detail = _macro_authorization(macro_state, "SELL", df_15m, curr, cfg)
+        macro_decision, macro_detail = _macro_authorization(
+            macro_state,
+            "SELL",
+            completed_stock_15m,
+            evaluation_time,
+            cfg,
+        )
         mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail=macro_detail)
         if macro_decision != "ALLOW":
             return None
 
-        if not _passes_vwap_acceptance(symbol, df_15m, df_5m, "SELL", cfg):
+        if not _passes_vwap_acceptance(symbol, completed_stock_15m, df_5m, "SELL", cfg):
             mark_filter_status(
                 symbol,
                 "VWAP_ACCEPTANCE",
                 detail={"direction": "SELL"},
             )
             return None
-        ema200_status, ema200_detail = evaluate_200ema_filter(df_15m, "SELL", cfg)
+        ema200_status, ema200_detail = evaluate_200ema_filter(completed_stock_15m, "SELL", cfg)
         if ema200_status == "FAIL":
             logger.info(format_rejection_log(symbol, ema200_status, ema200_detail))
             mark_filter_status(

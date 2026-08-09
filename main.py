@@ -500,7 +500,10 @@ def run_full_scan(
                 )
 
         if signal:
-            _snapshot_row = latest_completed_15m_row(df_15m, signal.timestamp)
+            _snapshot_row = latest_completed_15m_row(
+                df_15m,
+                pd.Timestamp(signal.timestamp) + pd.Timedelta(minutes=5),
+            )
             sector = None
             sector_df_15m = pd.DataFrame()
             sector_trend_reason = "UNMAPPED"
@@ -1348,9 +1351,11 @@ def _trend_reversed(kite, symbol, token, direction):
         if df_15m.empty:
             return False, None
         df_15m, _ = add_indicators(df_15m, df_15m.copy(), cfg)
-        as_of = df_15m["date"].max()
+        as_of = pd.Timestamp.now(tz=df_15m["date"].dt.tz)
         current_trend = latest_completed_15m_trend(df_15m, as_of, cfg)
-        latest_row = df_15m[df_15m["date"] <= as_of].iloc[-1]
+        latest_row = latest_completed_15m_row(df_15m, as_of)
+        if latest_row is None:
+            return False, None
         current_adx = latest_row.get("adx")
         wanted = "UP" if direction == "BUY" else "DOWN"
         return (current_trend != wanted), current_adx
