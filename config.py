@@ -176,7 +176,7 @@ ENABLE_CANDLE_ALIGNED_POLLING = True
 POSITION_CHECK_SECONDS = 25   # how often to check open positions between scans
 CANDLE_COMPLETION_BUFFER_SECONDS = 10
 SCAN_BUFFER_SECONDS = 12      # broker finalisation buffer + 2s safety margin
-ENTRY_SCAN_SHORTLIST_SIZE = 30  # top daily auto-watchlist priorities
+ENTRY_SCAN_SHORTLIST_SIZE = 60  # top daily auto-watchlist priorities
 
 # Sanity-check thresholds -- purely observational, log-only. Never skip
 # or alter any trading action based on these; they just surface timing
