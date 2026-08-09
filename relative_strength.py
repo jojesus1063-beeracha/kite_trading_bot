@@ -24,6 +24,8 @@ from typing import Any
 
 import pandas as pd
 
+from strategy import completed_15m_rows
+
 
 RELATIVE_STRENGTH_LOOKBACK_BARS = 4
 POINTS_PER_PERCENT_EDGE = 10.0
@@ -71,12 +73,7 @@ def completed_return_pct(
     ):
         return None
 
-    try:
-        completed = candles[
-            candles["date"] <= as_of
-        ].copy()
-    except Exception:
-        return None
+    completed = completed_15m_rows(candles, as_of).copy()
 
     closes = pd.to_numeric(
         completed["close"],
@@ -158,10 +155,15 @@ def assess_relative_strength(
     market_df_15m: pd.DataFrame,
     sector_df_15m: pd.DataFrame | None = None,
 ) -> RelativeStrengthAssessment:
-    as_of = getattr(
+    signal_timestamp = getattr(
         signal,
         "timestamp",
         None,
+    )
+    as_of = (
+        None
+        if signal_timestamp is None
+        else pd.Timestamp(signal_timestamp) + pd.Timedelta(minutes=5)
     )
 
     direction = str(

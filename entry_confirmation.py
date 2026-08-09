@@ -18,6 +18,8 @@ from typing import Any
 
 import pandas as pd
 
+from strategy import completed_15m_rows
+
 
 @dataclass(frozen=True)
 class EntryContext:
@@ -76,12 +78,7 @@ def _adx_snapshot(
     ):
         return None, None, None, "UNAVAILABLE"
 
-    try:
-        completed = df_15m[
-            df_15m["date"] <= as_of
-        ]
-    except Exception:
-        return None, None, None, "UNAVAILABLE"
+    completed = completed_15m_rows(df_15m, as_of)
 
     values = pd.to_numeric(
         completed["adx"],
@@ -142,15 +139,19 @@ def assess_entry_context(
         price_action.get("choch")
     )
 
+    signal_timestamp = getattr(signal, "timestamp", None)
+    evaluation_time = (
+        None
+        if signal_timestamp is None
+        else pd.Timestamp(signal_timestamp) + pd.Timedelta(minutes=5)
+    )
+
     (
         current_adx,
         previous_adx,
         adx_delta,
         adx_state,
-    ) = _adx_snapshot(
-        df_15m,
-        getattr(signal, "timestamp", None),
-    )
+    ) = _adx_snapshot(df_15m, evaluation_time)
 
     confirmations = sum(
         (

@@ -53,7 +53,7 @@ def make_index_15m(bullish=True):
     ema_fast = close - 20 if bullish else close + 20
     ema_slow = close - 50 if bullish else close + 50
     return pd.DataFrame([{
-        "date": datetime(2026, 8, 10, 10, 0), "close": close,
+        "date": datetime(2026, 8, 10, 9, 30), "close": close,
         "vwap": float("nan"),  # deliberately NaN -- proves the fix no longer depends on this
         "open": close, "high": close + 50, "low": close - 50,
         "ema_fast": ema_fast, "ema_slow": ema_slow, "adx": 30.0,
