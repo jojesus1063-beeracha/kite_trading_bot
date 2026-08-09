@@ -30,7 +30,9 @@ def check(name, condition):
 
 
 def make_15m_df(n, start_price, drift, adx=30.0):
-    base = datetime(2026, 8, 6, 9, 15)
+    # End the fixture at 14:45 so every generated 15m candle is complete
+    # by the 15:00 entry-candle close used below, regardless of n.
+    base = datetime(2026, 8, 6, 14, 45) - timedelta(minutes=15 * (n - 1))
     rows = []
     price = start_price
     for i in range(n):
@@ -75,7 +77,7 @@ def make_index_15m(bullish=True):
     ema_fast = close - 20 if bullish else close + 20
     ema_slow = close - 50 if bullish else close + 50
     return pd.DataFrame([{
-        "date": datetime(2026, 8, 6, 14, 55), "close": close,
+        "date": datetime(2026, 8, 6, 14, 45), "close": close,
         "vwap": float("nan"), "open": close, "high": close + 50, "low": close - 50,
         "ema_fast": ema_fast, "ema_slow": ema_slow, "adx": 30.0,
     }])
