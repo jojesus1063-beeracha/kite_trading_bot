@@ -32,6 +32,7 @@ class FakeCfg:
     TREND_GATE_MODE = "enforce"
     PULLBACK_GATE_MODE = "enforce"
     EXPERIMENTAL_PAPER_ONLY = True
+    EXPERIMENT_OBSERVATION_FILE = None
 
 
 def make_15m(n, start_price, drift, vwap_offset):
