@@ -134,11 +134,10 @@ ENABLE_TRAILING_STOP = False  # disabled when fixed-target mode is on -- the who
                                 # than letting winners run
 EXIT_IMMEDIATELY_AT_TARGET = True
 
-# Paper-only hybrid exit. One entry keeps a single total risk budget; half
-# exits at 1R and the remainder targets 2R. After the scalp fill, the runner's
-# stop moves to the confirmed entry price. Live mode intentionally falls back
-# to the existing fixed-target behavior until partial protective-stop resizing
-# is separately broker-validated.
+# Hybrid paper/live exit. One entry keeps a single total risk budget; half
+# exits at 1R and the remainder targets 2R. After the confirmed scalp fill,
+# paper mode moves its local stop to entry and live mode atomically replaces
+# the old full-size broker stop with a verified break-even runner stop.
 ENABLE_HYBRID_EXIT = True
 HYBRID_SCALP_FRACTION = 0.50
 HYBRID_SCALP_R = 1.0
