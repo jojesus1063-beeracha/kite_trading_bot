@@ -1,5 +1,6 @@
 """Strategy engine for 15-minute trend and configured entry candles."""
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +22,40 @@ from entry_timing import (
 )
 
 logger = logging.getLogger("strategy")
+
+
+def _gate_mode(cfg, name: str) -> str:
+    mode = str(getattr(cfg, name, "enforce")).strip().lower()
+    return mode if mode in {"enforce", "observe"} else "enforce"
+
+
+def _baseline_trend(row_15m: pd.Series) -> Optional[str]:
+    """Minimal direction source used only by paper observation mode."""
+    fast = row_15m.get("ema_fast")
+    slow = row_15m.get("ema_slow")
+    if pd.isna(fast) or pd.isna(slow):
+        return None
+    if fast > slow:
+        return "UP"
+    if fast < slow:
+        return "DOWN"
+    return None
+
+
+def _log_experiment_observation(symbol, direction, curr, row_15m, detail):
+    payload = {
+        "event": "EXPERIMENTAL_ENTRY_CANDIDATE",
+        "symbol": symbol,
+        "direction": direction,
+        "candle_time": pd.Timestamp(curr["date"]).isoformat(),
+        "entry_close": float(curr["close"]),
+        "ema_fast": float(row_15m["ema_fast"]),
+        "ema_slow": float(row_15m["ema_slow"]),
+        "vwap": None if pd.isna(row_15m.get("vwap")) else float(row_15m["vwap"]),
+        "adx": None if pd.isna(row_15m.get("adx")) else float(row_15m["adx"]),
+        **detail,
+    }
+    logger.info("EXPERIMENT_OBSERVATION | %s", json.dumps(payload, sort_keys=True))
 
 
 @dataclass
@@ -274,6 +309,20 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
     Calls to mark_filter_status() are observational only. They do not feed
     back into any strategy predicate or returned Signal.
     """
+    trend_gate_mode = _gate_mode(cfg, "TREND_GATE_MODE")
+    pullback_gate_mode = _gate_mode(cfg, "PULLBACK_GATE_MODE")
+    experiment_active = "observe" in {trend_gate_mode, pullback_gate_mode}
+    if (
+        experiment_active
+        and getattr(cfg, "EXPERIMENTAL_PAPER_ONLY", True)
+        and not getattr(cfg, "PAPER_TRADING", False)
+    ):
+        logger.critical(
+            "EXPERIMENT SAFETY BLOCK: observe-only strategy gates are paper-only"
+        )
+        mark_filter_status(symbol, "EXPERIMENT_LIVE_SAFETY_BLOCK")
+        return None
+
     if len(df_5m) < 2 or len(df_15m) < 1:
         mark_filter_status(symbol, "ENTRY_DATA", detail={"reason": "insufficient candle history"})
         return None
@@ -316,14 +365,24 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         )
         return None
 
-    trend = get_trend(completed_stock_row, cfg)
-    if trend is None:
+    strict_trend = get_trend(completed_stock_row, cfg)
+    trend = strict_trend
+    if strict_trend is None and trend_gate_mode == "enforce":
         mark_filter_status(
             symbol,
             "TREND_OR_ADX",
             detail={"reason": "15m EMA/VWAP trend or binary ADX requirement not satisfied"},
         )
         return None
+    if strict_trend is None:
+        trend = _baseline_trend(completed_stock_row)
+        if trend is None:
+            mark_filter_status(
+                symbol,
+                "EXPERIMENT_BASELINE_DIRECTION",
+                detail={"reason": "EMA fast and slow do not provide a direction"},
+            )
+            return None
     if pd.isna(curr["avg_volume"]) or pd.isna(curr["ema_entry"]) or pd.isna(prev["ema_entry"]):
         mark_filter_status(
             symbol,
@@ -333,7 +392,10 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         return None
 
     confidence = get_trend_confidence(completed_stock_row, cfg)
-    if resolve_adx_mode(cfg) == "dynamic" and confidence == "REJECTED":
+    strict_adx_pass = not (
+        resolve_adx_mode(cfg) == "dynamic" and confidence == "REJECTED"
+    )
+    if not strict_adx_pass and trend_gate_mode == "enforce":
         mark_filter_status(
             symbol,
             "TREND_OR_ADX",
@@ -377,7 +439,8 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         rejection = prev["close"] > prev["ema_entry"]
         confirmation = curr["close"] > prev["high"]
 
-        if not (setup and rejection and confirmation and volume_ok):
+        strict_pullback_pass = setup and rejection and confirmation and volume_ok
+        if not strict_pullback_pass and pullback_gate_mode == "enforce":
             mark_filter_status(
                 symbol,
                 "PULLBACK_SEQUENCE",
@@ -385,6 +448,13 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
                     "direction": "BUY", "setup": bool(setup), "rejection": bool(rejection),
                     "confirmation": bool(confirmation), "volume_ok": bool(volume_ok),
                 },
+            )
+            return None
+        if pullback_gate_mode == "observe" and not confirmation:
+            mark_filter_status(
+                symbol,
+                "EXPERIMENT_BASELINE_TRIGGER",
+                detail={"direction": "BUY", "confirmation": False},
             )
             return None
 
@@ -434,6 +504,22 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             mark_filter_status(symbol, "ENTRY_TIMING", detail=timing_detail)
         if timing_class == ENTRY_TIMING_INVALID:
             return None
+        if experiment_active:
+            _log_experiment_observation(
+                symbol,
+                "BUY",
+                curr,
+                completed_stock_row,
+                {
+                    "strict_trend_pass": strict_trend is not None and strict_adx_pass,
+                    "strict_pullback_pass": bool(strict_pullback_pass),
+                    "setup": bool(setup),
+                    "rejection": bool(rejection),
+                    "confirmation": bool(confirmation),
+                    "volume_ok": bool(volume_ok),
+                    "volume_ratio": float(curr["volume"] / curr["avg_volume"]),
+                },
+            )
         reason = (
             "3-step pullback: tested support, defended level, "
             f"breakout confirmation above EMA{cfg.ENTRY_EMA} "
@@ -455,7 +541,8 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         rejection = prev["close"] < prev["ema_entry"]
         confirmation = curr["close"] < prev["low"]
 
-        if not (setup and rejection and confirmation and volume_ok):
+        strict_pullback_pass = setup and rejection and confirmation and volume_ok
+        if not strict_pullback_pass and pullback_gate_mode == "enforce":
             mark_filter_status(
                 symbol,
                 "PULLBACK_SEQUENCE",
@@ -463,6 +550,13 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
                     "direction": "SELL", "setup": bool(setup), "rejection": bool(rejection),
                     "confirmation": bool(confirmation), "volume_ok": bool(volume_ok),
                 },
+            )
+            return None
+        if pullback_gate_mode == "observe" and not confirmation:
+            mark_filter_status(
+                symbol,
+                "EXPERIMENT_BASELINE_TRIGGER",
+                detail={"direction": "SELL", "confirmation": False},
             )
             return None
 
@@ -512,6 +606,22 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             mark_filter_status(symbol, "ENTRY_TIMING", detail=timing_detail)
         if timing_class == ENTRY_TIMING_INVALID:
             return None
+        if experiment_active:
+            _log_experiment_observation(
+                symbol,
+                "SELL",
+                curr,
+                completed_stock_row,
+                {
+                    "strict_trend_pass": strict_trend is not None and strict_adx_pass,
+                    "strict_pullback_pass": bool(strict_pullback_pass),
+                    "setup": bool(setup),
+                    "rejection": bool(rejection),
+                    "confirmation": bool(confirmation),
+                    "volume_ok": bool(volume_ok),
+                    "volume_ratio": float(curr["volume"] / curr["avg_volume"]),
+                },
+            )
         reason = (
             "3-step pullback: tested resistance, defended level, "
             f"breakdown confirmation below EMA{cfg.ENTRY_EMA} "
