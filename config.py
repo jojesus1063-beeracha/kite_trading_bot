@@ -49,6 +49,13 @@ ENTRY_EMA = 20          # on entry-timeframe chart
 VOLUME_LOOKBACK = 20    # bars, for entry-candle average-volume comparison
 VOLUME_MULTIPLIER = 1.2  # entry candle volume must exceed avg volume * this
 
+# Paper-only experiment policy. "observe" calculates the original strict
+# gate but lets a simpler baseline continue so rejected cases can acquire
+# paper-trade outcomes. Production behavior remains "enforce" by default.
+TREND_GATE_MODE = "enforce"
+PULLBACK_GATE_MODE = "enforce"
+EXPERIMENTAL_PAPER_ONLY = True
+
 # ADX (Average Directional Index) — measures trend STRENGTH (0-100),
 # used as an optional filter on top of the existing EMA/VWAP trend
 # check. When enabled, a 15-min candle only counts as trending if ADX
@@ -269,6 +276,11 @@ if os.path.exists(_USER_CONFIG_PATH):
     TREND_EMA_FAST = _overrides.get("trend_ema_fast", TREND_EMA_FAST)
     TREND_EMA_SLOW = _overrides.get("trend_ema_slow", TREND_EMA_SLOW)
     ENTRY_EMA = _overrides.get("entry_ema", ENTRY_EMA)
+    TREND_GATE_MODE = _overrides.get("trend_gate_mode", TREND_GATE_MODE)
+    PULLBACK_GATE_MODE = _overrides.get("pullback_gate_mode", PULLBACK_GATE_MODE)
+    EXPERIMENTAL_PAPER_ONLY = _overrides.get(
+        "experimental_paper_only", EXPERIMENTAL_PAPER_ONLY
+    )
     PAPER_TRADING = _overrides.get("paper_trading", PAPER_TRADING)
     USE_ADX_FILTER = _overrides.get("use_adx_filter", USE_ADX_FILTER)
     ADX_THRESHOLD = _overrides.get("adx_threshold", ADX_THRESHOLD)
