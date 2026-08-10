@@ -17,6 +17,7 @@ def check(name, condition):
 
 
 class FakeCfg:
+    NO_ENTRY_BEFORE = "09:30"
     USE_ADX_FILTER = False
     ADX_THRESHOLD = 25
     ADX_MODE = "off"
@@ -125,21 +126,23 @@ index_bear = make_index_15m(bullish=False)
 signal6 = evaluate("TEST", df15, df5, index_bear, cfg6)
 check("Otherwise-valid BUY sequence blocked by bearish index", signal6 is None)
 
-# -- Time filter: before 09:45 blocks even a fully valid setup -----------------
+# -- Time filter follows the configured 09:30 entry boundary ------------------
 
 cfg7 = FakeCfg()
-early_ts = datetime(2026, 8, 10, 9, 30)
+early_ts = datetime(2026, 8, 10, 9, 25)
 df5_early = make_5m_pullback_buy(entry_ema=df15["close"].iloc[-1] - 0.5, ts=early_ts)
-signal7 = evaluate("TEST", df15, df5_early, index_bull, cfg7)
-check("Before 09:45 -> blocked by time filter even with a fully valid setup", signal7 is None)
+index_early = make_index_15m(bullish=True)
+index_early.loc[:, "date"] = datetime(2026, 8, 10, 9, 15)
+signal7 = evaluate("TEST", df15, df5_early, index_early, cfg7)
+check("Before configured 09:30 -> blocked by time filter", signal7 is None)
 
-# -- At/after 09:45 -> time filter no longer blocks ----------------------------
+# -- At configured 09:30 -> time filter no longer blocks ----------------------
 
 cfg8 = FakeCfg()
-ok_ts = datetime(2026, 8, 10, 9, 45)
+ok_ts = datetime(2026, 8, 10, 9, 30)
 df5_ok_time = make_5m_pullback_buy(entry_ema=df15["close"].iloc[-1] - 0.5, ts=ok_ts)
-signal8 = evaluate("TEST", df15, df5_ok_time, index_bull, cfg8)
-check("At exactly 09:45 -> time filter does not block", signal8 is not None)
+signal8 = evaluate("TEST", df15, df5_ok_time, index_early, cfg8)
+check("At configured 09:30 -> time filter does not block", signal8 is not None)
 
 # -- No index data -> fails safe, not a crash ----------------------------------
 
