@@ -111,9 +111,23 @@ class SymbolCandleBuilder:
             return None
 
         if interval_start > self._current.start:
+            # Preserve the cumulative-volume baseline across the boundary.
+            # Without this hand-off, the difference between the final tick
+            # of the old interval and the first tick of the new interval is
+            # silently discarded from every candle after startup.
+            previous_cum_volume = self._current._last_cum_volume
             closed = self._current.finalize()
             self.finalized.append(closed)
-            self._current = _InProgressCandle(self.symbol, interval_start, price, price, price, price, 0.0)
+            self._current = _InProgressCandle(
+                self.symbol,
+                interval_start,
+                price,
+                price,
+                price,
+                price,
+                0.0,
+                _last_cum_volume=previous_cum_volume,
+            )
 
         self._current.update(price, cum_volume)
         return closed
@@ -188,9 +202,10 @@ class ShadowComparator:
 
         rest_df = fetch_candles(self.kite, instrument_token, "5minute", lookback_days=1)
         if rest_df.empty:
-            self._write({"symbol": symbol, "timeframe": "5minute", "date": ws_candle["date"].isoformat(),
-                         "status": "no_rest_data"})
-            return
+            record = {"symbol": symbol, "timeframe": "5minute", "date": ws_candle["date"].isoformat(),
+                      "status": "no_rest_data"}
+            self._write(record)
+            return record
 
         # Normalize ws_candle["date"] to match rest_df["date"]'s timezone-awareness
         # before comparing. Without this, a naive ws_candle date (as
@@ -213,15 +228,17 @@ class ShadowComparator:
         except Exception:
             logger.exception(f"candle_engine: timezone normalization failed for {symbol} -- "
                               f"logging as no match rather than risking a wrong comparison")
-            self._write({"symbol": symbol, "timeframe": "5minute", "date": ws_candle["date"].isoformat(),
-                         "status": "no_matching_rest_candle", "note": "tz_normalization_failed"})
-            return
+            record = {"symbol": symbol, "timeframe": "5minute", "date": ws_candle["date"].isoformat(),
+                      "status": "no_matching_rest_candle", "note": "tz_normalization_failed"}
+            self._write(record)
+            return record
 
         rest_row = rest_df[rest_df["date"] == ws_date]
         if rest_row.empty:
-            self._write({"symbol": symbol, "timeframe": "5minute", "date": ws_candle["date"].isoformat(),
-                         "status": "no_matching_rest_candle"})
-            return
+            record = {"symbol": symbol, "timeframe": "5minute", "date": ws_candle["date"].isoformat(),
+                      "status": "no_matching_rest_candle"}
+            self._write(record)
+            return record
 
         rest = rest_row.iloc[0]
         record = {"symbol": symbol, "timeframe": "5minute", "date": ws_candle["date"].isoformat(),
@@ -248,6 +265,7 @@ class ShadowComparator:
         if not within_tolerance:
             logger.warning(f"candle_engine shadow mismatch: {symbol} 5min {ws_candle['date']} -- {record}")
         self._write(record)
+        return record
 
     def _write(self, record: dict):
         record["logged_at"] = datetime.now(timezone.utc).isoformat()

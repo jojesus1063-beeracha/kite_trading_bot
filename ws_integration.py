@@ -74,6 +74,9 @@ class WSShadowEngine:
         self._last_finalized_15m: dict[str, dict] = {}
         self._augmentation_count: dict[str, int] = {}
         self._augmentation_skip_count: dict[str, int] = {}
+        self._validated_5m_dates: dict[str, set[str]] = {
+            s: set() for s in symbols
+        }
 
         self.ws_ticker = None
 
@@ -115,7 +118,20 @@ class WSShadowEngine:
         # -- 5-min candle shadow comparison -----------------------------
         if token is not None:
             try:
-                self.candle_shadow.compare_5m_candle(symbol, exchange, finalized_5m, token)
+                comparison = self.candle_shadow.compare_5m_candle(
+                    symbol,
+                    exchange,
+                    finalized_5m,
+                    token,
+                )
+                if (
+                    comparison
+                    and comparison.get("status") == "compared"
+                    and comparison.get("within_tolerance") is True
+                ):
+                    self._validated_5m_dates[symbol].add(
+                        self._candle_key(finalized_5m["date"])
+                    )
             except Exception:
                 logger.exception(f"ws_integration: 5min shadow comparison failed for {symbol}")
 
@@ -131,7 +147,22 @@ class WSShadowEngine:
         if combined and combined[-1]["date"] not in self._already_emitted_15m(symbol):
             candle_15m = combined[-1]
             self._mark_emitted_15m(symbol, candle_15m["date"])
-            self._last_finalized_15m[symbol] = candle_15m
+            import pandas as pd
+            bucket_start = pd.Timestamp(candle_15m["date"])
+            validated_dates = self._validated_5m_dates[symbol]
+            all_legs_validated = all(
+                self._candle_key(bucket_start + pd.Timedelta(minutes=offset))
+                in validated_dates
+                for offset in (0, 5, 10)
+            )
+            if all_legs_validated:
+                self._last_finalized_15m[symbol] = candle_15m
+            else:
+                logger.warning(
+                    "ws_integration: refusing 15minute augmentation for "
+                    f"{symbol}/{bucket_start} because one or more 5minute "
+                    "legs failed REST tolerance validation"
+                )
             state_15m = self.indicator_state_15m[symbol]
             day = candle_15m["date"].date()
             state_15m.update_ema(cfg.TREND_EMA_FAST, candle_15m["close"])
@@ -157,6 +188,8 @@ class WSShadowEngine:
             row (never skips ahead, never guesses -- a gap means "don't
             augment", not "fill the gap")
           - it is not stale (within 2x the interval duration of now)
+          - every WS-built 5-minute component passed the REST shadow
+            comparator's OHLC and volume tolerances
           - all timestamp/timezone normalization succeeds
 
         On ANY failure, mismatch, or ambiguity -- including an exception
@@ -185,6 +218,14 @@ class WSShadowEngine:
                 return df, False
 
             if latest is None:
+                return df, False
+
+            if (
+                timeframe_label == "5minute"
+                and self._candle_key(latest["date"])
+                not in self._validated_5m_dates.get(symbol, set())
+            ):
+                self._augmentation_skip_count[symbol] = self._augmentation_skip_count.get(symbol, 0) + 1
                 return df, False
 
             import pandas as pd
@@ -235,6 +276,16 @@ class WSShadowEngine:
             logger.exception(f"ws_integration: get_augmented_candles failed for {symbol}/{timeframe_label} "
                               f"-- falling back to REST-only data for this cycle")
             return df, False
+
+    @staticmethod
+    def _candle_key(date_val) -> str:
+        """Stable key for naive or timezone-aware candle timestamps."""
+        import pandas as pd
+
+        timestamp = pd.Timestamp(date_val)
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_convert("UTC")
+        return timestamp.isoformat()
 
     def _already_emitted_15m(self, symbol: str) -> set:
         return self._emitted_15m.setdefault(symbol, set())
