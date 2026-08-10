@@ -549,8 +549,6 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             reason += f" [ADX confidence: {confidence}]"
         if experiment_active:
             reason += f" [experiment_id:{observation_id}]"
-        if experiment_active:
-            reason += f" [experiment_id:{observation_id}]"
         mark_filter_status(
             symbol,
             "STRATEGY_SIGNAL",
@@ -654,6 +652,8 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             reason += " (ADX-confirmed trend)"
         if confidence:
             reason += f" [ADX confidence: {confidence}]"
+        if experiment_active:
+            reason += f" [experiment_id:{observation_id}]"
         mark_filter_status(
             symbol,
             "STRATEGY_SIGNAL",
