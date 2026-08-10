@@ -2,6 +2,7 @@
 
 import json
 import logging
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -42,12 +43,15 @@ def _baseline_trend(row_15m: pd.Series) -> Optional[str]:
     return None
 
 
-def _log_experiment_observation(symbol, direction, curr, row_15m, detail):
+def _log_experiment_observation(symbol, direction, curr, row_15m, detail, cfg):
+    candle_time = pd.Timestamp(curr["date"]).isoformat()
+    observation_id = f"{candle_time}|{symbol}|{direction}"
     payload = {
         "event": "EXPERIMENTAL_ENTRY_CANDIDATE",
+        "observation_id": observation_id,
         "symbol": symbol,
         "direction": direction,
-        "candle_time": pd.Timestamp(curr["date"]).isoformat(),
+        "candle_time": candle_time,
         "entry_close": float(curr["close"]),
         "ema_fast": float(row_15m["ema_fast"]),
         "ema_slow": float(row_15m["ema_slow"]),
@@ -56,6 +60,19 @@ def _log_experiment_observation(symbol, direction, curr, row_15m, detail):
         **detail,
     }
     logger.info("EXPERIMENT_OBSERVATION | %s", json.dumps(payload, sort_keys=True))
+    output_path = getattr(cfg, "EXPERIMENT_OBSERVATION_FILE", None)
+    if output_path:
+        try:
+            path = Path(output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        except Exception:
+            logger.exception(
+                "Failed to persist experiment observation %s; journal record remains available",
+                observation_id,
+            )
+    return observation_id
 
 
 @dataclass
@@ -505,7 +522,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         if timing_class == ENTRY_TIMING_INVALID:
             return None
         if experiment_active:
-            _log_experiment_observation(
+            observation_id = _log_experiment_observation(
                 symbol,
                 "BUY",
                 curr,
@@ -519,6 +536,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
                     "volume_ok": bool(volume_ok),
                     "volume_ratio": float(curr["volume"] / curr["avg_volume"]),
                 },
+                cfg,
             )
         reason = (
             "3-step pullback: tested support, defended level, "
@@ -529,6 +547,10 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             reason += " (ADX-confirmed trend)"
         if confidence:
             reason += f" [ADX confidence: {confidence}]"
+        if experiment_active:
+            reason += f" [experiment_id:{observation_id}]"
+        if experiment_active:
+            reason += f" [experiment_id:{observation_id}]"
         mark_filter_status(
             symbol,
             "STRATEGY_SIGNAL",
@@ -607,7 +629,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         if timing_class == ENTRY_TIMING_INVALID:
             return None
         if experiment_active:
-            _log_experiment_observation(
+            observation_id = _log_experiment_observation(
                 symbol,
                 "SELL",
                 curr,
@@ -621,6 +643,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
                     "volume_ok": bool(volume_ok),
                     "volume_ratio": float(curr["volume"] / curr["avg_volume"]),
                 },
+                cfg,
             )
         reason = (
             "3-step pullback: tested resistance, defended level, "
