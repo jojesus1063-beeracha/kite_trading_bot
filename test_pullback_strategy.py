@@ -28,6 +28,10 @@ class FakeCfg:
     ENTRY_EMA = 20
     ENABLE_200_EMA_FILTER = False
     ENABLE_VWAP_ACCEPTANCE_FILTER = False
+    PAPER_TRADING = True
+    TREND_GATE_MODE = "enforce"
+    PULLBACK_GATE_MODE = "enforce"
+    EXPERIMENTAL_PAPER_ONLY = True
 
 
 def make_15m(n, start_price, drift, vwap_offset):
@@ -158,6 +162,45 @@ try:
     check("None index dataframe -> fails safe (None), no crash", signal10 is None)
 except Exception as e:
     check(f"Should never raise on None index data, but got: {e}", False)
+
+# -- Paper observation mode bypasses strict setup/rejection/volume ----------
+cfg_observe = FakeCfg()
+cfg_observe.PULLBACK_GATE_MODE = "observe"
+df5_observe = make_5m_pullback_buy(
+    entry_ema=df15["close"].iloc[-1] - 0.5,
+    satisfies_setup=True,
+    satisfies_rejection=True,
+    satisfies_confirmation=True,
+    satisfies_volume=False,
+)
+signal_observe = evaluate("TEST", df15, df5_observe, index_bull, cfg_observe)
+check("Observe-only pullback allows the baseline breakout", signal_observe is not None)
+
+# Confirmation remains the deliberately simple replacement trigger.
+df5_no_baseline = make_5m_pullback_buy(
+    entry_ema=df15["close"].iloc[-1] - 0.5,
+    satisfies_confirmation=False,
+)
+signal_no_baseline = evaluate("TEST", df15, df5_no_baseline, index_bull, cfg_observe)
+check("Observe-only pullback still requires baseline breakout", signal_no_baseline is None)
+
+# Trend observation uses EMA ordering only as baseline direction.
+cfg_trend_observe = FakeCfg()
+cfg_trend_observe.TREND_GATE_MODE = "observe"
+df15_strict_trend_fail = df15.copy()
+df15_strict_trend_fail["ema_fast"] = df15_strict_trend_fail["close"] + 0.5
+df15_strict_trend_fail["ema_slow"] = df15_strict_trend_fail["close"] - 2.0
+signal_trend_observe = evaluate(
+    "TEST", df15_strict_trend_fail, df5, index_bull, cfg_trend_observe
+)
+check("Observe-only trend uses EMA ordering for baseline direction", signal_trend_observe is not None)
+
+# Live mode always fails closed.
+cfg_live_observe = FakeCfg()
+cfg_live_observe.PAPER_TRADING = False
+cfg_live_observe.TREND_GATE_MODE = "observe"
+signal_live_observe = evaluate("TEST", df15, df5, index_bull, cfg_live_observe)
+check("Observe-only gates are blocked outside paper mode", signal_live_observe is None)
 
 print(f"\n{passed} passed, {failed} failed")
 if failed:
