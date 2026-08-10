@@ -2,6 +2,7 @@
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 import pandas as pd
@@ -277,8 +278,19 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
 
     curr = df_5m.iloc[-1]
 
-    if curr["date"].time() < pd.Timestamp("09:45").time():
-        mark_filter_status(symbol, "TIME_FILTER", detail={"reason": "Morning volatility settling"})
+    entry_start = datetime.strptime(
+        str(getattr(cfg, "NO_ENTRY_BEFORE", "09:30")),
+        "%H:%M",
+    ).time()
+    if curr["date"].time() < entry_start:
+        mark_filter_status(
+            symbol,
+            "TIME_FILTER",
+            detail={
+                "reason": "Before configured entry window",
+                "no_entry_before": entry_start.strftime("%H:%M"),
+            },
+        )
         return None
 
     prev = df_5m.iloc[-2]
