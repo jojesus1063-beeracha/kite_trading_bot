@@ -43,8 +43,8 @@ ENTRY_HISTORY_LOOKBACK_DAYS = 5
 # ---------------------------------------------------------------------
 # Indicator settings
 # ---------------------------------------------------------------------
-TREND_EMA_FAST = 20     # on 15-min chart
-TREND_EMA_SLOW = 50     # on 15-min chart
+TREND_EMA_FAST = 9      # on 15-min chart
+TREND_EMA_SLOW = 21     # on 15-min chart
 ENTRY_EMA = 20          # on entry-timeframe chart
 VOLUME_LOOKBACK = 20    # bars, for entry-candle average-volume comparison
 VOLUME_MULTIPLIER = 1.2  # entry candle volume must exceed avg volume * this
