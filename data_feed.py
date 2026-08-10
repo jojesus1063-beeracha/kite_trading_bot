@@ -115,7 +115,7 @@ def fetch_candles(
 ) -> pd.DataFrame:
     """
     Fetch recent historical candles.
-    interval: Kite's interval strings, e.g. "5minute", "15minute".
+    interval: Kite's interval strings, e.g. "3minute", "15minute".
 
     Retries with exponential backoff on transient failures (e.g. Kite's
     rate limiting) instead of letting the exception crash the whole bot.

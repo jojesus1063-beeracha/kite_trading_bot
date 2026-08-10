@@ -26,6 +26,10 @@ def dt(h, m, s=0):
 def test_interval_parsing_5min():
     assert candle_interval_minutes("5minute") == 5
 
+
+def test_interval_parsing_3min():
+    assert candle_interval_minutes("3minute") == 3
+
 def test_interval_parsing_15min():
     assert candle_interval_minutes("15minute") == 15
 

@@ -6,6 +6,41 @@ import math
 FIFTEEN_MINUTE_BARS_PER_NSE_SESSION = 25
 DEFAULT_TREND_LOOKBACK_DAYS = 5
 DEFAULT_EMA200_HISTORY_LOOKBACK_DAYS = 20
+DEFAULT_ENTRY_HISTORY_LOOKBACK_DAYS = 5
+NSE_SESSION_MINUTES = 375
+
+
+def _interval_minutes(timeframe: str) -> int:
+    value = str(timeframe)
+    if not value.endswith("minute"):
+        raise ValueError(f"unsupported minute timeframe: {timeframe}")
+    minutes = int(value.removesuffix("minute"))
+    if minutes <= 0:
+        raise ValueError("timeframe must be positive")
+    return minutes
+
+
+def entry_indicator_lookback_days(cfg) -> int:
+    """Calendar days sufficient for all configured entry indicators."""
+
+    interval = _interval_minutes(getattr(cfg, "ENTRY_TIMEFRAME", "3minute"))
+    bars_per_session = max(1, NSE_SESSION_MINUTES // interval)
+    required_bars = max(
+        int(getattr(cfg, "ENTRY_EMA", 20)),
+        int(getattr(cfg, "VOLUME_LOOKBACK", 20)) + 1,
+        int(getattr(cfg, "RVOL_LOOKBACK", 20)) + 1,
+        15,  # ATR(14) plus one prior close
+    )
+    trading_days = math.ceil(required_bars / bars_per_session)
+    derived_calendar_days = math.ceil(trading_days * 7 / 5) + 2
+    configured_floor = int(
+        getattr(
+            cfg,
+            "ENTRY_HISTORY_LOOKBACK_DAYS",
+            DEFAULT_ENTRY_HISTORY_LOOKBACK_DAYS,
+        )
+    )
+    return max(DEFAULT_ENTRY_HISTORY_LOOKBACK_DAYS, configured_floor, derived_calendar_days)
 
 
 def entry_trend_lookback_days(cfg) -> int:

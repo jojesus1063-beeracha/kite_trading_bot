@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Optional
 
 from protective_stop_store import (
@@ -515,6 +515,7 @@ def place_protective_stop(
     stop_loss_percent,
     tick_size,
     cfg,
+    trigger_price_override=None,
     entry_operation_id=None,
     store_path=None,
 ):
@@ -574,12 +575,34 @@ def place_protective_stop(
             "Position direction must be BUY or SELL"
         )
 
-    trigger_price = calculate_protective_trigger(
-        confirmed_entry_price=confirmed_entry_price,
-        position_direction=direction,
-        stop_loss_percent=stop_loss_percent,
-        tick_size=tick_size,
-    )
+    if trigger_price_override is None:
+        trigger_price = calculate_protective_trigger(
+            confirmed_entry_price=confirmed_entry_price,
+            position_direction=direction,
+            stop_loss_percent=stop_loss_percent,
+            tick_size=tick_size,
+        )
+    else:
+        raw_override = Decimal(str(trigger_price_override))
+        entry_decimal = Decimal(str(confirmed_entry_price))
+        tick_decimal = Decimal(str(tick_size))
+        if raw_override <= 0 or tick_decimal <= 0:
+            raise ProtectiveStopError(
+                "Protective-stop trigger override must be positive"
+            )
+        rounding = ROUND_FLOOR if direction == "BUY" else ROUND_CEILING
+        trigger_decimal = (
+            raw_override / tick_decimal
+        ).quantize(Decimal("1"), rounding=rounding) * tick_decimal
+        if (
+            trigger_decimal <= 0
+            or (direction == "BUY" and trigger_decimal > entry_decimal)
+            or (direction == "SELL" and trigger_decimal < entry_decimal)
+        ):
+            raise ProtectiveStopError(
+                "Protective-stop trigger override is invalid"
+            )
+        trigger_price = float(trigger_decimal)
 
     client_tag = make_protective_stop_tag()
 

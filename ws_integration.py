@@ -33,16 +33,25 @@ from datetime import datetime
 from typing import Optional
 
 import config as cfg
-from candle_engine import SymbolCandleBuilder, combine_5m_into_15m, ShadowComparator
+from candle_engine import (
+    ShadowComparator,
+    SymbolCandleBuilder,
+    combine_entry_into_15m,
+)
+from history_requirements import (
+    entry_indicator_lookback_days,
+    entry_trend_lookback_days,
+)
 from indicators_incremental import SymbolIndicatorState, IncrementalShadowComparator
 from data_feed import fetch_candles
+from scheduler import candle_interval_minutes
 
 logger = logging.getLogger("ws_integration")
 
 
 class WSShadowEngine:
     """
-    Owns one SymbolCandleBuilder (5-min) + one SymbolIndicatorState per
+    Owns one entry-candle builder + one SymbolIndicatorState per
     timeframe per symbol, fed by WSTicker's on_tick callback. Never
     exposes anything that main.py's existing scan loop reads from --
     it only writes to ws_shadow_logs/*.jsonl for offline review.
@@ -54,16 +63,31 @@ class WSShadowEngine:
         self.tokens = tokens
         self.exchange_map = exchange_map
 
-        self.candle_builders_5m: dict[str, SymbolCandleBuilder] = {
-            s: SymbolCandleBuilder(s, interval_minutes=5) for s in symbols
+        self.entry_interval = cfg.ENTRY_TIMEFRAME
+        self.entry_interval_minutes = candle_interval_minutes(
+            self.entry_interval
+        )
+        if 15 % self.entry_interval_minutes != 0:
+            raise ValueError("ENTRY_TIMEFRAME must divide 15 minutes")
+
+        self.candle_builders_entry: dict[str, SymbolCandleBuilder] = {
+            s: SymbolCandleBuilder(
+                s,
+                interval_minutes=self.entry_interval_minutes,
+            )
+            for s in symbols
         }
+        # Compatibility aliases for offline tools written before the 3-minute
+        # migration. Production code uses the entry-named attributes.
+        self.candle_builders_5m = self.candle_builders_entry
         self.finalized_15m: dict[str, list] = {s: [] for s in symbols}
         self.indicator_state_15m: dict[str, SymbolIndicatorState] = {
             s: SymbolIndicatorState(symbol=s) for s in symbols
         }
-        self.indicator_state_5m: dict[str, SymbolIndicatorState] = {
+        self.indicator_state_entry: dict[str, SymbolIndicatorState] = {
             s: SymbolIndicatorState(symbol=s) for s in symbols
         }
+        self.indicator_state_5m = self.indicator_state_entry
 
         self.candle_shadow = ShadowComparator(kite, cfg)
         self.indicator_shadow = IncrementalShadowComparator()
@@ -74,9 +98,10 @@ class WSShadowEngine:
         self._last_finalized_15m: dict[str, dict] = {}
         self._augmentation_count: dict[str, int] = {}
         self._augmentation_skip_count: dict[str, int] = {}
-        self._validated_5m_dates: dict[str, set[str]] = {
+        self._validated_entry_dates: dict[str, set[str]] = {
             s: set() for s in symbols
         }
+        self._validated_5m_dates = self._validated_entry_dates
 
         self.ws_ticker = None
 
@@ -87,12 +112,26 @@ class WSShadowEngine:
             if token is None:
                 continue
             try:
-                df_15m = fetch_candles(self.kite, token, cfg.TREND_TIMEFRAME, lookback_days=5)
-                df_5m = fetch_candles(self.kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=5)
+                df_15m = fetch_candles(
+                    self.kite,
+                    token,
+                    cfg.TREND_TIMEFRAME,
+                    lookback_days=entry_trend_lookback_days(cfg),
+                )
+                df_entry = fetch_candles(
+                    self.kite,
+                    token,
+                    cfg.ENTRY_TIMEFRAME,
+                    lookback_days=entry_indicator_lookback_days(cfg),
+                )
                 if not df_15m.empty:
-                    self.indicator_state_15m[symbol].seed_from_history(df_15m, cfg, "15minute")
-                if not df_5m.empty:
-                    self.indicator_state_5m[symbol].seed_from_history(df_5m, cfg, "5minute")
+                    self.indicator_state_15m[symbol].seed_from_history(
+                        df_15m, cfg, cfg.TREND_TIMEFRAME
+                    )
+                if not df_entry.empty:
+                    self.indicator_state_entry[symbol].seed_from_history(
+                        df_entry, cfg, cfg.ENTRY_TIMEFRAME
+                    )
                 time.sleep(0.3)  # same courtesy delay pattern as run_full_scan's REST calls
             except Exception:
                 logger.exception(f"ws_integration: seed_from_history failed for {symbol} -- "
@@ -105,62 +144,74 @@ class WSShadowEngine:
         so an exception here can never propagate into KiteTicker's
         thread or, transitively, disrupt the main REST-based loop.
         """
-        builder = self.candle_builders_5m.get(symbol)
+        builder = self.candle_builders_entry.get(symbol)
         if builder is None:
             return
-        finalized_5m = builder.add_tick(tick)
-        if finalized_5m is None:
+        finalized_entry = builder.add_tick(tick)
+        if finalized_entry is None:
             return
 
         exchange = self.exchange_map.get(symbol, "NSE")
         token = self.tokens.get(symbol)
 
-        # -- 5-min candle shadow comparison -----------------------------
+        # -- entry-candle shadow comparison -----------------------------
         if token is not None:
             try:
-                comparison = self.candle_shadow.compare_5m_candle(
+                comparison = self.candle_shadow.compare_entry_candle(
                     symbol,
                     exchange,
-                    finalized_5m,
+                    finalized_entry,
                     token,
+                    cfg.ENTRY_TIMEFRAME,
                 )
                 if (
                     comparison
                     and comparison.get("status") == "compared"
                     and comparison.get("within_tolerance") is True
                 ):
-                    self._validated_5m_dates[symbol].add(
-                        self._candle_key(finalized_5m["date"])
+                    self._validated_entry_dates[symbol].add(
+                        self._candle_key(finalized_entry["date"])
                     )
             except Exception:
-                logger.exception(f"ws_integration: 5min shadow comparison failed for {symbol}")
+                logger.exception(
+                    f"ws_integration: {cfg.ENTRY_TIMEFRAME} shadow "
+                    f"comparison failed for {symbol}"
+                )
 
         # -- 5-min incremental indicators --------------------------------
-        state_5m = self.indicator_state_5m[symbol]
-        state_5m.update_ema(cfg.ENTRY_EMA, finalized_5m["close"])
-        state_5m.update_volume_avg(finalized_5m["volume"])
-        state_5m.update_atr(finalized_5m["high"], finalized_5m["low"], finalized_5m["close"])
+        state_entry = self.indicator_state_entry[symbol]
+        state_entry.update_ema(cfg.ENTRY_EMA, finalized_entry["close"])
+        state_entry.update_volume_avg(finalized_entry["volume"])
+        state_entry.update_atr(
+            finalized_entry["high"],
+            finalized_entry["low"],
+            finalized_entry["close"],
+        )
 
-        # -- 15-min candles, only from complete 5-min triplets -----------
-        self.finalized_15m[symbol].append(finalized_5m)
-        combined = combine_5m_into_15m(self.finalized_15m[symbol])
+        # -- 15-min candles, only from complete entry-timeframe legs -----
+        self.finalized_15m[symbol].append(finalized_entry)
+        combined = combine_entry_into_15m(
+            self.finalized_15m[symbol],
+            self.entry_interval_minutes,
+        )
         if combined and combined[-1]["date"] not in self._already_emitted_15m(symbol):
             candle_15m = combined[-1]
             self._mark_emitted_15m(symbol, candle_15m["date"])
             import pandas as pd
             bucket_start = pd.Timestamp(candle_15m["date"])
-            validated_dates = self._validated_5m_dates[symbol]
+            validated_dates = self._validated_entry_dates[symbol]
             all_legs_validated = all(
                 self._candle_key(bucket_start + pd.Timedelta(minutes=offset))
                 in validated_dates
-                for offset in (0, 5, 10)
+                for offset in range(0, 15, self.entry_interval_minutes)
             )
             if all_legs_validated:
                 self._last_finalized_15m[symbol] = candle_15m
             else:
                 logger.warning(
                     "ws_integration: refusing 15minute augmentation for "
-                    f"{symbol}/{bucket_start} because one or more 5minute "
+                    f"{symbol}/{bucket_start} because one or more "
+                    f"{cfg.ENTRY_TIMEFRAME} "
                     "legs failed REST tolerance validation"
                 )
             state_15m = self.indicator_state_15m[symbol]
@@ -188,7 +239,7 @@ class WSShadowEngine:
             row (never skips ahead, never guesses -- a gap means "don't
             augment", not "fill the gap")
           - it is not stale (within 2x the interval duration of now)
-          - every WS-built 5-minute component passed the REST shadow
+          - every WS-built entry component passed the REST shadow
             comparator's OHLC and volume tolerances
           - all timestamp/timezone normalization succeeds
 
@@ -210,10 +261,10 @@ class WSShadowEngine:
             if timeframe_label == "15minute":
                 latest = self._last_finalized_15m.get(symbol)
                 interval_minutes = 15
-            elif timeframe_label == "5minute":
-                builder = self.candle_builders_5m.get(symbol)
+            elif timeframe_label == cfg.ENTRY_TIMEFRAME:
+                builder = self.candle_builders_entry.get(symbol)
                 latest = builder.finalized[-1] if builder and builder.finalized else None
-                interval_minutes = 5
+                interval_minutes = self.entry_interval_minutes
             else:
                 return df, False
 
@@ -221,9 +272,9 @@ class WSShadowEngine:
                 return df, False
 
             if (
-                timeframe_label == "5minute"
+                timeframe_label == cfg.ENTRY_TIMEFRAME
                 and self._candle_key(latest["date"])
-                not in self._validated_5m_dates.get(symbol, set())
+                not in self._validated_entry_dates.get(symbol, set())
             ):
                 self._augmentation_skip_count[symbol] = self._augmentation_skip_count.get(symbol, 0) + 1
                 return df, False
@@ -296,8 +347,18 @@ class WSShadowEngine:
     def _run_indicator_shadow_comparison(self, symbol: str, token: int):
         from indicators import ema, vwap, atr, adx, average_volume
         try:
-            df_15m = fetch_candles(self.kite, token, cfg.TREND_TIMEFRAME, lookback_days=5)
-            df_5m = fetch_candles(self.kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=5)
+            df_15m = fetch_candles(
+                self.kite,
+                token,
+                cfg.TREND_TIMEFRAME,
+                lookback_days=entry_trend_lookback_days(cfg),
+            )
+            df_entry = fetch_candles(
+                self.kite,
+                token,
+                cfg.ENTRY_TIMEFRAME,
+                lookback_days=entry_indicator_lookback_days(cfg),
+            )
             if not df_15m.empty:
                 batch_15m = {
                     f"ema_{cfg.TREND_EMA_FAST}": float(ema(df_15m, cfg.TREND_EMA_FAST).iloc[-1]),
@@ -314,20 +375,25 @@ class WSShadowEngine:
                 }
                 self.indicator_shadow.compare(symbol, "15minute", inc_15m, batch_15m)
 
-            if not df_5m.empty:
-                batch_5m = {
-                    f"ema_{cfg.ENTRY_EMA}": float(ema(df_5m, cfg.ENTRY_EMA).iloc[-1]),
-                    "atr": float(atr(df_5m, 14).iloc[-1]),
-                    "avg_volume": float(average_volume(df_5m, cfg.VOLUME_LOOKBACK).iloc[-1]),
+            if not df_entry.empty:
+                batch_entry = {
+                    f"ema_{cfg.ENTRY_EMA}": float(ema(df_entry, cfg.ENTRY_EMA).iloc[-1]),
+                    "atr": float(atr(df_entry, 14).iloc[-1]),
+                    "avg_volume": float(average_volume(df_entry, cfg.VOLUME_LOOKBACK).iloc[-1]),
                 }
-                inc_state_5m = self.indicator_state_5m[symbol]
-                inc_5m = {
-                    f"ema_{cfg.ENTRY_EMA}": inc_state_5m.ema_periods.get(cfg.ENTRY_EMA),
-                    "atr": inc_state_5m.atr_value,
-                    "avg_volume": (sum(inc_state_5m.volume_window) / len(inc_state_5m.volume_window)
-                                   if len(inc_state_5m.volume_window) == inc_state_5m.volume_window_size else None),
+                inc_state_entry = self.indicator_state_entry[symbol]
+                inc_entry = {
+                    f"ema_{cfg.ENTRY_EMA}": inc_state_entry.ema_periods.get(cfg.ENTRY_EMA),
+                    "atr": inc_state_entry.atr_value,
+                    "avg_volume": (sum(inc_state_entry.volume_window) / len(inc_state_entry.volume_window)
+                                   if len(inc_state_entry.volume_window) == inc_state_entry.volume_window_size else None),
                 }
-                self.indicator_shadow.compare(symbol, "5minute", inc_5m, batch_5m)
+                self.indicator_shadow.compare(
+                    symbol,
+                    cfg.ENTRY_TIMEFRAME,
+                    inc_entry,
+                    batch_entry,
+                )
         except Exception:
             logger.exception(f"ws_integration: periodic indicator shadow comparison failed for {symbol}")
 

@@ -1,4 +1,4 @@
-"""VWAP acceptance confirmation for completed 5-minute entry candles.
+"""VWAP acceptance confirmation for completed entry candles.
 
 This module does not generate a direction. It validates an existing BUY or
 SELL candidate by requiring multiple consecutive completed candles to close
@@ -26,7 +26,7 @@ def evaluate_vwap_acceptance(
     """Return (status, detail) for an existing BUY or SELL candidate.
 
     Default behaviour is enabled and requires two consecutive completed
-    5-minute closes on the correct side of each candle's VWAP. The caller is
+    entry closes on the correct side of each candle's VWAP. The caller is
     responsible for supplying a dataframe whose last row is completed.
 
     Optional ``VWAP_ACCEPTANCE_REQUIRE_FULL_CANDLE`` additionally requires
@@ -47,7 +47,7 @@ def evaluate_vwap_acceptance(
         if bars < 2:
             return FAIL, {"reason": f"VWAP_ACCEPTANCE_BARS must be >= 2, got {bars}"}
         if df_5m is None or df_5m.empty:
-            return FAIL, {"reason": "no 5-minute candle data"}
+            return FAIL, {"reason": "no entry-candle data"}
         if len(df_5m) < bars:
             return FAIL, {
                 "reason": f"insufficient completed candles (have {len(df_5m)}, need {bars})"

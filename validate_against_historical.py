@@ -11,9 +11,9 @@ How it works:
    candle_engine.SymbolCandleBuilder exactly as a live tick would
    arrive (using the candle's own timestamp and close as the "last
    traded price").
-3. Compare the resulting BUILT 5-minute candles against Kite's own
-   REAL 5-minute historical candles for the same period.
-4. Do the same for 15-minute (built from 3 finalized 5-min candles).
+3. Compare the resulting built entry candles against Kite's own
+   historical entry candles for the same period.
+4. Do the same for 15-minute (built from complete entry-candle legs).
 
 This is read-only historical data -- no live WebSocket connection, no
 paper or live trading, no market hours required. Safe to run any time.
@@ -32,7 +32,8 @@ import pandas as pd
 
 from auth import get_kite_client
 from data_feed import fetch_candles, get_instrument_token
-from candle_engine import SymbolCandleBuilder, combine_5m_into_15m
+from candle_engine import SymbolCandleBuilder, combine_entry_into_15m
+from scheduler import candle_interval_minutes
 import config as cfg
 
 
@@ -58,21 +59,23 @@ def validate_symbol(kite, symbol: str, exchange: str, days: int):
         return False
     print(f"Fetched {len(minute_df)} real 1-minute candles as tick stand-ins")
 
-    # Ground truth: Kite's own real 5-minute and 15-minute candles.
-    real_5m = fetch_candles(kite, token, "5minute", from_date=from_date, to_date=to_date, trim_incomplete=False)
+    entry_interval = cfg.ENTRY_TIMEFRAME
+    entry_minutes = candle_interval_minutes(entry_interval)
+    # Ground truth: Kite's own entry-timeframe and 15-minute candles.
+    real_entry = fetch_candles(kite, token, entry_interval, from_date=from_date, to_date=to_date, trim_incomplete=False)
     real_15m = fetch_candles(kite, token, "15minute", from_date=from_date, to_date=to_date, trim_incomplete=False)
-    if real_5m.empty or real_15m.empty:
-        print("FAIL: no real 5-min/15-min historical data returned for comparison")
+    if real_entry.empty or real_15m.empty:
+        print("FAIL: no real entry/15-min historical data returned for comparison")
         return False
 
-    # -- Build 5-min candles by feeding each 1-min candle's O/H/L/C ---------
+    # -- Build entry candles by feeding each 1-min candle's O/H/L/C ---------
     # -- through the exact same builder used for live ticks -----------------
     # Feeding all 4 points per minute (not just the close) preserves that
     # minute's true open/high/low -- using only the close would make the
     # built candle's "open" field differ from Kite's real one by roughly
     # the first minute's open-close spread, which looks like a bug but
     # isn't one; it's information genuinely lost by under-sampling.
-    builder = SymbolCandleBuilder(symbol, interval_minutes=5)
+    builder = SymbolCandleBuilder(symbol, interval_minutes=entry_minutes)
     for _, row in minute_df.iterrows():
         base = row["date"]
         for offset_sec, price in [
@@ -87,42 +90,44 @@ def validate_symbol(kite, symbol: str, exchange: str, days: int):
                 "volume_traded": None,  # cumulative session volume isn't derivable from 1-min OHLC alone; volume is not compared
             }
             builder.add_tick(tick)
-    built_5m = builder.finalized_df()
+    built_entry = builder.finalized_df()
 
-    if built_5m.empty:
-        print("FAIL: builder produced zero finalized 5-min candles from the 1-min data")
+    if built_entry.empty:
+        print("FAIL: builder produced zero finalized entry candles from the 1-min data")
         return False
-    print(f"Built {len(built_5m)} 5-minute candles from the 1-minute data")
+    print(f"Built {len(built_entry)} {entry_interval} candles from 1-minute data")
 
-    # -- Compare built 5-min candles against Kite's real 5-min candles ------
-    real_5m_indexed = real_5m.set_index(real_5m["date"].dt.tz_localize(None) if real_5m["date"].dt.tz is not None
-                                          else real_5m["date"])
+    # -- Compare built entry candles against Kite's real entry candles ------
+    real_entry_indexed = real_entry.set_index(real_entry["date"].dt.tz_localize(None) if real_entry["date"].dt.tz is not None
+                                          else real_entry["date"])
     price_tolerance = 0.01  # rupees -- should match closely since both derive from the same trades
     mismatches = []
     compared = 0
-    for _, built_row in built_5m.iterrows():
+    for _, built_row in built_entry.iterrows():
         built_date = built_row["date"]
         built_date_naive = built_date.tz_localize(None) if getattr(built_date, "tzinfo", None) is not None else built_date
-        if built_date_naive not in real_5m_indexed.index:
+        if built_date_naive not in real_entry_indexed.index:
             continue
-        real_row = real_5m_indexed.loc[built_date_naive]
+        real_row = real_entry_indexed.loc[built_date_naive]
         compared += 1
         for field in ("open", "high", "low", "close"):
             delta = abs(built_row[field] - real_row[field])
             if delta > price_tolerance:
                 mismatches.append((built_date, field, built_row[field], real_row[field], delta))
 
-    print(f"\n5-MINUTE RESULT: {compared} candles matched to a real Kite candle by timestamp, "
+    print(f"\n{entry_interval.upper()} RESULT: {compared} candles matched to a real Kite candle by timestamp, "
           f"{len(mismatches)} field mismatches beyond Rs{price_tolerance} tolerance")
     if mismatches:
         print("First few mismatches:")
         for m in mismatches[:5]:
             print(f"  {m[0]} field={m[1]} built={m[2]} real={m[3]} delta={m[4]:.4f}")
 
-    # -- Same for 15-minute, built from the 5-min candles just built --------
-    built_15m_list = combine_5m_into_15m(built_5m.to_dict("records"))
+    # -- Same for 15-minute, built from the entry candles just built --------
+    built_15m_list = combine_entry_into_15m(
+        built_entry.to_dict("records"), entry_minutes
+    )
     if not built_15m_list:
-        print("\n15-MINUTE RESULT: no complete 15-min groups formed (not enough 5-min data)")
+        print("\n15-MINUTE RESULT: no complete 15-min groups formed")
     else:
         real_15m_indexed = real_15m.set_index(real_15m["date"].dt.tz_localize(None) if real_15m["date"].dt.tz is not None
                                                 else real_15m["date"])

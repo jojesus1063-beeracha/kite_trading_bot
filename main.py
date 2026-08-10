@@ -5,7 +5,7 @@ Run each trading day AFTER auth.py has generated a fresh access token:
     python auth.py
     python main.py
 
-This polls for new completed candles roughly every 5 minutes, evaluates
+This polls for each configured completed entry candle, evaluates
 the strategy on your watchlist, and places (paper or live) orders.
 
 Open positions are persisted to disk (position_store.py) after every
@@ -32,7 +32,10 @@ import candle_provider
 from watchlist_filters import classify_direction_eligibility, format_watchlist_log, NOT_ENABLED
 from rvol import passes_rvol_threshold, format_rvol_log
 from indicators import add_indicators, atr as atr_indicator
-from history_requirements import entry_trend_lookback_days
+from history_requirements import (
+    entry_indicator_lookback_days,
+    entry_trend_lookback_days,
+)
 from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_row
 from patterns import is_bear_trap, is_bull_trap
 from news_filter import evaluate_news, get_news_confidence
@@ -62,6 +65,12 @@ from position_analytics import build_full_analytics_snapshot
 from daily_report import load_trades as load_todays_trades
 from costs import net_pnl_for_trade
 from trade_levels import fixed_levels_from_fill
+from hybrid_exit import (
+    RUNNER_PENDING,
+    SCALP_PENDING,
+    apply_confirmed_hybrid_fill,
+    requested_exit_quantity,
+)
 from entry_protection import (
     apply_protective_stop_result,
     build_confirmed_position,
@@ -89,7 +98,7 @@ from cooperative_position_monitor import CooperativeScanMonitor
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("main")
 
-POLL_SECONDS = 60  # check every minute; candles only close every 5, but this keeps stop/target checks responsive
+POLL_SECONDS = 60  # legacy polling fallback; aligned mode uses ENTRY_TIMEFRAME
 
 
 def within_trading_window() -> bool:
@@ -418,6 +427,7 @@ def run_full_scan(
         exchange = exchange_map[symbol]
         candle_fetch_time = datetime.now()
         trend_lookback_days = entry_trend_lookback_days(cfg)
+        entry_lookback_days = entry_indicator_lookback_days(cfg)
 
         if getattr(
             cfg,
@@ -436,7 +446,7 @@ def run_full_scan(
                 kite,
                 token,
                 cfg.ENTRY_TIMEFRAME,
-                lookback_days=5,
+                lookback_days=entry_lookback_days,
                 now=candle_fetch_time,
                 require_advance=True,
                 fetcher=fetch_candles,
@@ -452,7 +462,7 @@ def run_full_scan(
                 kite,
                 token,
                 cfg.ENTRY_TIMEFRAME,
-                lookback_days=5,
+                lookback_days=entry_lookback_days,
             )
 
         # --- Unified candle provider: optional WS augmentation ---
@@ -504,7 +514,9 @@ def run_full_scan(
         if signal:
             _snapshot_row = latest_completed_15m_row(
                 df_15m,
-                pd.Timestamp(signal.timestamp) + pd.Timedelta(minutes=5),
+                pd.Timestamp(signal.timestamp) + pd.Timedelta(
+                    minutes=candle_interval_minutes(cfg.ENTRY_TIMEFRAME)
+                ),
             )
             sector = None
             sector_df_15m = pd.DataFrame()
@@ -1653,11 +1665,17 @@ def _prepare_protective_stop_for_exit(
     exchange,
     exit_action,
     exit_reason,
+    exit_quantity=None,
     *,
     positions_path=None,
     store_path=None,
 ):
     """Return exact-order clearance only after the stop is terminal."""
+
+    original_quantity = int(position.get("qty") or 0)
+    if exit_quantity is None:
+        exit_quantity = original_quantity
+    full_exit_requested = int(exit_quantity) == original_quantity
 
     if getattr(cfg, "PAPER_TRADING", False):
         coordination = coordinate_protective_stop_for_exit(
@@ -1667,6 +1685,7 @@ def _prepare_protective_stop_for_exit(
             cfg=cfg,
             exit_action=exit_action,
             exit_reason=exit_reason,
+            exit_quantity=exit_quantity,
             store_path=store_path,
         )
         return {
@@ -1693,6 +1712,7 @@ def _prepare_protective_stop_for_exit(
         cfg=cfg,
         exit_action=exit_action,
         exit_reason=exit_reason,
+        exit_quantity=exit_quantity,
         store_path=store_path,
     )
 
@@ -1746,11 +1766,15 @@ def _prepare_protective_stop_for_exit(
     position = open_positions[symbol]
     current_quantity = int(position.get("qty") or 0)
     clearance = coordination.get("clearance")
+    expected_clearance_quantity = (
+        current_quantity if full_exit_requested else int(exit_quantity)
+    )
 
     if (
         not coordination.get("safe_to_submit_exit")
         or not clearance
-        or int(clearance.get("quantity") or 0) != current_quantity
+        or int(clearance.get("quantity") or 0)
+        != expected_clearance_quantity
     ):
         position["manual_reconciliation_required"] = True
         position["protective_stop_exit_state"] = (
@@ -1784,6 +1808,100 @@ def _prepare_protective_stop_for_exit(
         "clearance": clearance,
         "status": coordination.get("state"),
     }
+
+
+def _reprotect_remaining_live_position(
+    kite,
+    symbol,
+    position,
+    open_positions,
+    *,
+    positions_path=None,
+    store_path=None,
+):
+    """Durably arm a new broker stop after a coordinated partial exit."""
+
+    if cfg.PAPER_TRADING:
+        return True
+
+    old_stop_operation_id = position.get(
+        "protective_stop_operation_id"
+    )
+    if old_stop_operation_id:
+        try:
+            # The coordinated full-size stop is terminal at this point.
+            # Resolve its durable intent before creating the smaller runner
+            # stop; otherwise the protective-stop store correctly rejects a
+            # second unresolved stop for the same symbol.
+            mark_protective_stop_resolved(
+                old_stop_operation_id,
+                resolution_reason=(
+                    "terminal stop replaced after coordinated partial exit"
+                ),
+                path=store_path,
+            )
+        except Exception as exc:
+            position["manual_reconciliation_required"] = True
+            position["protective_stop_exit_state"] = (
+                "OLD_STOP_RESOLUTION_UNCERTAIN"
+            )
+            position["automated_exit_blocked"] = True
+            save_positions(
+                open_positions,
+                positions_path=positions_path,
+            )
+            logger.critical(
+                "%s: old protective stop %s could not be durably resolved "
+                "before runner reprotection: %s",
+                symbol,
+                old_stop_operation_id,
+                exc,
+            )
+            return False
+
+    position.update({
+        "protective_stop_state": "PENDING",
+        "protective_stop_active": False,
+        "protective_stop_confirmation_pending": True,
+        "protective_stop_operation_id": None,
+        "protective_stop_order_id": None,
+        "protective_stop_client_tag": None,
+        "protective_stop_quantity": 0,
+        "protective_stop_exit_pending": False,
+        "protective_stop_exit_action": None,
+        "protective_stop_exit_reason": None,
+        "protective_stop_exit_state": "REPROTECTION_PENDING",
+        "entry_protected": False,
+        "automated_exit_blocked": True,
+        "manual_reconciliation_required": False,
+    })
+    # Persist the recovery point before creating a new broker side effect.
+    save_positions(open_positions, positions_path=positions_path)
+
+    result = protect_confirmed_position(
+        kite,
+        symbol,
+        position,
+        cfg,
+        store_path=store_path,
+    )
+    save_positions(open_positions, positions_path=positions_path)
+
+    protected = bool(
+        result.get("active")
+        and position.get("entry_protected")
+        and not position.get("automated_exit_blocked")
+    )
+    if not protected:
+        logger.critical(
+            "%s: remaining live quantity=%s could not be conclusively "
+            "reprotected after partial exit; automated exits remain blocked "
+            "state=%s",
+            symbol,
+            position.get("qty"),
+            position.get("protective_stop_state"),
+        )
+    return protected
 
 
 def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk, check_trend=False):
@@ -1969,6 +2087,7 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         # trend reversal are intentionally bypassed entirely -- by
         # explicit design choice, temporary pullbacks and higher-
         # timeframe trend changes must NOT close the trade early.
+        hybrid_stage = pos.get("hybrid_exit_stage")
         target_price = pos.get("target")
         try:
             if target_price is not None:
@@ -2072,7 +2191,18 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         elif structure_broken:
             result = "structure_break"
         elif hit_target:
-            result = "fixed_target"
+            if (
+                pos.get("hybrid_exit_enabled")
+                and hybrid_stage == SCALP_PENDING
+            ):
+                result = "hybrid_scalp_1r"
+            elif (
+                pos.get("hybrid_exit_enabled")
+                and hybrid_stage == RUNNER_PENDING
+            ):
+                result = "hybrid_runner_2r"
+            else:
+                result = "fixed_target"
         else:
             result = "trend_reversal"
 
@@ -2092,6 +2222,16 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         except Exception:
             pass
 
+        position_qty_before_exit = int(pos["qty"])
+        requested_qty = requested_exit_quantity(pos, result)
+
+        if requested_qty <= 0:
+            logger.critical(
+                f"{symbol}: exit trigger={result} produced invalid "
+                f"quantity {requested_qty}; position left unchanged"
+            )
+            return f"EXIT BLOCKED ({result}) | invalid quantity"
+
         preparation = _prepare_protective_stop_for_exit(
             kite,
             symbol,
@@ -2101,6 +2241,7 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             exchange,
             "EXIT",
             result,
+            requested_qty,
         )
 
         if preparation["position_closed"]:
@@ -2116,7 +2257,7 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             )
 
         pos = open_positions[symbol]
-        requested_qty = int(pos["qty"])
+        position_qty_before_exit = int(pos["qty"])
 
         exit_result = place_exit_order(
             kite,
@@ -2187,6 +2328,25 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
 
         if confirmed_qty <= 0:
             save_positions(open_positions)
+
+            if (
+                not cfg.PAPER_TRADING
+                and result == "hybrid_scalp_1r"
+                and exit_result.get("resolved", False)
+                and not pos["exit_confirmation_pending"]
+            ):
+                reprotected = _reprotect_remaining_live_position(
+                    kite,
+                    symbol,
+                    pos,
+                    open_positions,
+                )
+                if not reprotected:
+                    return (
+                        "EXIT NOT FILLED (hybrid_scalp_1r) | "
+                        "live reprotection unresolved"
+                    )
+
             finalize_terminal_exit_operation()
 
             if pos["exit_confirmation_pending"]:
@@ -2234,7 +2394,7 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             # fabricated P&L. Reduce the known live exposure, but leave
             # an explicit reconciliation record instead of inventing a
             # price or silently recording inaccurate profit.
-            remaining_qty = requested_qty - confirmed_qty
+            remaining_qty = position_qty_before_exit - confirmed_qty
 
             pos["qty"] = remaining_qty
             pos["exit_filled_quantity"] = confirmed_qty
@@ -2307,12 +2467,20 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             analytics=_trade_analytics_from_position(pos),
         )
 
-        remaining_qty = requested_qty - confirmed_qty
+        remaining_qty = position_qty_before_exit - confirmed_qty
 
         pos["exit_filled_quantity"] = confirmed_qty
         pos["exit_average_price"] = exit_price
         pos["last_exit_price"] = exit_price
         pos["last_exit_pnl"] = pnl
+
+        apply_confirmed_hybrid_fill(
+            pos,
+            reason=result,
+            confirmed_quantity=confirmed_qty,
+            exit_price=exit_price,
+            net_pnl=pnl,
+        )
 
         if remaining_qty == 0:
             logger.info(
@@ -2340,6 +2508,26 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
 
         pos["qty"] = remaining_qty
         save_positions(open_positions)
+
+        if (
+            not cfg.PAPER_TRADING
+            and result == "hybrid_scalp_1r"
+            and exit_result.get("resolved", False)
+            and not pos["exit_confirmation_pending"]
+        ):
+            if not _reprotect_remaining_live_position(
+                kite,
+                symbol,
+                pos,
+                open_positions,
+            ):
+                return (
+                    f"PARTIAL EXIT ({result}) @ {exit_price:.2f} | "
+                    f"closed {confirmed_qty}/{requested_qty} | "
+                    f"remaining {remaining_qty} | "
+                    "LIVE REPROTECTION UNRESOLVED"
+                )
+
         finalize_terminal_exit_operation()
 
         logger.warning(
@@ -3225,6 +3413,25 @@ def recover_unresolved_exits(
             )
 
             if execution.terminal:
+                exit_reason = position.get("exit_reason")
+                if (
+                    exit_reason == "hybrid_scalp_1r"
+                    and int(position.get("qty") or 0) > 0
+                ):
+                    if not _reprotect_remaining_live_position(
+                        kite,
+                        symbol,
+                        position,
+                        open_positions,
+                        positions_path=positions_path,
+                    ):
+                        logger.critical(
+                            "%s: recovered hybrid exit is terminal but "
+                            "remaining exposure is not reprotected; EXIT "
+                            "operation stays unresolved",
+                            symbol,
+                        )
+                        continue
                 mark_order_resolved(
                     operation_id,
                     resolution_reason=execution.status,
@@ -3423,6 +3630,14 @@ def recover_unresolved_exits(
         )
         position["last_exit_pnl"] = pnl
 
+        apply_confirmed_hybrid_fill(
+            position,
+            reason=exit_reason,
+            confirmed_quantity=newly_confirmed,
+            exit_price=incremental_exit_price,
+            net_pnl=pnl,
+        )
+
         if remaining_quantity == 0:
             del open_positions[symbol]
 
@@ -3433,7 +3648,21 @@ def recover_unresolved_exits(
 
         # Resolution happens only after both confirmed P&L and the
         # revised local position have been applied and persisted.
-        if execution.terminal:
+        reprotected = True
+        if (
+            execution.terminal
+            and remaining_quantity > 0
+            and exit_reason == "hybrid_scalp_1r"
+        ):
+            reprotected = _reprotect_remaining_live_position(
+                kite,
+                symbol,
+                position,
+                open_positions,
+                positions_path=positions_path,
+            )
+
+        if execution.terminal and reprotected:
             mark_order_resolved(
                 operation_id,
                 resolution_reason=execution.status,
@@ -4084,6 +4313,7 @@ def run():
                         exchange,
                         "FORCE_EXIT",
                         "square_off",
+                        int(pos.get("qty") or 0),
                     )
 
                     if preparation["position_closed"]:
@@ -4238,7 +4468,10 @@ def run():
                     logger.warning(f"Full scan starting {scan_delay:.0f}s late "
                                    f"(threshold {cfg.SCAN_DELAY_WARNING_SECONDS}s)")
 
-                logger.info(f"Entry scan starting (5-minute candle) | last completed candle: {current_candle.strftime('%H:%M')}")
+                logger.info(
+                    f"Entry scan starting ({cfg.ENTRY_TIMEFRAME} candle) | "
+                    f"last completed candle: {current_candle.strftime('%H:%M')}"
+                )
                 scan_start = time.time()
                 status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk, ws_shadow_engine=ws_shadow_engine)
                 scan_elapsed = time.time() - scan_start
@@ -4264,7 +4497,11 @@ def run():
                                    f"(threshold {cfg.SCHEDULER_WARNING_SCAN_SECONDS}s)")
 
                 next_target = next_scan_time(datetime.now(), interval_min, cfg.SCAN_BUFFER_SECONDS)
-                logger.info(f"Entry scan completed (5-minute candle) | took {scan_elapsed:.1f}s | next scan: {next_target.strftime('%H:%M:%S')}")
+                logger.info(
+                    f"Entry scan completed ({cfg.ENTRY_TIMEFRAME} candle) | "
+                    f"took {scan_elapsed:.1f}s | next scan: "
+                    f"{next_target.strftime('%H:%M:%S')}"
+                )
             else:
                 logger.info(f"Skipped duplicate scan for candle {current_candle.strftime('%H:%M')}")
 

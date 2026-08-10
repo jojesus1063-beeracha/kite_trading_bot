@@ -206,7 +206,7 @@ class SymbolIndicatorState:
         EXISTING batch indicators module, so incremental updates continue
         seamlessly from wherever the batch computation left off -- never
         starts cold from an empty/zero state.
-        `timeframe`: "15minute" or "5minute", controls which periods get seeded.
+        `timeframe`: trend or configured entry timeframe.
         """
         from indicators import ema, vwap, atr, adx, average_volume
 
@@ -249,7 +249,10 @@ class SymbolIndicatorState:
             self.adx_state.smoothed_minus_dm = None
             self._seed_adx_smoothed_components(df, getattr(cfg, "ADX_PERIOD", 14))
 
-        elif timeframe == "5minute":
+        elif timeframe in {
+            getattr(cfg, "ENTRY_TIMEFRAME", "3minute"),
+            "5minute",  # compatibility for archived validation tools
+        }:
             entry_col = ema(df, cfg.ENTRY_EMA)
             self.ema_periods[cfg.ENTRY_EMA] = float(entry_col.iloc[-1])
 

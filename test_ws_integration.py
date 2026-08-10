@@ -50,16 +50,15 @@ engine = WSShadowEngine(FakeKite(), symbols=["TESTSYM"], tokens={"TESTSYM": 1234
 engine.seed_from_history()
 check("seed_from_history() with no REST data does not raise", True)
 
-# Feed 3 full 5-min candles' worth of ticks (15 minutes = one 15-min candle)
+# Feed 5 full 3-min candles (15 minutes = one 15-min candle)
 times_and_prices = [
     ("2026-08-05T09:15:00", 100.0, 1000),
     ("2026-08-05T09:16:00", 101.0, 1200),
-    ("2026-08-05T09:19:00", 102.0, 1400),
-    ("2026-08-05T09:20:00", 103.0, 1600),  # finalizes 09:15 5-min candle
+    ("2026-08-05T09:18:00", 102.0, 1400),
+    ("2026-08-05T09:21:00", 103.0, 1600),
     ("2026-08-05T09:24:00", 104.0, 1800),
-    ("2026-08-05T09:25:00", 105.0, 2000),  # finalizes 09:20 5-min candle
-    ("2026-08-05T09:29:00", 106.0, 2200),
-    ("2026-08-05T09:30:00", 107.0, 2400),  # finalizes 09:25 5-min candle -> completes 09:15-09:30 15-min group
+    ("2026-08-05T09:27:00", 105.0, 2000),
+    ("2026-08-05T09:30:00", 107.0, 2400),
 ]
 
 for t, price, vol in times_and_prices:
@@ -68,15 +67,15 @@ for t, price, vol in times_and_prices:
 check("Unknown symbol tick is silently ignored, not an error",
       engine.handle_tick("NOT_A_SYMBOL", tick("2026-08-05T09:15:00", 100.0, 1000)) is None)
 
-builder = engine.candle_builders_5m["TESTSYM"]
-check("3 5-min candles finalized from the fed ticks", len(builder.finalized) == 3)
+builder = engine.candle_builders_entry["TESTSYM"]
+check("5 3-min candles finalized from the fed ticks", len(builder.finalized) == 5)
 
-check("15-min candle combination triggered once 3 legs completed",
-      len(engine.finalized_15m["TESTSYM"]) == 3)
+check("15-min candle combination triggered once 5 legs completed",
+      len(engine.finalized_15m["TESTSYM"]) == 5)
 
-state_5m = engine.indicator_state_5m["TESTSYM"]
-check("5-min EMA state updated from ticks", state_5m.ema_periods.get(cfg.ENTRY_EMA) is not None)
-check("5-min ATR window has entries after 3 candles", len(getattr(state_5m, "_atr_window", [])) == 3)
+state_entry = engine.indicator_state_entry["TESTSYM"]
+check("3-min EMA state updated from ticks", state_entry.ema_periods.get(cfg.ENTRY_EMA) is not None)
+check("3-min ATR window has five entries", len(getattr(state_entry, "_atr_window", [])) == 5)
 
 state_15m = engine.indicator_state_15m["TESTSYM"]
 check("15-min EMA state updated after one complete 15-min group",

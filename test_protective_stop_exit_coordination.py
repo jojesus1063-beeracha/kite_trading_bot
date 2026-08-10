@@ -203,6 +203,29 @@ def test_cancel_intent_is_durable_before_api_call():
         assert len(kite.cancel_calls) == 1
 
 
+def test_partial_exit_clearance_is_bound_to_requested_half():
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "stops.json"
+        pos = position(quantity=10)
+        create_stop(path, pos, quantity=10)
+        kite = FakeKite([active(10), cancelled(10)])
+
+        result = coordinate_protective_stop_for_exit(
+            kite,
+            symbol="INFY",
+            position=pos,
+            cfg=cfg(),
+            exit_action="EXIT",
+            exit_reason="hybrid_scalp_1r",
+            exit_quantity=5,
+            store_path=path,
+        )
+
+        assert result["safe_to_submit_exit"] is True
+        assert result["remaining_quantity"] == 10
+        assert result["clearance"]["quantity"] == 5
+
+
 def test_lost_cancel_response_reconciles_cancelled_history():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "stops.json"

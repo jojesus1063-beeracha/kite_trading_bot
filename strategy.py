@@ -1,4 +1,4 @@
-"""Strategy engine for 15-minute trend and 5-minute entries."""
+"""Strategy engine for 15-minute trend and configured entry candles."""
 
 import logging
 from dataclasses import dataclass
@@ -6,6 +6,8 @@ from datetime import datetime
 from typing import Optional
 
 import pandas as pd
+
+from scheduler import candle_interval_minutes
 
 from adx_confidence import adx_confidence, resolve_adx_mode
 from filter_diagnostics import mark_filter_status
@@ -295,10 +297,14 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
 
     prev = df_5m.iloc[-2]
 
-    # ``curr["date"]`` is the start of the completed 5-minute entry
+    # ``curr["date"]`` is the start of the completed entry-timeframe
     # candle.  Its close time is the exact information boundary for this
     # evaluation.  All 15-minute dependencies must have ended by then.
-    evaluation_time = pd.Timestamp(curr["date"]) + pd.Timedelta(minutes=5)
+    evaluation_time = pd.Timestamp(curr["date"]) + pd.Timedelta(
+        minutes=candle_interval_minutes(
+            getattr(cfg, "ENTRY_TIMEFRAME", "3minute")
+        )
+    )
     completed_stock_15m = completed_15m_rows(df_15m, evaluation_time)
     completed_stock_row = latest_completed_15m_row(df_15m, evaluation_time)
 

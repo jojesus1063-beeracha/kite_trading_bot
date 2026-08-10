@@ -204,6 +204,7 @@ def coordinate_protective_stop_for_exit(
     cfg,
     exit_action,
     exit_reason,
+    exit_quantity=None,
     store_path=None,
 ):
     """Cancel/reconcile one stop and issue clearance only when terminal.
@@ -215,6 +216,21 @@ def coordinate_protective_stop_for_exit(
     action = str(exit_action).upper()
     exchange = str(position.get("exchange") or "NSE")
     position_quantity = int(position.get("qty") or 0)
+    requested_exit_quantity = int(
+        position_quantity if exit_quantity is None else exit_quantity
+    )
+
+    if (
+        position_quantity <= 0
+        or requested_exit_quantity <= 0
+        or requested_exit_quantity > position_quantity
+    ):
+        return _blocked(
+            "EXIT_QUANTITY_INVALID",
+            "requested exit quantity is outside the local position",
+            action=action,
+            exit_reason=exit_reason,
+        )
 
     if getattr(cfg, "PAPER_TRADING", True):
         clearance = {
@@ -222,7 +238,7 @@ def coordinate_protective_stop_for_exit(
             "paper": True,
             "symbol": symbol,
             "exchange": exchange,
-            "quantity": position_quantity,
+            "quantity": requested_exit_quantity,
             "exit_action": action,
             "protective_stop_state": "PAPER",
             "protective_stop_operation_id": None,
@@ -441,6 +457,39 @@ def coordinate_protective_stop_for_exit(
         )
 
     remaining = position_quantity - newly_filled
+
+    if requested_exit_quantity < position_quantity and newly_filled:
+        update_protective_stop_exit_coordination(
+            operation_id,
+            state="PARTIAL_EXIT_STOP_FILL_CONFLICT",
+            path=store_path,
+        )
+        return _blocked(
+            "PARTIAL_EXIT_STOP_FILL_CONFLICT",
+            "protective stop filled while a partial market exit was being coordinated",
+            operation_id=operation_id,
+            order_id=record.get("order_id"),
+            action=action,
+            exit_reason=exit_reason,
+            record=record,
+        )
+
+    clearance_quantity = (
+        remaining
+        if requested_exit_quantity == position_quantity
+        else requested_exit_quantity
+    )
+
+    if clearance_quantity > remaining:
+        return _blocked(
+            "EXIT_CLEARANCE_QUANTITY_MISMATCH",
+            "requested market exit exceeds the position remaining after stop reconciliation",
+            operation_id=operation_id,
+            order_id=record.get("order_id"),
+            action=action,
+            exit_reason=exit_reason,
+            record=record,
+        )
     coordination_state = f"STOP_TERMINAL_{state}"
 
     update_protective_stop_exit_coordination(
@@ -457,7 +506,7 @@ def coordinate_protective_stop_for_exit(
             "paper": False,
             "symbol": symbol,
             "exchange": exchange,
-            "quantity": remaining,
+            "quantity": clearance_quantity,
             "exit_action": action,
             "protective_stop_state": state,
             "protective_stop_operation_id": operation_id,

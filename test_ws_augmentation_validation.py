@@ -21,17 +21,19 @@ def check(name, condition):
 
 def engine_with(latest, validated):
     engine = WSShadowEngine.__new__(WSShadowEngine)
-    engine.candle_builders_5m = {
+    engine.entry_interval = "3minute"
+    engine.entry_interval_minutes = 3
+    engine.candle_builders_entry = {
         "TEST": SimpleNamespace(finalized=[latest])
     }
     engine._last_finalized_15m = {}
-    engine._validated_5m_dates = {"TEST": set(validated)}
+    engine._validated_entry_dates = {"TEST": set(validated)}
     engine._augmentation_count = {}
     engine._augmentation_skip_count = {}
     return engine
 
 
-latest_date = pd.Timestamp.now().floor("5min") - pd.Timedelta(minutes=5)
+latest_date = pd.Timestamp.now().floor("3min") - pd.Timedelta(minutes=3)
 latest = {
     "date": latest_date,
     "open": 100.0,
@@ -43,7 +45,7 @@ latest = {
 rest = pd.DataFrame(
     [
         {
-            "date": latest_date - pd.Timedelta(minutes=5),
+            "date": latest_date - pd.Timedelta(minutes=3),
             "open": 99.0,
             "high": 101.0,
             "low": 98.0,
@@ -55,7 +57,7 @@ rest = pd.DataFrame(
 
 unvalidated = engine_with(latest, validated=[])
 result, augmented = unvalidated.get_augmented_candles(
-    "TEST", "5minute", rest
+    "TEST", "3minute", rest
 )
 check(
     "Unvalidated WS candle cannot influence strategy data",
@@ -67,7 +69,7 @@ validated = engine_with(
     validated=[WSShadowEngine._candle_key(latest_date)],
 )
 result, augmented = validated.get_augmented_candles(
-    "TEST", "5minute", rest
+    "TEST", "3minute", rest
 )
 check(
     "REST-tolerance-validated contiguous WS candle can augment",
