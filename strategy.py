@@ -53,6 +53,7 @@ def _log_experiment_observation(symbol, direction, curr, row_15m, detail, cfg):
         "direction": direction,
         "candle_time": candle_time,
         "entry_close": float(curr["close"]),
+        "trend_close": float(row_15m["close"]),
         "ema_fast": float(row_15m["ema_fast"]),
         "ema_slow": float(row_15m["ema_slow"]),
         "vwap": None if pd.isna(row_15m.get("vwap")) else float(row_15m["vwap"]),
@@ -534,7 +535,18 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
                     "rejection": bool(rejection),
                     "confirmation": bool(confirmation),
                     "volume_ok": bool(volume_ok),
-                    "volume_ratio": float(curr["volume"] / curr["avg_volume"]),
+                    "entry_ema": float(prev["ema_entry"]),
+                    "previous_low": float(prev["low"]),
+                    "previous_high": float(prev["high"]),
+                    "previous_close": float(prev["close"]),
+                    "previous_volume": float(prev["volume"]),
+                    "current_volume": float(curr["volume"]),
+                    "average_volume": float(curr["avg_volume"]),
+                    "volume_ratio": (
+                        None
+                        if float(curr["avg_volume"]) <= 0
+                        else float(curr["volume"] / curr["avg_volume"])
+                    ),
                 },
                 cfg,
             )
@@ -639,7 +651,18 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
                     "rejection": bool(rejection),
                     "confirmation": bool(confirmation),
                     "volume_ok": bool(volume_ok),
-                    "volume_ratio": float(curr["volume"] / curr["avg_volume"]),
+                    "entry_ema": float(prev["ema_entry"]),
+                    "previous_low": float(prev["low"]),
+                    "previous_high": float(prev["high"]),
+                    "previous_close": float(prev["close"]),
+                    "previous_volume": float(prev["volume"]),
+                    "current_volume": float(curr["volume"]),
+                    "average_volume": float(curr["avg_volume"]),
+                    "volume_ratio": (
+                        None
+                        if float(curr["avg_volume"]) <= 0
+                        else float(curr["volume"] / curr["avg_volume"])
+                    ),
                 },
                 cfg,
             )
