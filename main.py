@@ -36,7 +36,12 @@ from history_requirements import (
     entry_indicator_lookback_days,
     entry_trend_lookback_days,
 )
-from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_row
+from strategy import (
+    evaluate,
+    latest_completed_15m_trend,
+    latest_completed_15m_row,
+    log_experiment_filter_point,
+)
 from patterns import is_bear_trap, is_bull_trap
 from news_filter import evaluate_news, get_news_confidence
 from price_action import evaluate_price_action
@@ -283,6 +288,10 @@ def run_full_scan(
     as the original loop produced for save_bot_status().
     """
     scan_started_at = scan_started_at or datetime.now()
+    observe_technical_filters = bool(
+        getattr(cfg, "EMA_CROSSOVER_OBSERVATION_MODE", False)
+        and getattr(cfg, "PAPER_TRADING", False)
+    )
     (
         shortlisted_symbols,
         symbols_to_check,
@@ -488,23 +497,43 @@ def run_full_scan(
 
         if signal:
             eligibility, elig_detail = classify_direction_eligibility(df_15m, cfg)
-            if eligibility not in (NOT_ENABLED, signal.direction):
+            eligibility_passes = eligibility in (NOT_ENABLED, signal.direction)
+            if observe_technical_filters:
+                log_experiment_filter_point(
+                    symbol, signal.direction, "EMA200_WATCHLIST",
+                    eligibility_passes,
+                    {"eligibility": eligibility, "detail": elig_detail}, cfg,
+                    observation_id=getattr(signal, "experiment_id", None),
+                )
+            if not eligibility_passes:
                 logger.info(format_watchlist_log(symbol, eligibility, elig_detail) +
-                            f" | signal direction={signal.direction} REJECTED -- watchlist ineligible for this side")
-                signal = None
+                            f" | signal direction={signal.direction} " +
+                            ("OBSERVED -- would reject" if observe_technical_filters else
+                             "REJECTED -- watchlist ineligible for this side"))
+                if not observe_technical_filters:
+                    signal = None
 
         if signal:
             rvol_passes, rvol_value, rvol_detail = passes_rvol_threshold(
                 df_5m,
                 cfg,
             )
+            if observe_technical_filters:
+                log_experiment_filter_point(
+                    symbol, signal.direction, "RVOL", rvol_passes,
+                    {"value": rvol_value, "detail": rvol_detail,
+                     "threshold": getattr(cfg, "RVOL_THRESHOLD", None)}, cfg,
+                    observation_id=getattr(signal, "experiment_id", None),
+                )
             if not rvol_passes:
                 logger.info(
                     format_rvol_log(symbol, rvol_value, rvol_detail)
-                    + f" | signal direction={signal.direction} REJECTED -- "
-                      "RVOL confirmation failed"
+                    + f" | signal direction={signal.direction} "
+                    + ("OBSERVED -- would reject" if observe_technical_filters else
+                       "REJECTED -- RVOL confirmation failed")
                 )
-                signal = None
+                if not observe_technical_filters:
+                    signal = None
             elif getattr(cfg, "ENABLE_RVOL_FILTER", False):
                 logger.info(
                     format_rvol_log(symbol, rvol_value, rvol_detail)
@@ -574,12 +603,15 @@ def run_full_scan(
 
             if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and \
                signal.market_alignment not in ("ALIGNED", "STRONG_ALIGNMENT"):
-                logger.info(f"{symbol}: skipped -- market_alignment={signal.market_alignment} "
+                logger.info(f"{symbol}: " +
+                            ("observed -- " if observe_technical_filters else "skipped -- ") +
+                            f"market_alignment={signal.market_alignment} "
                             f"(trading against market/sector trend)")
                 status_this_cycle.append({"symbol": symbol,
-                                          "status": f"skipped, misaligned ({signal.market_alignment})"})
+                                          "status": (("observed, would reject" if observe_technical_filters else "skipped") +
+                                                     f", misaligned ({signal.market_alignment})")})
                 record_validation_event(
-                    "candidate_rejected",
+                    "candidate_would_reject" if observe_technical_filters else "candidate_rejected",
                     {
                         **signal_snapshot(signal),
                         "reason_code": "MARKET_ALIGNMENT_FILTER",
@@ -593,7 +625,16 @@ def run_full_scan(
                     },
                 )
 
-                continue
+                if not observe_technical_filters:
+                    continue
+            if observe_technical_filters:
+                log_experiment_filter_point(
+                    symbol, signal.direction, "MARKET_ALIGNMENT",
+                    signal.market_alignment in ("ALIGNED", "STRONG_ALIGNMENT"),
+                    {"alignment": signal.market_alignment, "market_trend": market_trend,
+                     "sector": sector, "sector_trend": sector_trend}, cfg,
+                    observation_id=getattr(signal, "experiment_id", None),
+                )
 
             # News filter: additional risk layer only -- never generates
             # BUY/SELL signals, only evaluates whether this existing signal
@@ -615,7 +656,9 @@ def run_full_scan(
 
             if not quality.accepted:
                 logger.info(
-                    f"{symbol}: skipped -- poor entry location "
+                    f"{symbol}: "
+                    + ("observed -- " if observe_technical_filters else "skipped -- ")
+                    + "poor entry location "
                     f"| quality_score={quality.score:.2f} "
                     f"| {quality.reason} "
                     f"| detail={quality.detail}"
@@ -625,13 +668,14 @@ def run_full_scan(
                     {
                         "symbol": symbol,
                         "status": (
-                            "skipped, poor entry location: "
+                            ("observed, would reject: " if observe_technical_filters else
+                             "skipped, poor entry location: ")
                             + quality.reason
                         ),
                     }
                 )
                 record_validation_event(
-                    "candidate_rejected",
+                    "candidate_would_reject" if observe_technical_filters else "candidate_rejected",
                     {
                         **signal_snapshot(signal),
                         "reason_code": "ENTRY_OVEREXTENDED",
@@ -646,7 +690,14 @@ def run_full_scan(
                     },
                 )
 
-                continue
+                if not observe_technical_filters:
+                    continue
+            if observe_technical_filters:
+                log_experiment_filter_point(
+                    symbol, signal.direction, "ENTRY_QUALITY", quality.accepted,
+                    {"score": quality.score, "reason": quality.reason, "detail": quality.detail}, cfg,
+                    observation_id=getattr(signal, "experiment_id", None),
+                )
 
             entry_context = assess_entry_context(
                 signal,
@@ -662,7 +713,9 @@ def run_full_scan(
 
             if not entry_context.accepted:
                 logger.info(
-                    f"{symbol}: skipped -- opposing CHoCH "
+                    f"{symbol}: "
+                    + ("observed -- " if observe_technical_filters else "skipped -- ")
+                    + "opposing CHoCH "
                     f"| {entry_context.reason} "
                     f"| detail={entry_context.detail}"
                 )
@@ -671,12 +724,13 @@ def run_full_scan(
                     {
                         "symbol": symbol,
                         "status": (
-                            "skipped, opposing CHoCH"
+                            ("observed, would reject: opposing CHoCH" if observe_technical_filters else
+                             "skipped, opposing CHoCH")
                         ),
                     }
                 )
                 record_validation_event(
-                    "candidate_rejected",
+                    "candidate_would_reject" if observe_technical_filters else "candidate_rejected",
                     {
                         **signal_snapshot(signal),
                         "reason_code": "OPPOSING_CHOCH",
@@ -691,7 +745,15 @@ def run_full_scan(
                     },
                 )
 
-                continue
+                if not observe_technical_filters:
+                    continue
+            if observe_technical_filters:
+                log_experiment_filter_point(
+                    symbol, signal.direction, "ENTRY_CONTEXT_CHOCH", entry_context.accepted,
+                    {"score_adjustment": entry_context.score_adjustment,
+                     "reason": entry_context.reason, "detail": entry_context.detail}, cfg,
+                    observation_id=getattr(signal, "experiment_id", None),
+                )
 
             relative_strength = assess_relative_strength(
                 signal,
@@ -720,10 +782,13 @@ def run_full_scan(
                 signal.news_headline = news_result["headline"]
                 signal.news_confidence_score = news_score
                 if news_decision == "REJECT":
-                    logger.info(f"{symbol}: skipped -- news={signal.news_sentiment} ({news_reason}) "
+                    logger.info(f"{symbol}: " +
+                                ("observed -- " if observe_technical_filters else "skipped -- ") +
+                                f"news={signal.news_sentiment} ({news_reason}) "
                                 f"headline: {signal.news_headline}")
                     status_this_cycle.append({"symbol": symbol,
-                                              "status": f"skipped, negative news ({signal.news_headline})"})
+                                              "status": (("observed, would reject" if observe_technical_filters else "skipped") +
+                                                         f", negative news ({signal.news_headline})")})
                     log_signal({
                         "timestamp": str(signal.timestamp), "symbol": symbol,
                         "market_trend": market_trend,
@@ -747,7 +812,7 @@ def run_full_scan(
                         "choch": (signal.price_action_detail or {}).get("choch"),
                     })
                     record_validation_event(
-                        "candidate_rejected",
+                        "candidate_would_reject" if observe_technical_filters else "candidate_rejected",
                         {
                             **signal_snapshot(signal),
                             "reason_code": "NEWS_FILTER",
@@ -763,7 +828,16 @@ def run_full_scan(
                         },
                     )
 
-                    continue
+                    if not observe_technical_filters:
+                        continue
+                if observe_technical_filters:
+                    log_experiment_filter_point(
+                        symbol, signal.direction, "NEWS_FILTER", news_decision != "REJECT",
+                        {"decision": news_decision, "reason": news_reason,
+                         "sentiment": signal.news_sentiment,
+                         "headline": signal.news_headline}, cfg,
+                        observation_id=getattr(signal, "experiment_id", None),
+                    )
 
 
             ranking_score = round(
