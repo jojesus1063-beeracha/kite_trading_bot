@@ -75,9 +75,10 @@ def augment_with_ws(df, *, symbol, interval, ws_engine=None):
 def _interval_to_timeframe_label(interval: str):
     """Maps Kite's interval strings to the timeframe labels
     ws_integration.WSShadowEngine's internal dicts are keyed by."""
+    if interval == "3minute":
+        return "3minute"
     if interval == "5minute":
         return "5minute"
     if interval == "15minute":
         return "15minute"
     return None
-

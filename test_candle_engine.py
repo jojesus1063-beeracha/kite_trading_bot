@@ -1,6 +1,11 @@
 from datetime import datetime, timezone
 
-from candle_engine import SymbolCandleBuilder, combine_5m_into_15m, _interval_start
+from candle_engine import (
+    SymbolCandleBuilder,
+    combine_5m_into_15m,
+    combine_entry_into_15m,
+    _interval_start,
+)
 
 passed, failed = 0, 0
 
@@ -84,6 +89,28 @@ legs_incomplete = legs_complete[:2]  # only 2 of 3 legs present
 result_incomplete = combine_5m_into_15m(legs_incomplete)
 check("Incomplete group (2 of 3 legs) never emits a partial 15-min candle",
       len(result_incomplete) == 0)
+
+# -- production 3-minute entry legs --------------------------------------
+
+legs_3m = [
+    {
+        "date": ts(f"2026-08-05T09:{minute:02d}:00"),
+        "open": 100 + i,
+        "high": 102 + i,
+        "low": 99 + i,
+        "close": 101 + i,
+        "volume": 100 * (i + 1),
+    }
+    for i, minute in enumerate((15, 18, 21, 24, 27))
+]
+result_3m = combine_entry_into_15m(legs_3m, 3)
+check("Five complete 3-min legs form one 15-min candle", len(result_3m) == 1)
+check("3-min-derived 15-min close comes from fifth leg", result_3m[0]["close"] == 105)
+check("Four of five 3-min legs fail closed", combine_entry_into_15m(legs_3m[:4], 3) == [])
+check(
+    "Duplicate/misaligned 3-min legs fail closed",
+    combine_entry_into_15m(legs_3m[:4] + [legs_3m[3]], 3) == [],
+)
 
 print(f"\n{passed} passed, {failed} failed")
 if failed:

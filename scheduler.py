@@ -28,7 +28,7 @@ class SchedulerState(str, Enum):
 
 def candle_interval_minutes(timeframe: str) -> int:
     """
-    Parses a Kite-style interval string ("5minute", "15minute") into
+    Parses a Kite-style interval string ("3minute", "15minute") into
     an integer number of minutes. Defaults to 5 if unrecognized.
     """
     if timeframe.endswith("minute"):

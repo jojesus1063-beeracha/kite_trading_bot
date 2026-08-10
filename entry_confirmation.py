@@ -18,6 +18,8 @@ from typing import Any
 
 import pandas as pd
 
+import config as cfg
+from scheduler import candle_interval_minutes
 from strategy import completed_15m_rows
 
 
@@ -143,7 +145,9 @@ def assess_entry_context(
     evaluation_time = (
         None
         if signal_timestamp is None
-        else pd.Timestamp(signal_timestamp) + pd.Timedelta(minutes=5)
+        else pd.Timestamp(signal_timestamp) + pd.Timedelta(
+            minutes=candle_interval_minutes(cfg.ENTRY_TIMEFRAME)
+        )
     )
 
     (

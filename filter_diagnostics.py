@@ -1,12 +1,12 @@
 """Lightweight, diagnostics-only scan filter attribution.
 
 This module records the deepest stage reached (or first blocking reason)
-for each symbol in a 5-minute scan bucket. It deliberately does not
+for each symbol in a configured entry-candle scan bucket. It deliberately does not
 influence trading decisions: callers may ignore every return value.
 
 A JSON snapshot is written to runtime/filter_diagnostics/latest.json so
 paper-trading sessions can be inspected without depending on stdout.
-When a new 5-minute bucket is observed, the previous bucket's summary is
+When a new entry bucket is observed, the previous bucket's summary is
 logged once.
 """
 
@@ -21,6 +21,9 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+import config as cfg
+from scheduler import candle_interval_minutes
+
 logger = logging.getLogger("filter_diagnostics")
 
 _PROJECT_DIR = Path(__file__).resolve().parent
@@ -34,7 +37,8 @@ _symbol_detail: dict[str, dict[str, Any]] = {}
 
 
 def _normalise_scan_key(value: Any = None) -> str:
-    """Return a stable 5-minute bucket key, preferring a candle timestamp."""
+    """Return a stable configured entry bucket key."""
+    interval = candle_interval_minutes(cfg.ENTRY_TIMEFRAME)
     try:
         if value is not None:
             if hasattr(value, "to_pydatetime"):
@@ -42,13 +46,13 @@ def _normalise_scan_key(value: Any = None) -> str:
             if isinstance(value, str):
                 value = datetime.fromisoformat(value)
             if isinstance(value, datetime):
-                minute = value.minute - (value.minute % 5)
+                minute = value.minute - (value.minute % interval)
                 return value.replace(minute=minute, second=0, microsecond=0).isoformat()
     except Exception:
         pass
 
     now = datetime.now()
-    minute = now.minute - (now.minute % 5)
+    minute = now.minute - (now.minute % interval)
     return now.replace(minute=minute, second=0, microsecond=0).isoformat()
 
 

@@ -37,15 +37,16 @@ WATCHLIST = [
 # Strategy timeframes
 # ---------------------------------------------------------------------
 TREND_TIMEFRAME = "15minute"   # Kite historical API interval string
-ENTRY_TIMEFRAME = "5minute"
+ENTRY_TIMEFRAME = "3minute"
+ENTRY_HISTORY_LOOKBACK_DAYS = 5
 
 # ---------------------------------------------------------------------
 # Indicator settings
 # ---------------------------------------------------------------------
 TREND_EMA_FAST = 20     # on 15-min chart
 TREND_EMA_SLOW = 50     # on 15-min chart
-ENTRY_EMA = 20          # on 5-min chart
-VOLUME_LOOKBACK = 20    # bars, for average-volume comparison on 5-min chart
+ENTRY_EMA = 20          # on entry-timeframe chart
+VOLUME_LOOKBACK = 20    # bars, for entry-candle average-volume comparison
 VOLUME_MULTIPLIER = 1.2  # entry candle volume must exceed avg volume * this
 
 # ADX (Average Directional Index) — measures trend STRENGTH (0-100),
@@ -132,6 +133,17 @@ ENABLE_TRAILING_STOP = False  # disabled when fixed-target mode is on -- the who
                                 # point is booking quick, consistent profits rather
                                 # than letting winners run
 EXIT_IMMEDIATELY_AT_TARGET = True
+
+# Paper-only hybrid exit. One entry keeps a single total risk budget; half
+# exits at 1R and the remainder targets 2R. After the scalp fill, the runner's
+# stop moves to the confirmed entry price. Live mode intentionally falls back
+# to the existing fixed-target behavior until partial protective-stop resizing
+# is separately broker-validated.
+ENABLE_HYBRID_EXIT = True
+HYBRID_SCALP_FRACTION = 0.50
+HYBRID_SCALP_R = 1.0
+HYBRID_RUNNER_R = 2.0
+HYBRID_MOVE_STOP_TO_BREAKEVEN = True
 
 # ---------------------------------------------------------------------
 # Execution
@@ -245,6 +257,11 @@ if os.path.exists(_USER_CONFIG_PATH):
     ENABLE_FIXED_TARGET = _overrides.get("enable_fixed_target", ENABLE_FIXED_TARGET)
     ENABLE_TRAILING_STOP = _overrides.get("enable_trailing_stop", ENABLE_TRAILING_STOP)
     EXIT_IMMEDIATELY_AT_TARGET = _overrides.get("exit_immediately_at_target", EXIT_IMMEDIATELY_AT_TARGET)
+    ENABLE_HYBRID_EXIT = _overrides.get("enable_hybrid_exit", ENABLE_HYBRID_EXIT)
+    HYBRID_SCALP_FRACTION = float(_overrides.get("hybrid_scalp_fraction", HYBRID_SCALP_FRACTION))
+    HYBRID_SCALP_R = float(_overrides.get("hybrid_scalp_r", HYBRID_SCALP_R))
+    HYBRID_RUNNER_R = float(_overrides.get("hybrid_runner_r", HYBRID_RUNNER_R))
+    HYBRID_MOVE_STOP_TO_BREAKEVEN = _overrides.get("hybrid_move_stop_to_breakeven", HYBRID_MOVE_STOP_TO_BREAKEVEN)
     MAX_TRADES_PER_DAY = _overrides.get("max_trades_per_day", MAX_TRADES_PER_DAY)
     MAX_OPEN_POSITIONS = _overrides.get("max_open_positions", MAX_OPEN_POSITIONS)
     MAX_POSITION_SIZE_PCT = _overrides.get("max_position_size_pct", MAX_POSITION_SIZE_PCT)

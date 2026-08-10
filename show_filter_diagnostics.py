@@ -28,7 +28,7 @@ LABELS = {
 def main() -> None:
     if not PATH.exists():
         print("No filter diagnostics snapshot yet.")
-        print("Run the paper bot through at least one completed 5-minute entry scan.")
+        print("Run the paper bot through at least one completed entry scan.")
         return
 
     data = json.loads(PATH.read_text(encoding="utf-8"))

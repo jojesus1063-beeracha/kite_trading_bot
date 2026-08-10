@@ -6,6 +6,7 @@ import math
 
 from protective_stop import place_protective_stop
 from trade_levels import fixed_levels_from_fill
+from hybrid_exit import configure_hybrid_exit
 
 
 SIGNAL_ANALYTICS_FIELDS = {
@@ -181,7 +182,7 @@ def build_confirmed_position(
     if signal_analytics:
         position.update(_validated_signal_analytics(signal_analytics))
 
-    return position
+    return configure_hybrid_exit(position, cfg)
 
 
 def build_recovered_position(order_record, execution_result, cfg):
@@ -274,7 +275,7 @@ def build_recovered_position(order_record, execution_result, cfg):
     if isinstance(signal_analytics, dict):
         position.update(_validated_signal_analytics(signal_analytics))
 
-    return position
+    return configure_hybrid_exit(position, cfg)
 
 
 def apply_protective_stop_result(position, result):
@@ -306,10 +307,7 @@ def apply_protective_stop_result(position, result):
         )
         position["stop"] = float(result["trigger_price"])
 
-    position_quantity = int(
-        position.get("filled_quantity", position.get("qty", 0))
-        or 0
-    )
+    position_quantity = int(position.get("qty") or 0)
     coverage_complete = active and stop_quantity == position_quantity
     position["entry_protected"] = coverage_complete
 
@@ -393,6 +391,12 @@ def protect_confirmed_position(
     entry_price = float(entry_price)
     stop_price = float(stop_price)
 
+    breakeven_runner = (
+        position.get("hybrid_exit_enabled")
+        and position.get("hybrid_exit_stage") == "RUNNER_PENDING"
+        and math.isclose(stop_price, entry_price, rel_tol=0, abs_tol=1e-9)
+    )
+
     if (
         not math.isfinite(entry_price)
         or not math.isfinite(stop_price)
@@ -400,12 +404,13 @@ def protect_confirmed_position(
         or stop_price <= 0
         or (
             position["direction"] == "BUY"
-            and stop_price >= entry_price
+            and stop_price > entry_price
         )
         or (
             position["direction"] == "SELL"
-            and stop_price <= entry_price
+            and stop_price < entry_price
         )
+        or (stop_price == entry_price and not breakeven_runner)
     ):
         position["protective_stop_state"] = "INVALID_PROTECTION_PLAN"
         position["manual_reconciliation_required"] = True
@@ -419,18 +424,20 @@ def protect_confirmed_position(
         }
 
     stop_loss_percent = abs(entry_price - stop_price) / entry_price * 100
+    trigger_override = stop_price if breakeven_runner else None
 
     try:
         result = stop_placer(
             kite,
             symbol=symbol,
             position_direction=position["direction"],
-            quantity=int(position["filled_quantity"]),
+            quantity=int(position["qty"]),
             exchange=position["exchange"],
             confirmed_entry_price=entry_price,
             stop_loss_percent=stop_loss_percent,
             tick_size=float(position.get("tick_size") or 0.05),
             cfg=cfg,
+            trigger_price_override=trigger_override,
             entry_operation_id=position.get("entry_operation_id"),
             store_path=store_path,
         )
@@ -447,7 +454,7 @@ def protect_confirmed_position(
             "order_id": None,
             "client_tag": None,
             "trigger_price": stop_price,
-            "requested_quantity": int(position["filled_quantity"]),
+            "requested_quantity": int(position["qty"]),
         }
 
     apply_protective_stop_result(position, result)

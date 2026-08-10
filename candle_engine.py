@@ -1,8 +1,8 @@
 """
 Streaming candle builder (Phase 2 of the WS candle engine).
 
-Builds 5-min candles from ws_ticker.TickBuffer ticks, and 15-min
-candles by combining three finalized 5-min candles -- never built
+Builds configured entry candles from ws_ticker.TickBuffer ticks, and 15-min
+candles by combining a complete set of finalized entry candles -- never built
 independently from ticks, so the two timeframes can't drift apart the
 way they could if each aggregated raw ticks on its own clock.
 
@@ -82,7 +82,7 @@ def _interval_start(ts: datetime, minutes: int) -> datetime:
 
 
 class SymbolCandleBuilder:
-    """Builds finalized 5-min candles for a single symbol from ticks fed in order."""
+    """Build finalized candles for one symbol from ticks fed in order."""
 
     def __init__(self, symbol: str, interval_minutes: int = 5):
         self.symbol = symbol
@@ -139,26 +139,40 @@ class SymbolCandleBuilder:
         return pd.DataFrame(self.finalized)
 
 
-def combine_5m_into_15m(candles_5m: list[dict]) -> list[dict]:
+def combine_entry_into_15m(
+    entry_candles: list[dict],
+    entry_interval_minutes: int,
+) -> list[dict]:
     """
-    Combines finalized 5-min candles into 15-min candles, three at a
-    time, aligned to the wall clock (e.g. 09:15-09:30, not a rolling
-    window). Only emits a 15-min candle once all three of its 5-min
-    legs are present -- an incomplete trailing group is dropped, same
-    "never expose a still-forming candle" rule as the 5-min builder.
+    Combine finalized entry candles into exact wall-clock 15-minute bars.
+
+    The entry interval must divide 15 exactly. For the production 3-minute
+    timeframe this requires five distinct legs at offsets 0, 3, 6, 9 and
+    12 minutes. Duplicate, missing, misaligned, or extra legs fail closed.
     """
-    if not candles_5m:
+    interval = int(entry_interval_minutes)
+    if interval <= 0 or 15 % interval != 0:
+        raise ValueError("entry interval must divide 15 minutes exactly")
+
+    if not entry_candles:
         return []
 
     groups: dict[datetime, list[dict]] = {}
-    for c in candles_5m:
+    for c in entry_candles:
         bucket_start = _interval_start(c["date"], 15)
         groups.setdefault(bucket_start, []).append(c)
 
     out = []
     for bucket_start in sorted(groups):
         legs = sorted(groups[bucket_start], key=lambda c: c["date"])
-        if len(legs) != 3:
+        expected_dates = [
+            bucket_start + timedelta(minutes=offset)
+            for offset in range(0, 15, interval)
+        ]
+        if (
+            len(legs) != len(expected_dates)
+            or [c["date"] for c in legs] != expected_dates
+        ):
             continue  # incomplete group -- don't emit a partial 15-min candle
         out.append({
             "date": bucket_start,
@@ -169,6 +183,12 @@ def combine_5m_into_15m(candles_5m: list[dict]) -> list[dict]:
             "volume": sum(c["volume"] for c in legs),
         })
     return out
+
+
+def combine_5m_into_15m(candles_5m: list[dict]) -> list[dict]:
+    """Backward-compatible wrapper retained for historical validators."""
+
+    return combine_entry_into_15m(candles_5m, 5)
 
 
 class ShadowComparator:
@@ -197,12 +217,24 @@ class ShadowComparator:
         when = when or datetime.now()
         return os.path.join(self.log_dir, f"ws_shadow_{when:%Y-%m-%d}.jsonl")
 
-    def compare_5m_candle(self, symbol: str, exchange: str, ws_candle: dict, instrument_token: int):
+    def compare_entry_candle(
+        self,
+        symbol: str,
+        exchange: str,
+        ws_candle: dict,
+        instrument_token: int,
+        interval: str,
+    ):
         from data_feed import fetch_candles
 
-        rest_df = fetch_candles(self.kite, instrument_token, "5minute", lookback_days=1)
+        rest_df = fetch_candles(
+            self.kite,
+            instrument_token,
+            interval,
+            lookback_days=1,
+        )
         if rest_df.empty:
-            record = {"symbol": symbol, "timeframe": "5minute", "date": ws_candle["date"].isoformat(),
+            record = {"symbol": symbol, "timeframe": interval, "date": ws_candle["date"].isoformat(),
                       "status": "no_rest_data"}
             self._write(record)
             return record
@@ -228,20 +260,20 @@ class ShadowComparator:
         except Exception:
             logger.exception(f"candle_engine: timezone normalization failed for {symbol} -- "
                               f"logging as no match rather than risking a wrong comparison")
-            record = {"symbol": symbol, "timeframe": "5minute", "date": ws_candle["date"].isoformat(),
+            record = {"symbol": symbol, "timeframe": interval, "date": ws_candle["date"].isoformat(),
                       "status": "no_matching_rest_candle", "note": "tz_normalization_failed"}
             self._write(record)
             return record
 
         rest_row = rest_df[rest_df["date"] == ws_date]
         if rest_row.empty:
-            record = {"symbol": symbol, "timeframe": "5minute", "date": ws_candle["date"].isoformat(),
+            record = {"symbol": symbol, "timeframe": interval, "date": ws_candle["date"].isoformat(),
                       "status": "no_matching_rest_candle"}
             self._write(record)
             return record
 
         rest = rest_row.iloc[0]
-        record = {"symbol": symbol, "timeframe": "5minute", "date": ws_candle["date"].isoformat(),
+        record = {"symbol": symbol, "timeframe": interval, "date": ws_candle["date"].isoformat(),
                   "status": "compared"}
         within_tolerance = True
         for field_name in ("open", "high", "low", "close"):
@@ -263,9 +295,29 @@ class ShadowComparator:
 
         record["within_tolerance"] = within_tolerance
         if not within_tolerance:
-            logger.warning(f"candle_engine shadow mismatch: {symbol} 5min {ws_candle['date']} -- {record}")
+            logger.warning(
+                f"candle_engine shadow mismatch: {symbol} {interval} "
+                f"{ws_candle['date']} -- {record}"
+            )
         self._write(record)
         return record
+
+    def compare_5m_candle(
+        self,
+        symbol: str,
+        exchange: str,
+        ws_candle: dict,
+        instrument_token: int,
+    ):
+        """Backward-compatible wrapper for historical tests/tools."""
+
+        return self.compare_entry_candle(
+            symbol,
+            exchange,
+            ws_candle,
+            instrument_token,
+            "5minute",
+        )
 
     def _write(self, record: dict):
         record["logged_at"] = datetime.now(timezone.utc).isoformat()
