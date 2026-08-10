@@ -82,19 +82,38 @@ def _interval_start(ts: datetime, minutes: int) -> datetime:
 
 
 class SymbolCandleBuilder:
-    """Builds finalized 5-min candles for a single symbol from ticks fed in order."""
+    """Builds finalized 5-min candles for a single symbol from ticks fed in order.
+
+    A WebSocket process can connect in the middle of a candle. That first
+    interval is not a complete OHLCV candle because ticks from the beginning
+    of the interval were never observed. Such a startup-partial interval is
+    deliberately discarded instead of being compared with REST history,
+    fed into incremental indicators, or exposed for live augmentation.
+
+    Once an interval boundary is observed, subsequent candles are complete.
+    The previous tick's cumulative day-volume is carried across the boundary
+    as the new candle's volume baseline so the first inter-tick volume delta
+    is not silently lost.
+    """
 
     def __init__(self, symbol: str, interval_minutes: int = 5):
         self.symbol = symbol
         self.interval_minutes = interval_minutes
         self._current: Optional[_InProgressCandle] = None
+        self._current_complete = False
         self.finalized: list[dict] = []  # ordered, oldest first
 
     def add_tick(self, tick: dict) -> Optional[dict]:
         """
         Feeds one tick (as produced by ws_ticker.TickBuffer). Returns the
-        finalized candle dict if this tick closed out the previous
+        finalized candle dict if this tick closed out a complete previous
         interval, else None.
+
+        The very first interval after process/WebSocket startup is returned
+        only when its first observed tick is exactly on the interval boundary.
+        If startup occurs mid-interval, that partial candle is discarded on
+        the first rollover and normal full-candle emission begins immediately
+        with the next interval.
         """
         ts = tick["exchange_timestamp"]
         price = tick["last_price"]
@@ -106,14 +125,39 @@ class SymbolCandleBuilder:
         closed = None
 
         if self._current is None:
-            self._current = _InProgressCandle(self.symbol, interval_start, price, price, price, price, 0.0)
+            self._current = _InProgressCandle(
+                self.symbol, interval_start, price, price, price, price, 0.0
+            )
+            # Only an exact boundary-start tick proves we observed the whole
+            # interval. A mid-candle process start cannot reconstruct prior
+            # OHLCV safely from cumulative volume alone.
+            self._current_complete = ts == interval_start
             self._current.update(price, cum_volume)
             return None
 
         if interval_start > self._current.start:
-            closed = self._current.finalize()
-            self.finalized.append(closed)
-            self._current = _InProgressCandle(self.symbol, interval_start, price, price, price, price, 0.0)
+            previous_last_cum_volume = self._current._last_cum_volume
+
+            if self._current_complete:
+                closed = self._current.finalize()
+                self.finalized.append(closed)
+            else:
+                logger.info(
+                    "%s: discarded startup-partial %s-minute WS candle at %s",
+                    self.symbol,
+                    self.interval_minutes,
+                    self._current.start,
+                )
+
+            self._current = _InProgressCandle(
+                self.symbol, interval_start, price, price, price, price, 0.0
+            )
+            # From this boundary onward the builder has continuously observed
+            # the feed. Carry the prior cumulative-volume baseline so the
+            # volume between the last old-interval tick and first new-interval
+            # tick is counted rather than dropped.
+            self._current._last_cum_volume = previous_last_cum_volume
+            self._current_complete = True
 
         self._current.update(price, cum_volume)
         return closed
