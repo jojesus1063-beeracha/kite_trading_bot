@@ -76,6 +76,205 @@ def _log_experiment_observation(symbol, direction, curr, row_15m, detail, cfg):
     return observation_id
 
 
+def log_experiment_filter_point(
+    symbol,
+    direction,
+    stage,
+    passed,
+    detail,
+    cfg,
+    *,
+    observation_id=None,
+):
+    """Persist one non-blocking technical-filter datapoint for research."""
+    payload = {
+        "event": "EXPERIMENT_FILTER_DATAPOINT",
+        "observation_id": observation_id,
+        "symbol": symbol,
+        "direction": direction,
+        "stage": stage,
+        "passed": None if passed is None else bool(passed),
+        "would_block": passed is False,
+        "detail": detail or {},
+        "recorded_at": datetime.now().isoformat(),
+    }
+    logger.info("EXPERIMENT_FILTER_POINT | %s", json.dumps(payload, sort_keys=True, default=str))
+    output_path = getattr(cfg, "EXPERIMENT_OBSERVATION_FILE", None)
+    if output_path:
+        try:
+            path = Path(output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True, default=str) + "\n")
+        except Exception:
+            logger.exception("Failed to persist experiment filter point for %s/%s", symbol, stage)
+
+
+def _ema_crossover_direction(completed_15m: pd.DataFrame) -> Optional[str]:
+    """Return only a fresh EMA crossover; ordinary alignment is not enough."""
+    if completed_15m is None or len(completed_15m) < 2:
+        return None
+    previous = completed_15m.iloc[-2]
+    current = completed_15m.iloc[-1]
+    values = (
+        previous.get("ema_fast"), previous.get("ema_slow"),
+        current.get("ema_fast"), current.get("ema_slow"),
+    )
+    if any(pd.isna(value) for value in values):
+        return None
+    previous_fast, previous_slow, current_fast, current_slow = values
+    if previous_fast <= previous_slow and current_fast > current_slow:
+        return "UP"
+    if previous_fast >= previous_slow and current_fast < current_slow:
+        return "DOWN"
+    return None
+
+
+def _evaluate_ema_crossover_observation(
+    symbol,
+    df_15m,
+    df_entry,
+    df_index_15m,
+    cfg,
+):
+    """Paper-only EMA9/EMA21 experiment with non-blocking filter telemetry."""
+    if getattr(cfg, "EXPERIMENTAL_PAPER_ONLY", True) and not getattr(cfg, "PAPER_TRADING", False):
+        logger.critical("EXPERIMENT SAFETY BLOCK: EMA crossover observation mode is paper-only")
+        mark_filter_status(symbol, "EXPERIMENT_LIVE_SAFETY_BLOCK")
+        return None
+    if (getattr(cfg, "TREND_EMA_FAST", None), getattr(cfg, "TREND_EMA_SLOW", None)) != (9, 21):
+        logger.critical("EXPERIMENT SAFETY BLOCK: crossover mode requires TREND_EMA_FAST=9 and TREND_EMA_SLOW=21")
+        mark_filter_status(symbol, "EXPERIMENT_EMA_CONFIG_BLOCK")
+        return None
+    if df_entry is None or len(df_entry) < 2 or df_15m is None or len(df_15m) < 2:
+        mark_filter_status(symbol, "ENTRY_DATA", detail={"reason": "insufficient crossover history"})
+        return None
+
+    curr = df_entry.iloc[-1]
+    prev = df_entry.iloc[-2]
+    entry_start = datetime.strptime(str(getattr(cfg, "NO_ENTRY_BEFORE", "09:30")), "%H:%M").time()
+    if curr["date"].time() < entry_start:
+        mark_filter_status(symbol, "TIME_FILTER", detail={"reason": "Before configured entry window"})
+        return None
+
+    evaluation_time = pd.Timestamp(curr["date"]) + pd.Timedelta(
+        minutes=candle_interval_minutes(getattr(cfg, "ENTRY_TIMEFRAME", "3minute"))
+    )
+    completed = completed_15m_rows(df_15m, evaluation_time)
+    direction_trend = _ema_crossover_direction(completed)
+    if direction_trend is None:
+        mark_filter_status(symbol, "EMA_9_21_CROSSOVER", detail={"crossed": False})
+        return None
+
+    direction = "BUY" if direction_trend == "UP" else "SELL"
+    row_15m = completed.iloc[-1]
+    previous_15m = completed.iloc[-2]
+    observation_id = f"{pd.Timestamp(curr['date']).isoformat()}|{symbol}|{direction}"
+    log_experiment_filter_point(
+        symbol, direction, "EMA_9_21_CROSSOVER", True,
+        {
+            "previous_fast": previous_15m.get("ema_fast"),
+            "previous_slow": previous_15m.get("ema_slow"),
+            "current_fast": row_15m.get("ema_fast"),
+            "current_slow": row_15m.get("ema_slow"),
+        }, cfg, observation_id=observation_id,
+    )
+
+    avg_volume = curr.get("avg_volume")
+    entry_ema = prev.get("ema_entry")
+    vwap = row_15m.get("vwap")
+    volume_ok = (
+        not pd.isna(avg_volume)
+        and curr.get("volume", 0) > prev.get("volume", 0)
+        and curr.get("volume", 0) > avg_volume * getattr(cfg, "VOLUME_MULTIPLIER", 1.0)
+    )
+    if direction == "BUY":
+        setup = False if pd.isna(entry_ema) else prev["low"] <= entry_ema
+        if not pd.isna(vwap):
+            setup = setup or prev["low"] <= vwap
+        rejection = False if pd.isna(entry_ema) else prev["close"] > entry_ema
+        confirmation = curr["close"] > prev["high"]
+        stop = prev["low"] * (1 - getattr(cfg, "SL_BUFFER_PCT", 0.05) / 100)
+        risk = curr["close"] - stop
+    else:
+        setup = False if pd.isna(entry_ema) else prev["high"] >= entry_ema
+        if not pd.isna(vwap):
+            setup = setup or prev["high"] >= vwap
+        rejection = False if pd.isna(entry_ema) else prev["close"] < entry_ema
+        confirmation = curr["close"] < prev["low"]
+        sell_buffer = getattr(cfg, "SL_BUFFER_PCT_SELL", None) or getattr(cfg, "SL_BUFFER_PCT", 0.05)
+        stop = prev["high"] * (1 + sell_buffer / 100)
+        risk = stop - curr["close"]
+
+    pullback_pass = bool(setup and rejection and confirmation and volume_ok)
+    log_experiment_filter_point(
+        symbol, direction, "PULLBACK_SEQUENCE", pullback_pass,
+        {"setup": bool(setup), "rejection": bool(rejection), "confirmation": bool(confirmation),
+         "volume_ok": bool(volume_ok), "current_volume": curr.get("volume"),
+         "average_volume": avg_volume, "volume_multiplier": getattr(cfg, "VOLUME_MULTIPLIER", None)},
+        cfg, observation_id=observation_id,
+    )
+
+    macro_state = "UNAVAILABLE"
+    macro_decision = "UNKNOWN"
+    if df_index_15m is not None and not df_index_15m.empty:
+        index_row = latest_completed_15m_row(df_index_15m, evaluation_time)
+        if index_row is not None:
+            index_trend = get_trend(index_row, cfg, require_vwap=False)
+            macro_state = {"UP": "BULLISH", "DOWN": "BEARISH"}.get(index_trend, "NEUTRAL")
+            macro_decision, _ = _macro_authorization(macro_state, direction, completed, evaluation_time, cfg)
+    log_experiment_filter_point(
+        symbol, direction, "MACRO_INDEX_FILTER", macro_decision == "ALLOW",
+        {"macro_state": macro_state, "decision": macro_decision}, cfg,
+        observation_id=observation_id,
+    )
+
+    vwap_pass = _passes_vwap_acceptance(symbol, completed, df_entry, direction, cfg)
+    log_experiment_filter_point(
+        symbol, direction, "VWAP_ACCEPTANCE", vwap_pass,
+        {"vwap": vwap, "entry_close": curr.get("close")}, cfg,
+        observation_id=observation_id,
+    )
+    ema200_status, ema200_detail = evaluate_200ema_filter(completed, direction, cfg)
+    log_experiment_filter_point(
+        symbol, direction, "EMA200_CONFIRMATION", ema200_status != "FAIL",
+        {"status": ema200_status, **(ema200_detail or {})}, cfg,
+        observation_id=observation_id,
+    )
+    timing_class, timing_detail = evaluate_entry_timing(symbol, direction, df_entry, curr, prev, cfg)
+    log_experiment_filter_point(
+        symbol, direction, "ENTRY_TIMING", timing_class != ENTRY_TIMING_INVALID,
+        {"classification": timing_class, **(timing_detail or {})}, cfg,
+        observation_id=observation_id,
+    )
+
+    # Valid stop geometry is an execution-safety prerequisite, not a technical filter.
+    if risk <= 0:
+        mark_filter_status(symbol, "INVALID_RISK_GEOMETRY", detail={"direction": direction})
+        return None
+    entry = float(curr["close"])
+    target = entry + risk * cfg.RISK_REWARD_MIN if direction == "BUY" else entry - risk * cfg.RISK_REWARD_MIN
+    _log_experiment_observation(
+        symbol, direction, curr, row_15m,
+        {
+            "ema_crossover_pass": True,
+            "strict_pullback_pass": pullback_pass,
+            "setup": bool(setup), "rejection": bool(rejection),
+            "confirmation": bool(confirmation), "volume_ok": bool(volume_ok),
+            "macro_state": macro_state, "macro_decision": macro_decision,
+            "vwap_acceptance_pass": bool(vwap_pass),
+            "ema200_status": ema200_status, "entry_timing": timing_class,
+        }, cfg,
+    )
+    mark_filter_status(symbol, "STRATEGY_SIGNAL", detail={"direction": direction, "experiment": True})
+    return Signal(
+        symbol, direction, entry, float(stop), float(target), curr["date"],
+        "Paper experiment: fresh EMA9/EMA21 crossover; all other technical filters observational",
+        confidence=get_trend_confidence(row_15m, cfg),
+        experiment_id=observation_id,
+    )
+
+
 @dataclass
 class Signal:
     symbol: str
@@ -92,6 +291,7 @@ class Signal:
     news_confidence_score: Optional[float] = None
     price_action_score: Optional[float] = None
     price_action_detail: Optional[dict] = None
+    experiment_id: Optional[str] = None
 
 
 def get_trend(row_15m: pd.Series, cfg=None, require_vwap: bool = True) -> Optional[str]:
@@ -327,6 +527,11 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
     Calls to mark_filter_status() are observational only. They do not feed
     back into any strategy predicate or returned Signal.
     """
+    if getattr(cfg, "EMA_CROSSOVER_OBSERVATION_MODE", False):
+        return _evaluate_ema_crossover_observation(
+            symbol, df_15m, df_5m, df_index_15m, cfg
+        )
+
     trend_gate_mode = _gate_mode(cfg, "TREND_GATE_MODE")
     pullback_gate_mode = _gate_mode(cfg, "PULLBACK_GATE_MODE")
     experiment_active = "observe" in {trend_gate_mode, pullback_gate_mode}
