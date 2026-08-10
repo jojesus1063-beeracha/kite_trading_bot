@@ -1,6 +1,6 @@
 # Kite intraday candle + MA trading bot
 
-Strategy: 15-min trend filter (9/21 EMA + VWAP) confirms direction,
+Strategy: 15-min trend filter (9/35 EMA + VWAP) confirms direction,
 3-min pullback/rejection/confirmation candles + entry EMA + volume
 triggers entry, strict stop-loss with a minimum 1:2 reward:risk.
 
