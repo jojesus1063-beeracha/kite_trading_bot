@@ -91,7 +91,11 @@ def replay_trade(signal, bars):
             break
 
     if remaining > 0:
-        eligible = bars[bars["date"].dt.strftime("%H:%M") <= SQUARE_OFF]
+        square_off_ts = pd.Timestamp(f"{SESSION_DATE} {SQUARE_OFF}")
+        candle_tz = bars["date"].dt.tz
+        if candle_tz is not None:
+            square_off_ts = square_off_ts.tz_localize(candle_tz)
+        eligible = bars[(bars["date"] + pd.Timedelta(minutes=3)) <= square_off_ts]
         if not eligible.empty:
             last = eligible.iloc[-1]
             exit_leg(remaining, float(last["close"]), last["date"], "square_off_approx")
@@ -205,7 +209,14 @@ signals.sort(key=lambda item: (item["time"], item["symbol"]))
 trades = []
 for signal in signals:
     m3 = data[signal["symbol"]]["m3"]
-    future = m3[(m3["date"] >= signal["time"]) & (m3["date"].dt.strftime("%H:%M") <= SQUARE_OFF)]
+    square_off_ts = pd.Timestamp(f"{SESSION_DATE} {SQUARE_OFF}")
+    candle_tz = m3["date"].dt.tz
+    if candle_tz is not None:
+        square_off_ts = square_off_ts.tz_localize(candle_tz)
+    future = m3[
+        (m3["date"] >= signal["time"])
+        & ((m3["date"] + pd.Timedelta(minutes=3)) <= square_off_ts)
+    ]
     legs = replay_trade(signal, future)
     trades.append({**signal, "legs": legs})
 
