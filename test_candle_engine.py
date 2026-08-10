@@ -53,8 +53,15 @@ check("Finalized candle volume == cumulative volume delta over the interval",
 check("Finalized candle date == interval start (09:30), not first-tick time",
       r3["date"] == ts("2026-08-05T09:30:00"))
 
+# The first 09:35 tick's cumulative-volume delta from the final 09:30
+# candle tick belongs to the new interval and must not disappear.
+b.add_tick(tick("2026-08-05T09:36:00", 104.0, 2300))
+r4 = b.add_tick(tick("2026-08-05T09:40:00", 105.0, 2500))
+check("Volume baseline carries across candle boundaries without dropping trades",
+      r4["volume"] == (2100 - 2000) + (2300 - 2100))
+
 df = b.finalized_df()
-check("finalized_df() never includes the still-forming candle", len(df) == 1)
+check("finalized_df() never includes the still-forming candle", len(df) == 2)
 
 # -- combine_5m_into_15m -------------------------------------------------
 

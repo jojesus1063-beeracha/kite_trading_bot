@@ -277,7 +277,10 @@ if os.path.exists(_USER_CONFIG_PATH):
 # WebSocket candle engine (opt-in infrastructure change)
 # ---------------------------------------------------------------------
 ENABLE_WS_CANDLES = True
-WS_CANDLE_MODE = "live"  # "shadow" or "live" -- ignored while ENABLE_WS_CANDLES is False
+# REST remains authoritative while WS-vs-REST shadow comparisons show
+# material OHLC/volume differences. Promote back to "live" only after a
+# reviewed session demonstrates tolerance compliance.
+WS_CANDLE_MODE = "shadow"  # "shadow" or "live" -- ignored while ENABLE_WS_CANDLES is False
 WS_SECTOR_INDICES = []
 WS_INDICATOR_SHADOW_INTERVAL_MINUTES = 30
 WS_STALE_TICK_SECONDS = 5.0
@@ -294,6 +297,7 @@ ENABLE_200_EMA_FILTER = True
 EMA200_TIMEFRAME = "15minute"
 EMA200_PERIOD = 200
 EMA200_LOOKBACK = 250
+EMA200_HISTORY_LOOKBACK_DAYS = 20
 EMA200_ALLOW_TOUCH = False
 EMA200_MIN_DISTANCE_PCT = 0.10
 EMA200_SLOPE_LOOKBACK = 5

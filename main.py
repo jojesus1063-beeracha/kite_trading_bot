@@ -32,6 +32,7 @@ import candle_provider
 from watchlist_filters import classify_direction_eligibility, format_watchlist_log, NOT_ENABLED
 from rvol import passes_rvol_threshold, format_rvol_log
 from indicators import add_indicators, atr as atr_indicator
+from history_requirements import entry_trend_lookback_days
 from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_row
 from patterns import is_bear_trap, is_bull_trap
 from news_filter import evaluate_news, get_news_confidence
@@ -416,6 +417,7 @@ def run_full_scan(
 
         exchange = exchange_map[symbol]
         candle_fetch_time = datetime.now()
+        trend_lookback_days = entry_trend_lookback_days(cfg)
 
         if getattr(
             cfg,
@@ -426,7 +428,7 @@ def run_full_scan(
                 kite,
                 token,
                 cfg.TREND_TIMEFRAME,
-                lookback_days=5,
+                lookback_days=trend_lookback_days,
                 now=candle_fetch_time,
                 fetcher=fetch_candles,
             )
@@ -444,7 +446,7 @@ def run_full_scan(
                 kite,
                 token,
                 cfg.TREND_TIMEFRAME,
-                lookback_days=5,
+                lookback_days=trend_lookback_days,
             )
             df_5m = fetch_candles(
                 kite,
