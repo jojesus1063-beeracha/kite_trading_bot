@@ -50,9 +50,9 @@ def entry_frame(buy=True):
         previous = {"open": 80.5, "high": 81.0, "low": 79.5, "close": 80.5}
         current = {"open": 80.5, "high": 80.8, "low": 79.8, "close": 80.0}
     return pd.DataFrame([
-        {"date": datetime(2026, 8, 10, 9, 42), **previous,
+        {"date": datetime(2026, 8, 10, 9, 39), **previous,
          "volume": 100, "avg_volume": 1000.0, "ema_entry": 90.0},
-        {"date": datetime(2026, 8, 10, 9, 45), **current,
+        {"date": datetime(2026, 8, 10, 9, 42), **current,
          "volume": 10, "avg_volume": 1000.0, "ema_entry": 90.0},
     ])
 
@@ -73,6 +73,14 @@ check("fresh bearish EMA9/EMA21 crossover produces SELL", sell is not None and s
 
 aligned = evaluate("TEST", trend_frame(101, 100, 102, 100), entry_frame(True), None, cfg)
 check("ordinary EMA alignment without a fresh cross does not trigger", aligned is None)
+
+stale_entry = entry_frame(True).copy()
+stale_entry["date"] = [
+    datetime(2026, 8, 10, 9, 42),
+    datetime(2026, 8, 10, 9, 45),
+]
+stale = evaluate("TEST", trend_frame(99, 100, 101, 100), stale_entry, None, cfg)
+check("same completed crossover cannot retrigger on a later 3-minute scan", stale is None)
 
 live_cfg = Cfg()
 live_cfg.PAPER_TRADING = False
