@@ -178,7 +178,7 @@ def _stock_adx(df_15m: pd.DataFrame, as_of_ts) -> Optional[float]:
 
 
 def _stock_ema_slope(df_15m: pd.DataFrame, as_of_ts) -> Optional[float]:
-    """1-bar-back slope of the stock's own 15m ema_fast (EMA20 on the
+    """1-bar-back slope of the stock's own 15m ema_fast (EMA9 on the
     configured TREND_EMA_FAST period). Positive = rising, negative =
     falling. Requires at least 2 completed 15m bars."""
     if df_15m is None or df_15m.empty or "date" not in df_15m.columns:

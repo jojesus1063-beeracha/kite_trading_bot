@@ -2,7 +2,7 @@
 Dynamic watchlist classification via 200 EMA.
 
 DISTINCT FROM trend_filters.py's evaluate_200ema_filter(): that module
-runs AT ENTRY TIME, after EMA20/50/VWAP/ADX have already determined a
+runs AT ENTRY TIME, after fast/slow EMA, VWAP, and ADX have determined a
 direction, and can REJECT an otherwise-valid signal. This module runs
 BEFORE any of that -- it decides whether a symbol is even eligible to
 be scanned for BUY or SELL at all, using only price vs. the 200 EMA.
@@ -10,7 +10,7 @@ be scanned for BUY or SELL at all, using only price vs. the 200 EMA.
 Per the spec: "The 200 EMA should NOT be used as a hard trade entry
 filter... it should determine which stocks deserve to remain in
 today's active watchlist." If a symbol is below its 200 EMA, this
-module says "don't even bother computing EMA20/50/VWAP/ADX for a BUY
+module says "don't even bother computing trend EMA/VWAP/ADX for a BUY
 on this symbol today" -- saving computation, not rejecting a specific
 signal that was otherwise fully qualified.
 
@@ -59,7 +59,7 @@ def classify_direction_eligibility(df_15m: pd.DataFrame, cfg) -> tuple:
     if eligibility != SELL. NEITHER means skip both directions for
     today. NOT_ENABLED means proceed exactly as before this filter
     existed -- both directions remain in play, decided by the existing
-    EMA20/50/VWAP/ADX/price-action logic alone.
+    configured trend-EMA/VWAP/ADX/price-action logic alone.
     """
     if not getattr(cfg, "ENABLE_EMA200_WATCHLIST", False):
         return NOT_ENABLED, {"reason": "watchlist filter disabled"}
