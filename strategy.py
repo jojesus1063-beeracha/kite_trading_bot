@@ -161,6 +161,20 @@ def _evaluate_ema_crossover_observation(
         minutes=candle_interval_minutes(getattr(cfg, "ENTRY_TIMEFRAME", "3minute"))
     )
     completed = completed_15m_rows(df_15m, evaluation_time)
+    if len(completed) < 2:
+        mark_filter_status(symbol, "ENTRY_DATA", detail={"reason": "fewer than two completed 15m candles"})
+        return None
+    crossover_candle_close = pd.Timestamp(completed.iloc[-1]["date"]) + pd.Timedelta(minutes=15)
+    if crossover_candle_close != evaluation_time:
+        mark_filter_status(
+            symbol,
+            "EMA_9_21_CROSSOVER_STALE",
+            detail={
+                "crossover_candle_close": crossover_candle_close.isoformat(),
+                "evaluation_time": evaluation_time.isoformat(),
+            },
+        )
+        return None
     direction_trend = _ema_crossover_direction(completed)
     if direction_trend is None:
         mark_filter_status(symbol, "EMA_9_21_CROSSOVER", detail={"crossed": False})
@@ -173,6 +187,7 @@ def _evaluate_ema_crossover_observation(
     log_experiment_filter_point(
         symbol, direction, "EMA_9_21_CROSSOVER", True,
         {
+            "crossover_candle_close": crossover_candle_close.isoformat(),
             "previous_fast": previous_15m.get("ema_fast"),
             "previous_slow": previous_15m.get("ema_slow"),
             "current_fast": row_15m.get("ema_fast"),
