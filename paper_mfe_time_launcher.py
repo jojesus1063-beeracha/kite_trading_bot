@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Paper-only launcher adding the agreed MFE + time exit management model.
+"""Paper-only launcher adding the selected MFE + time exit management model.
 
 This wraps the existing paper ADX/EMA/RSI launcher without changing live logic.
 Hard stop, fixed/hybrid targets and existing position exits run first. Only when
 an existing position remains open does this paper-only layer consider an MFE/time
 exit.
 
-Rules:
-- <10 min: no MFE/time exit; give the trade room.
-- 10-20 min: if MFE >= 0.30% and >=50% of that favourable move is given back,
-  close the remaining paper position.
+Selected rules, based on the 2026-08-11 paper-session review:
+- <20 min: no MFE/time exit; give the trade room.
 - 20-40 min:
     * if MFE >= 0.50% and current profit has fallen to <=0.30%, close to lock it;
     * otherwise if MFE >= 0.40% and >=50% is given back, close it.
 - >40 min: if MFE >= 0.30% and >=50% is given back, close it.
-- >60 min: if MFE never reached 0.30%, close as stale/non-progressing.
+
+Disabled from the MFE/time layer:
+- 10-20 minute protection exit.
+- >60 minute stale/non-progressing exit.
+
+Those disabled cases remain governed by the existing native hard stop/target,
+hybrid exit, MAE adverse-trend layer, and end-of-day square-off.
 
 MFE/time never blocks an entry and never changes live trading.
 """
@@ -30,16 +34,12 @@ import paper_contrarian_launcher as base
 
 logger = logging.getLogger("paper_mfe_time_launcher")
 
-MIN_HOLD_MINUTES = 10.0
-EARLY_END_MINUTES = 20.0
+MIN_HOLD_MINUTES = 20.0
 MID_END_MINUTES = 40.0
-STALE_MINUTES = 60.0
-EARLY_MFE_PCT = 0.30
 MID_MFE_PCT = 0.40
 LOCK_MFE_PCT = 0.50
 LOCK_CURRENT_PCT = 0.30
 LATE_MFE_PCT = 0.30
-STALE_MAX_MFE_PCT = 0.30
 GIVEBACK_PCT = 50.0
 
 
@@ -93,25 +93,17 @@ def _mfe_time_reason(minutes, mfe, current_pct, giveback_pct):
     if minutes is None or minutes < MIN_HOLD_MINUTES:
         return None
 
-    # After 60 minutes, a trade that never demonstrated 0.30% MFE is stale.
-    if minutes > STALE_MINUTES and mfe < STALE_MAX_MFE_PCT:
-        return "mfe_time_stale_60m"
-
+    # >40 minutes: retain the strongest late-giveback rule from the session.
     if minutes > MID_END_MINUTES:
         if mfe >= LATE_MFE_PCT and giveback_pct >= GIVEBACK_PCT:
             return "mfe_time_late_giveback"
         return None
 
-    if minutes >= EARLY_END_MINUTES:
-        if mfe >= LOCK_MFE_PCT and current_pct <= LOCK_CURRENT_PCT:
-            return "mfe_time_lock_20_40"
-        if mfe >= MID_MFE_PCT and giveback_pct >= GIVEBACK_PCT:
-            return "mfe_time_giveback_20_40"
-        return None
-
-    # 10-20 minutes: protect a move only after it has first reached 0.30%.
-    if mfe >= EARLY_MFE_PCT and giveback_pct >= GIVEBACK_PCT:
-        return "mfe_time_protect_10_20"
+    # 20-40 minutes: retain only the profitable lock/giveback rules.
+    if mfe >= LOCK_MFE_PCT and current_pct <= LOCK_CURRENT_PCT:
+        return "mfe_time_lock_20_40"
+    if mfe >= MID_MFE_PCT and giveback_pct >= GIVEBACK_PCT:
+        return "mfe_time_giveback_20_40"
     return None
 
 
@@ -286,7 +278,7 @@ def install_mfe_time_exit_patch(trading_main):
 
     trading_main.check_position_exit = check_position_exit
     logger.warning(
-        "PAPER MFE/TIME EXIT ACTIVE: <10m hold; 10-20m MFE>=0.30%%/50%% giveback; 20-40m MFE>=0.40%%/50%% giveback or MFE>=0.50%% falling to <=0.30%%; >40m MFE>=0.30%%/50%% giveback; >60m stale if MFE<0.30%%"
+        "PAPER MFE/TIME EXIT ACTIVE: <20m hold; 20-40m MFE>=0.40%%/50%% giveback or MFE>=0.50%% falling to <=0.30%%; >40m MFE>=0.30%%/50%% giveback; 10-20m protect and >60m stale exits disabled"
     )
 
 
