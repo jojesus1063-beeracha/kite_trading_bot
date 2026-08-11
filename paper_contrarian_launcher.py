@@ -2,11 +2,13 @@
 """Paper-only EMA9/EMA21 + RSI directional strategy.
 
 ONLY two indicators may determine BUY/SELL:
-1) EMA9/EMA21 on completed entry candles gives the base direction.
+1) EMA9/EMA21 on completed entry candles gives the REVERSED base direction:
+   - EMA9 > EMA21 -> SELL
+   - EMA9 < EMA21 -> BUY
 2) RSI(14) is evaluated second:
    - RSI >= 70 -> BUY override
    - RSI <= 30 -> SELL override
-   - 30 < RSI < 70 -> PASS; keep EMA9/EMA21 direction
+   - 30 < RSI < 70 -> PASS; keep reversed EMA9/EMA21 direction
 
 All other technical/market inputs are observational only in this launcher and
 cannot reject or reverse a signal. Existing execution safety, position sizing,
@@ -52,7 +54,7 @@ def calculate_rsi(df: pd.DataFrame, period: int = RSI_PERIOD):
 
 
 def ema_direction(df: pd.DataFrame):
-    """EMA9/21 base direction on the latest completed entry candle."""
+    """Reversed EMA9/21 base direction on the latest completed entry candle."""
     if df is None or df.empty or "close" not in df.columns or len(df) < EMA_SLOW:
         return None, None, None
     close = pd.to_numeric(df["close"], errors="coerce")
@@ -61,14 +63,14 @@ def ema_direction(df: pd.DataFrame):
     if pd.isna(ema9) or pd.isna(ema21):
         return None, None, None
     if ema9 > ema21:
-        return "BUY", float(ema9), float(ema21)
-    if ema9 < ema21:
         return "SELL", float(ema9), float(ema21)
+    if ema9 < ema21:
+        return "BUY", float(ema9), float(ema21)
     return None, float(ema9), float(ema21)
 
 
 def rsi_direction(rsi):
-    """Extreme RSI overrides; None means PASS to EMA direction."""
+    """Extreme RSI overrides; None means PASS to reversed EMA direction."""
     if rsi is None:
         return None
     if rsi >= RSI_OVERBOUGHT:
@@ -164,7 +166,7 @@ def install_two_indicator_patch() -> None:
         )
 
         reason = (
-            f"PAPER TWO-INDICATOR | EMA9={ema9:.4f} EMA21={ema21:.4f} -> {base_direction} | "
+            f"PAPER TWO-INDICATOR | REVERSED EMA9={ema9:.4f} EMA21={ema21:.4f} -> {base_direction} | "
             f"RSI({RSI_PERIOD})={rsi_text} {mode} -> {final_direction} | "
             "all other indicators observational"
         )
@@ -181,7 +183,7 @@ def install_two_indicator_patch() -> None:
 
     strategy.evaluate = two_indicator_evaluate
     logger.warning(
-        "PAPER TWO-INDICATOR MODE ACTIVE: EMA9/21 base; RSI>=70 BUY override; RSI<=30 SELL override; RSI30-70 PASS; all other indicators observational"
+        "PAPER TWO-INDICATOR MODE ACTIVE: REVERSED EMA9/21 base (EMA9>21 SELL, EMA9<21 BUY); RSI>=70 BUY override; RSI<=30 SELL override; RSI30-70 PASS; all other indicators observational"
     )
 
 
