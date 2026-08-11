@@ -13,25 +13,26 @@ Current PAPER policy:
 - no paper daily entry-count cap
 - no paper per-symbol completed-entry cap
 - no post-loss cooldown
-- no practical max-open-position cap for distinct symbols
+- no practical max-open-position count cap for distinct symbols
+- aggregate realized-loss + open-risk + proposed-risk guard remains binding
 - same-symbol concurrent entries remain blocked by the core position model,
   because open_positions is keyed by symbol and cannot safely represent two
   independent same-symbol positions
-- daily realized-loss halt: 5.0%
+- daily realized-loss halt: 5.0%, sticky for the trading day
+- a service/process restart NEVER auto-clears a daily-loss halt
+- explicit override requires PAPER_ALLOW_DAILY_HALT_CLEAR=YES
 - executable PAPER emergency stop: 0.75%
 - MAE/MFE settings are passed to the downstream paper exit wrappers
 
-The strategy's 0.45% stop geometry is retained for position sizing and hybrid
-1R/2R target construction; after position construction, the PAPER executable
-stop is widened to the 0.75% emergency stop. A successful hybrid scalp may
-still move the runner stop to breakeven.
+The strategy's 0.45% stop geometry is retained for position sizing, aggregate
+open-risk estimation and hybrid 1R/2R target construction; after position
+construction, the PAPER executable stop is widened to the 0.75% emergency
+stop. A successful hybrid scalp may still move the runner stop to breakeven.
 """
 from __future__ import annotations
 
 import json
 import logging
-from datetime import date
-from pathlib import Path
 
 import config as cfg
 
@@ -66,8 +67,6 @@ PAPER_MFE_LATE_THRESHOLD_PCT = 0.30
 PAPER_MFE_GIVEBACK_PCT = 50.0
 PAPER_DEAD_TRADE_MINUTES = 40.0
 PAPER_DEAD_TRADE_MAX_MFE_PCT = 0.30
-
-DAY_STATE_PATH = Path(__file__).resolve().parent / "day_state.json"
 
 
 def apply_paper_risk_overrides() -> None:
@@ -109,45 +108,25 @@ def apply_paper_risk_overrides() -> None:
     capital = float(getattr(cfg, "CAPITAL", 0.0) or 0.0)
     max_loss_amount = capital * PAPER_MAX_DAILY_LOSS_PCT / 100.0
 
-    cleared = False
-    realized_pnl = None
-    trades_taken = None
-    if DAY_STATE_PATH.exists():
-        try:
-            state = json.loads(DAY_STATE_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("Could not read paper day state: %s", exc)
-            state = None
+    # SAFETY: a daily-loss halt is sticky.  There is intentionally no automatic
+    # threshold-based unhalt here anymore.  The only supported same-day clear
+    # path is the explicit PAPER_ALLOW_DAILY_HALT_CLEAR=YES operator override.
+    from paper_daily_risk_guard import reconcile_startup_halt
 
-        if isinstance(state, dict) and state.get("date") == date.today().isoformat():
-            realized_pnl = float(state.get("realized_pnl", 0.0) or 0.0)
-            trades_taken = int(state.get("trades_taken", 0) or 0)
-            halt_reason = str(state.get("halt_reason", "") or "")
-            daily_loss_halt = bool(state.get("halted")) and halt_reason.startswith(
-                "Daily loss limit"
-            )
-            if daily_loss_halt and realized_pnl > -max_loss_amount:
-                state["halted"] = False
-                state["halt_reason"] = ""
-                DAY_STATE_PATH.write_text(
-                    json.dumps(state, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-                cleared = True
+    startup_halt = reconcile_startup_halt()
 
     logger.warning(
         "PAPER POLICY ACTIVE: risk/trade=%.2f%% ADX=<20 BLOCK, 20<=ADX<40 REVERSE, >=40 NORMAL, "
         "entry cap=OFF, per-symbol completed-entry cap=OFF, loss cooldown=OFF, "
         "max distinct open=%s, daily_loss=%.1f%% (Rs %.2f), emergency_stop=%.2f%% | "
-        "today_pnl=%s core_exit_fill_count=%s previous_daily_loss_halt_cleared=%s",
+        "daily_halt_retained=%s explicit_halt_clear=%s",
         PAPER_RISK_PER_TRADE_PCT,
         PAPER_MAX_OPEN_POSITIONS,
         PAPER_MAX_DAILY_LOSS_PCT,
         max_loss_amount,
         PAPER_EMERGENCY_STOP_PCT,
-        realized_pnl,
-        trades_taken,
-        cleared,
+        bool(startup_halt.get("retained")),
+        bool(startup_halt.get("cleared")),
     )
 
 
@@ -350,8 +329,15 @@ def main() -> None:
     install_paper_emergency_stop_override()
     install_direction_only_adx_policy()
 
-    # Do NOT install paper_entry_guard: daily/per-symbol/cooldown entry blockers
-    # are intentionally disabled for this experiment.
+    # Install before paper_mae_mfe_launcher imports main.py.  This patches only
+    # the current PAPER process's RiskManager methods and executor entry callable.
+    from paper_daily_risk_guard import install_paper_daily_risk_guard
+
+    install_paper_daily_risk_guard()
+
+    # Do NOT install paper_entry_guard: daily/per-symbol/cooldown frequency
+    # blockers remain intentionally disabled.  Daily-loss and aggregate-open-risk
+    # safety are handled independently by paper_daily_risk_guard.
     import paper_mae_mfe_launcher as strategy_stack
     strategy_stack.main()
 
