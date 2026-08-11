@@ -1,0 +1,16 @@
+[Unit]
+Description=Build paper-only high-momentum volume-famine watchlist
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+EnvironmentFile=/etc/kitebot.env
+WorkingDirectory=/home/ubuntu/kite_trading_bot
+ExecStart=/bin/bash /home/ubuntu/kite_trading_bot/run_paper_watchlist_daily.sh
+TimeoutStartSec=900
+UMask=0027
+StandardOutput=journal
+StandardError=journal
