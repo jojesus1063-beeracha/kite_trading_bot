@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paper-only EMA9/EMA21 + RSI strategy with ADX direction regime switching.
+"""Paper-only EMA9/EMA21 + RSI strategy with ADX regime switching.
 
 Directional policy:
 - ADX <= 40 (or unavailable): reversed EMA logic
@@ -12,11 +12,15 @@ Directional policy:
 - RSI <= 30 -> SELL override
 - RSI 30-70 -> PASS to the ADX-selected EMA direction
 
-ADX never blocks a trade; it only chooses whether EMA9/EMA21 is interpreted
-normally or in reverse. Legacy technical gates (EMA200/watchlist direction,
-RVOL, entry quality, CHoCH/context, price action, relative strength, market
-alignment, news) remain observational and cannot reject or re-rank a candidate.
-Execution/risk safety controls in main.py/executor.py remain active.
+Loss-reduction PAPER entry controls:
+- 20 <= ADX < 30 is blocked before a signal is returned.
+- maximum 2 completed entries per symbol per day.
+- after a completed losing symbol trade, block re-entry for 30 minutes.
+
+Legacy technical gates (EMA200/watchlist direction, RVOL, entry quality,
+CHoCH/context, price action, relative strength, market alignment, news) remain
+observational and cannot reject or re-rank a candidate. Execution/risk safety
+controls in main.py/executor.py remain active.
 """
 from __future__ import annotations
 
@@ -47,6 +51,7 @@ ADX_REGIME_THRESHOLD = 40.0
 AUDIT_DIR = Path(__file__).resolve().parent / "runtime" / "paper_audit"
 ENTRY_AUDIT = AUDIT_DIR / "entry_audit.jsonl"
 CONFIG_AUDIT = AUDIT_DIR / "session_config.json"
+TRADE_HISTORY_PATH = Path(__file__).resolve().parent / "trade_history.jsonl"
 
 
 def _safe(v):
@@ -92,9 +97,126 @@ def _config_snapshot():
     snap = {n: _safe(getattr(cfg, n)) for n in names}
     snap["PAPER_TWO_INDICATOR_LEGACY_GATES"] = "OBSERVATIONAL_ONLY"
     snap["PAPER_ADX_DIRECTION_THRESHOLD"] = ADX_REGIME_THRESHOLD
-    snap["PAPER_ADX_ROLE"] = "DIRECTION_REGIME_ONLY_NEVER_BLOCK"
+    snap["PAPER_ADX_ROLE"] = "DIRECTION_REGIME_PLUS_PAPER_20_30_ENTRY_BLOCK"
     AUDIT_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_AUDIT.write_text(json.dumps(snap, indent=2, default=str), encoding="utf-8")
+
+
+def _adx_entry_blocked(adx):
+    if adx is None:
+        return False
+    low = float(getattr(cfg, "PAPER_ADX_BLOCK_LOW", 20.0))
+    high = float(getattr(cfg, "PAPER_ADX_BLOCK_HIGH", 30.0))
+    return low <= float(adx) < high
+
+
+def _trade_group_key(record):
+    signal_id = record.get("signal_id")
+    if signal_id:
+        return f"signal:{signal_id}"
+    return "fallback:{symbol}|{direction}|{entry}|{entry_time}".format(
+        symbol=record.get("symbol"),
+        direction=record.get("direction"),
+        entry=record.get("entry"),
+        entry_time=record.get("entry_time"),
+    )
+
+
+def _paper_entry_guard(symbol, now=None, log_path=None):
+    """Enforce per-symbol daily count and post-loss cooldown in PAPER mode.
+
+    Hybrid/partial exit rows belonging to the same signal are aggregated into
+    one completed entry, so a scalp + runner does not consume two symbol slots.
+    """
+
+    if not bool(getattr(cfg, "PAPER_TRADING", False)):
+        return True, {"paper_only": True, "active": False}
+
+    now = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="Asia/Kolkata")
+    if now.tzinfo is None:
+        now = now.tz_localize("Asia/Kolkata")
+    else:
+        now = now.tz_convert("Asia/Kolkata")
+
+    max_per_symbol = int(getattr(cfg, "PAPER_MAX_TRADES_PER_SYMBOL", 2))
+    cooldown_minutes = float(
+        getattr(cfg, "PAPER_LOSS_REENTRY_COOLDOWN_MINUTES", 30.0)
+    )
+    path = Path(log_path) if log_path is not None else TRADE_HISTORY_PATH
+    today = now.strftime("%Y-%m-%d")
+
+    groups = {}
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for raw in handle:
+                    try:
+                        record = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if record.get("date") != today or record.get("symbol") != symbol:
+                        continue
+
+                    key = _trade_group_key(record)
+                    group = groups.setdefault(key, {"pnl": 0.0, "last_exit": None})
+                    group["pnl"] += float(record.get("pnl") or 0.0)
+
+                    time_text = record.get("time")
+                    if time_text:
+                        try:
+                            exit_ts = pd.Timestamp(f"{today} {time_text}", tz="Asia/Kolkata")
+                            if group["last_exit"] is None or exit_ts > group["last_exit"]:
+                                group["last_exit"] = exit_ts
+                        except Exception:
+                            pass
+        except OSError as exc:
+            # Fail open on an observational persistence read problem. The main
+            # RiskManager/day limit still remains active.
+            return True, {
+                "paper_only": True,
+                "active": True,
+                "history_read_error": str(exc),
+                "decision": "ALLOW_FAIL_OPEN",
+            }
+
+    trade_count = len(groups)
+    detail = {
+        "paper_only": True,
+        "active": True,
+        "symbol_trade_count": trade_count,
+        "max_trades_per_symbol": max_per_symbol,
+        "loss_cooldown_minutes": cooldown_minutes,
+    }
+
+    if max_per_symbol > 0 and trade_count >= max_per_symbol:
+        detail.update({
+            "decision": "BLOCK",
+            "reason": "MAX_TRADES_PER_SYMBOL",
+        })
+        return False, detail
+
+    completed = [g for g in groups.values() if g.get("last_exit") is not None]
+    if completed:
+        latest = max(completed, key=lambda g: g["last_exit"])
+        latest_pnl = float(latest.get("pnl") or 0.0)
+        elapsed_minutes = max(
+            0.0,
+            (now - latest["last_exit"]).total_seconds() / 60.0,
+        )
+        detail.update({
+            "latest_completed_trade_pnl": latest_pnl,
+            "minutes_since_latest_exit": elapsed_minutes,
+        })
+        if latest_pnl < 0 and elapsed_minutes < cooldown_minutes:
+            detail.update({
+                "decision": "BLOCK",
+                "reason": "LOSS_REENTRY_COOLDOWN",
+                "cooldown_remaining_minutes": cooldown_minutes - elapsed_minutes,
+            })
+            return False, detail
+
+    detail["decision"] = "ALLOW"
+    return True, detail
 
 
 def calculate_rsi(df, period=RSI_PERIOD):
@@ -115,7 +237,7 @@ def calculate_rsi(df, period=RSI_PERIOD):
 
 
 def _latest_adx(df_15m):
-    """Return latest available stock ADX without ever causing a rejection."""
+    """Return latest available stock ADX for the paper regime/entry policy."""
     if df_15m is None or df_15m.empty or "adx" not in df_15m.columns:
         return None
     values = pd.to_numeric(df_15m["adx"], errors="coerce").dropna()
@@ -125,12 +247,7 @@ def _latest_adx(df_15m):
 
 
 def ema_direction(df, adx=None):
-    """Return EMA direction under the ADX regime; ADX never blocks.
-
-    ADX > 40  -> normal EMA interpretation.
-    ADX <= 40 -> reversed EMA interpretation.
-    Missing ADX falls back to reversed interpretation.
-    """
+    """Return EMA direction under the ADX direction regime."""
     if df is None or df.empty or "close" not in df.columns or len(df) < EMA_SLOW:
         return None, None, None
     c = pd.to_numeric(df["close"], errors="coerce")
@@ -334,6 +451,7 @@ def install_two_indicator_patch():
         observations = _legacy_observations(df_15m, df_5m, df_index_15m)
         adx = _latest_adx(df_15m)
         adx_regime = "NORMAL" if adx is not None and adx > ADX_REGIME_THRESHOLD else "REVERSED"
+        adx_blocked = _adx_entry_blocked(adx)
         event = {
             "event": "ENTRY_EVALUATION",
             "logged_at": pd.Timestamp.now(tz="Asia/Kolkata").isoformat(),
@@ -342,6 +460,7 @@ def install_two_indicator_patch():
             "directional_policy": {
                 "adx_lte_40_or_unavailable": "REVERSED_EMA",
                 "adx_gt_40": "NORMAL_EMA",
+                "adx_20_to_30": "BLOCK_ENTRY_PAPER_TEST",
                 "normal_ema9_gt_ema21": "BUY",
                 "normal_ema9_lt_ema21": "SELL",
                 "reversed_ema9_gt_ema21": "SELL",
@@ -353,7 +472,7 @@ def install_two_indicator_patch():
             "adx": adx,
             "adx_threshold": ADX_REGIME_THRESHOLD,
             "adx_regime": adx_regime,
-            "adx_blocks_trade": False,
+            "adx_blocks_trade": adx_blocked,
             "legacy_gates": "OBSERVATIONAL_ONLY",
             "observations": observations,
         }
@@ -373,6 +492,40 @@ def install_two_indicator_patch():
                 "no_entry_after": getattr(cfg_obj, "NO_ENTRY_AFTER", None),
             })
             _append(event)
+            return None
+
+        if adx_blocked:
+            event.update({
+                "decision": "REJECT",
+                "stage": "ADX_20_30_TEST_BLOCK",
+                "reasons": ["ADX_IN_LOSS_HEAVY_20_30_BAND"],
+                "adx_block_low": getattr(cfg, "PAPER_ADX_BLOCK_LOW", 20.0),
+                "adx_block_high": getattr(cfg, "PAPER_ADX_BLOCK_HIGH", 30.0),
+            })
+            _append(event)
+            logger.info(
+                "PAPER ENTRY BLOCK | %s | ADX=%.2f in [%.0f, %.0f)",
+                symbol,
+                adx,
+                float(getattr(cfg, "PAPER_ADX_BLOCK_LOW", 20.0)),
+                float(getattr(cfg, "PAPER_ADX_BLOCK_HIGH", 30.0)),
+            )
+            return None
+
+        guard_ok, guard_detail = _paper_entry_guard(symbol)
+        event["paper_entry_guard"] = guard_detail
+        if not guard_ok:
+            event.update({
+                "decision": "REJECT",
+                "stage": "PAPER_SYMBOL_RISK_GUARD",
+                "reasons": [guard_detail.get("reason", "PAPER_SYMBOL_RISK_GUARD")],
+            })
+            _append(event)
+            logger.info(
+                "PAPER ENTRY BLOCK | %s | %s",
+                symbol,
+                guard_detail,
+            )
             return None
 
         base, e9, e21 = ema_direction(df_5m, adx=adx)
@@ -429,10 +582,10 @@ def install_two_indicator_patch():
         )
         reason = (
             f"PAPER ADX-EMA-RSI | ADX={'NA' if adx is None else f'{adx:.2f}'} regime={adx_regime} "
-            f"(threshold>{ADX_REGIME_THRESHOLD:.0f}=NORMAL) | EMA9={e9:.4f} EMA21={e21:.4f} -> {base} | "
+            f"(threshold>{ADX_REGIME_THRESHOLD:.0f}=NORMAL; 20-30 blocked) | EMA9={e9:.4f} EMA21={e21:.4f} -> {base} | "
             f"RSI({RSI_PERIOD})={'NA' if rsi is None else f'{rsi:.2f}'} "
             f"{'RSI_OVERRIDE' if override else 'RSI_PASS'} -> {final} | "
-            f"ADX direction only, never blocking | legacy technical gates observational only | audit={ENTRY_AUDIT}"
+            f"legacy technical gates observational only | audit={ENTRY_AUDIT}"
         )
         return strategy.Signal(
             symbol=symbol,
@@ -447,9 +600,15 @@ def install_two_indicator_patch():
 
     strategy.evaluate = evaluate
     logger.warning(
-        "PAPER ADX DIRECTION REGIME ACTIVE: ADX<=%.0f/unavailable -> reversed EMA; ADX>%.0f -> normal EMA; ADX never blocks",
+        "PAPER ADX POLICY ACTIVE: ADX<=%.0f/unavailable -> reversed EMA; ADX>%.0f -> normal EMA; "
+        "20<=ADX<30 blocks PAPER entries",
         ADX_REGIME_THRESHOLD,
         ADX_REGIME_THRESHOLD,
+    )
+    logger.warning(
+        "PAPER SYMBOL GUARD ACTIVE: max %s completed entries/symbol/day; %.0f-minute cooldown after losing trade",
+        int(getattr(cfg, "PAPER_MAX_TRADES_PER_SYMBOL", 2)),
+        float(getattr(cfg, "PAPER_LOSS_REENTRY_COOLDOWN_MINUTES", 30.0)),
     )
     logger.warning(
         "PAPER AUDIT MODE ACTIVE: every entry evaluation and available legacy metric is persisted to %s",
