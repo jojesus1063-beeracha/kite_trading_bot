@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paper-only launcher adding MFE + time exit management.
+"""Paper-only launcher adding the agreed MFE + time exit management model.
 
 This wraps the existing paper ADX/EMA/RSI launcher without changing live logic.
 Hard stop, fixed/hybrid targets and existing position exits run first. Only when
@@ -7,18 +7,21 @@ an existing position remains open does this paper-only layer consider an MFE/tim
 exit.
 
 Rules:
-- <15 min: never exit on MFE/time.
-- 15-30 min: if MFE >= 0.30% and >=60% of that favourable move is given back,
+- <10 min: no MFE/time exit; give the trade room.
+- 10-20 min: if MFE >= 0.30% and >=50% of that favourable move is given back,
   close the remaining paper position.
-- 30-60 min: if MFE >= 0.40% and >=50% is given back, close it.
-- >=60 min: if MFE < 0.15%, close as stale; otherwise if MFE >= 0.30% and >=40%
-  is given back, close it.
+- 20-40 min:
+    * if MFE >= 0.50% and current profit has fallen to <=0.30%, close to lock it;
+    * otherwise if MFE >= 0.40% and >=50% is given back, close it.
+- >40 min: if MFE >= 0.30% and >=50% is given back, close it.
+- >60 min: if MFE never reached 0.30%, close as stale/non-progressing.
 
 MFE/time never blocks an entry and never changes live trading.
 """
 from __future__ import annotations
 
 import logging
+import time
 
 import pandas as pd
 
@@ -26,6 +29,18 @@ import config as cfg
 import paper_contrarian_launcher as base
 
 logger = logging.getLogger("paper_mfe_time_launcher")
+
+MIN_HOLD_MINUTES = 10.0
+EARLY_END_MINUTES = 20.0
+MID_END_MINUTES = 40.0
+STALE_MINUTES = 60.0
+EARLY_MFE_PCT = 0.30
+MID_MFE_PCT = 0.40
+LOCK_MFE_PCT = 0.50
+LOCK_CURRENT_PCT = 0.30
+LATE_MFE_PCT = 0.30
+STALE_MAX_MFE_PCT = 0.30
+GIVEBACK_PCT = 50.0
 
 
 def _minutes_in_trade(position) -> float | None:
@@ -74,24 +89,29 @@ def _excursions(position, df, last_price):
     return mfe, mae, current_pct, giveback_pct
 
 
-def _mfe_time_reason(minutes, mfe, giveback_pct):
-    if minutes is None or minutes < 15.0:
+def _mfe_time_reason(minutes, mfe, current_pct, giveback_pct):
+    if minutes is None or minutes < MIN_HOLD_MINUTES:
         return None
 
-    if minutes < 30.0:
-        if mfe >= 0.30 and giveback_pct >= 60.0:
-            return "mfe_time_giveback_15_30"
+    # After 60 minutes, a trade that never demonstrated 0.30% MFE is stale.
+    if minutes > STALE_MINUTES and mfe < STALE_MAX_MFE_PCT:
+        return "mfe_time_stale_60m"
+
+    if minutes > MID_END_MINUTES:
+        if mfe >= LATE_MFE_PCT and giveback_pct >= GIVEBACK_PCT:
+            return "mfe_time_late_giveback"
         return None
 
-    if minutes < 60.0:
-        if mfe >= 0.40 and giveback_pct >= 50.0:
-            return "mfe_time_giveback_30_60"
+    if minutes >= EARLY_END_MINUTES:
+        if mfe >= LOCK_MFE_PCT and current_pct <= LOCK_CURRENT_PCT:
+            return "mfe_time_lock_20_40"
+        if mfe >= MID_MFE_PCT and giveback_pct >= GIVEBACK_PCT:
+            return "mfe_time_giveback_20_40"
         return None
 
-    if mfe < 0.15:
-        return "mfe_time_stale_60"
-    if mfe >= 0.30 and giveback_pct >= 40.0:
-        return "mfe_time_giveback_60_plus"
+    # 10-20 minutes: protect a move only after it has first reached 0.30%.
+    if mfe >= EARLY_MFE_PCT and giveback_pct >= GIVEBACK_PCT:
+        return "mfe_time_protect_10_20"
     return None
 
 
@@ -120,7 +140,7 @@ def install_mfe_time_exit_patch(trading_main):
 
         position = open_positions[symbol]
         minutes = _minutes_in_trade(position)
-        if minutes is None or minutes < 15.0:
+        if minutes is None or minutes < MIN_HOLD_MINUTES:
             return status
 
         exchange = position.get("exchange", exchange_map.get(symbol, "NSE"))
@@ -136,6 +156,9 @@ def install_mfe_time_exit_patch(trading_main):
                 lookback_days=1,
                 trim_incomplete=False,
             )
+            # Keep the extra paper-only historical request paced so this
+            # analytics/exit overlay does not burst the broker API.
+            time.sleep(0.35)
             if df is None or df.empty:
                 return status
 
@@ -162,7 +185,7 @@ def install_mfe_time_exit_patch(trading_main):
         position["mfe_time_minutes"] = minutes
         trading_main.save_positions(open_positions)
 
-        reason = _mfe_time_reason(minutes, mfe, giveback_pct)
+        reason = _mfe_time_reason(minutes, mfe, current_pct, giveback_pct)
         if reason is None:
             logger.info(
                 "%s: MFE/TIME HOLD | minutes=%.1f mfe=%.3f%% mae=%.3f%% current=%.3f%% giveback=%.1f%%",
@@ -174,7 +197,7 @@ def install_mfe_time_exit_patch(trading_main):
         if qty <= 0:
             return status
 
-        logger.info(
+        logger.warning(
             "%s: MFE/TIME EXIT TRIGGER | reason=%s minutes=%.1f mfe=%.3f%% mae=%.3f%% current=%.3f%% giveback=%.1f%% qty=%s",
             symbol, reason, minutes, mfe, mae, current_pct, giveback_pct, qty,
         )
@@ -263,7 +286,7 @@ def install_mfe_time_exit_patch(trading_main):
 
     trading_main.check_position_exit = check_position_exit
     logger.warning(
-        "PAPER MFE/TIME EXIT ACTIVE: <15m hold; 15-30m MFE>=0.30%%/60%% giveback; 30-60m MFE>=0.40%%/50%% giveback; >=60m MFE<0.15%% stale or MFE>=0.30%%/40%% giveback"
+        "PAPER MFE/TIME EXIT ACTIVE: <10m hold; 10-20m MFE>=0.30%%/50%% giveback; 20-40m MFE>=0.40%%/50%% giveback or MFE>=0.50%% falling to <=0.30%%; >40m MFE>=0.30%%/50%% giveback; >60m stale if MFE<0.30%%"
     )
 
 
