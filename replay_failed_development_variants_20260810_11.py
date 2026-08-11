@@ -45,6 +45,13 @@ Selection protocol
 3. Run only that selected variant on 10-Aug-2026 as an out-of-sample check,
    while also printing the Aug-10 baseline for comparison.
 
+Data-integrity policy
+---------------------
+The replay fails closed if Kite does not provide usable 1-minute and 3-minute
+history for every symbol that could be traded after the non-history gates. Empty
+or short 1-minute responses are retried with backoff. A partial-history replay
+must never be mistaken for a valid strategy result.
+
 Important limitations
 ---------------------
 This is a same-source-opportunity counterfactual. It reuses opportunities found
@@ -57,6 +64,7 @@ experiment tests that hypothesis without silently changing its definition.
 from __future__ import annotations
 
 import math
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +89,14 @@ B_MINUTES = 8.0
 B_MAE_PCT = -0.15
 OUT_SUMMARY = Path("/tmp/failed_development_variant_summary.csv")
 OUT_TRADES = Path("/tmp/failed_development_variant_trades.csv")
+
+# A normal NSE cash session has roughly 355 one-minute bars. We only require
+# enough coverage to establish that the response is real rather than an empty /
+# transient API result. Exact session length is not hard-coded as a pass rule.
+MIN_USABLE_MINUTE_ROWS = 300
+MIN_USABLE_3MIN_ROWS = 100
+HISTORY_RETRIES = 4
+RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 7.0)
 
 
 @dataclass
@@ -119,6 +135,89 @@ def failed_development_reason(
             return "failed_development_A_10m_mfe_lt_0_15_current_neg"
 
     return None
+
+
+def _fetch_with_retry(kite, token, from_dt, to_dt, interval, min_rows, label):
+    """Fetch history with bounded retries; return a prepared DataFrame."""
+    last_df = pd.DataFrame()
+    last_error = None
+    for attempt in range(1, HISTORY_RETRIES + 1):
+        try:
+            rows = kite.historical_data(token, from_dt, to_dt, interval)
+            last_df = base.prepare_df(rows)
+            if len(last_df) >= min_rows:
+                return last_df
+            last_error = f"only {len(last_df)} rows"
+        except Exception as exc:  # analysis-only fetch; retry transient broker/API errors
+            last_error = f"{type(exc).__name__}: {exc}"
+            last_df = pd.DataFrame()
+
+        if attempt < HISTORY_RETRIES:
+            delay = RETRY_BACKOFF_SECONDS[min(attempt - 1, len(RETRY_BACKOFF_SECONDS) - 1)]
+            print(
+                f"  RETRY {label} attempt={attempt}/{HISTORY_RETRIES} "
+                f"reason={last_error} wait={delay:.1f}s"
+            )
+            time.sleep(delay)
+
+    raise RuntimeError(
+        f"Historical data incomplete for {label} after {HISTORY_RETRIES} attempts: {last_error}"
+    )
+
+
+def fetch_market_data_reliable(kite, symbols, session_date):
+    """Fetch complete 1m + 3m data and fail closed on partial history."""
+    instruments = {
+        x["tradingsymbol"]: x["instrument_token"]
+        for x in kite.instruments("NSE")
+        if x.get("instrument_type") == "EQ" and x.get("tradingsymbol") in symbols
+    }
+    missing_tokens = sorted(set(symbols) - set(instruments))
+    if missing_tokens:
+        raise RuntimeError(
+            "Missing NSE EQ instrument tokens for: " + ", ".join(missing_tokens)
+        )
+
+    minute = {}
+    three = {}
+    session_from = pd.Timestamp(f"{session_date} 09:15", tz=IST).to_pydatetime()
+    session_to = pd.Timestamp(f"{session_date} 15:09", tz=IST).to_pydatetime()
+    warmup_from = pd.Timestamp(
+        pd.Timestamp(session_date) - pd.Timedelta(days=6), tz=IST
+    ).replace(hour=9, minute=15).to_pydatetime()
+
+    print(f"Fetching Kite history with integrity checks for {len(instruments)} symbols...")
+    for idx, symbol in enumerate(sorted(instruments), start=1):
+        token = instruments[symbol]
+        one = _fetch_with_retry(
+            kite,
+            token,
+            session_from,
+            session_to,
+            "minute",
+            MIN_USABLE_MINUTE_ROWS,
+            f"{session_date} {symbol} 1minute",
+        )
+        # Keep request rate conservative even when the first attempt succeeds.
+        time.sleep(0.45)
+        tri = _fetch_with_retry(
+            kite,
+            token,
+            warmup_from,
+            session_to,
+            "3minute",
+            MIN_USABLE_3MIN_ROWS,
+            f"{session_date} {symbol} 3minute",
+        )
+        time.sleep(0.45)
+        minute[symbol] = one
+        three[symbol] = base.add_rsi_ema(tri)
+        print(
+            f"[{idx:02d}/{len(instruments):02d}] {symbol:<14} "
+            f"minute={len(minute[symbol]):3d} 3minute={len(three[symbol]):4d} OK"
+        )
+
+    return minute, three
 
 
 def enrich_current_direction(opportunities, three):
@@ -214,7 +313,6 @@ def replay_trade_variant(op, direction, qty, df1, df3, variant, square_off):
         now = row["date"]
         price = float(row["close"])
 
-        # Existing strategy clock: unchanged for native MAE/MFE management.
         since_strategy = df1.loc[
             (df1["date"] >= timer_start.floor("min")) & (df1["date"] <= now)
         ]
@@ -225,14 +323,12 @@ def replay_trade_variant(op, direction, qty, df1, df3, variant, square_off):
         min_mae = min(min_mae, mae_strategy)
         strategy_age = max(0.0, (now - timer_start).total_seconds() / 60.0)
 
-        # Entry-health clock: same order-minute convention used by the research.
         since_entry = rows.loc[rows["date"] <= now]
         mfe_entry, mae_entry, current_entry, _ = base.excursions(
             direction, entry, since_entry, price
         )
         entry_age = max(0.0, (now - order_time).total_seconds() / 60.0)
 
-        # Existing native executable stop keeps first priority.
         hit_emergency = (
             price <= emergency_stop if direction == "BUY" else price >= emergency_stop
         )
@@ -240,21 +336,18 @@ def replay_trade_variant(op, direction, qty, df1, df3, variant, square_off):
             close_leg(now, price, remaining, "paper_emergency_stop_0_75")
             break
 
-        # Existing runner breakeven stop.
         if be_active:
             hit_be = price <= entry if direction == "BUY" else price >= entry
             if hit_be:
                 close_leg(now, price, remaining, "hybrid_breakeven_stop")
                 break
 
-        # Existing target / hybrid target handling.
         if scalp_pending:
             hit = price >= scalp_target if direction == "BUY" else price <= scalp_target
             if hit:
                 close_leg(now, price, scalp_qty, "hybrid_scalp_1r")
                 scalp_pending = False
                 be_active = base.MOVE_BE
-                # Match live/replay behavior: after partial exit, return to next observation.
                 continue
         else:
             hit = price >= runner_target if direction == "BUY" else price <= runner_target
@@ -267,8 +360,6 @@ def replay_trade_variant(op, direction, qty, df1, df3, variant, square_off):
                 )
                 break
 
-        # Experimental overlay. It acts only on the remaining position and only
-        # after native stop/BE/target checks, before the slower MAE/MFE overlays.
         reason = failed_development_reason(
             variant,
             entry_age,
@@ -285,7 +376,6 @@ def replay_trade_variant(op, direction, qty, df1, df3, variant, square_off):
             close_leg(now, price, remaining, reason)
             break
 
-        # Existing MAE/adverse-trend overlay: unchanged.
         if strategy_age > base.MAE_MIN_AGE:
             adverse = base.adverse_three(direction, df3, now)
             if (
@@ -297,7 +387,6 @@ def replay_trade_variant(op, direction, qty, df1, df3, variant, square_off):
                 close_leg(now, price, remaining, "mae_adverse_trend_10m")
                 break
 
-        # Existing MFE/time overlay: unchanged.
         reason = base.mfe_reason(strategy_age, mfe_strategy, current_pct, giveback)
         if reason:
             close_leg(now, price, remaining, reason)
@@ -418,8 +507,10 @@ def replay_policy(session_date, variant, opportunities, minute, three, square_of
         df1 = minute.get(op["symbol"])
         df3 = three.get(op["symbol"])
         if df1 is None or df1.empty or df3 is None or df3.empty:
-            rejected.append((op, "MISSING_HISTORY"))
-            continue
+            # This should be impossible after the integrity-checked loader.
+            raise RuntimeError(
+                f"DATA INTEGRITY FAILURE inside replay for {session_date} {op['symbol']}"
+            )
 
         result = replay_trade_variant(
             op, direction, qty, df1, df3, variant, square_off
@@ -618,7 +709,6 @@ def choose_aug11_variant(a, b):
         return a
     if b["net"] > a["net"]:
         return b
-    # Smaller absolute drawdown wins a net-P&L tie; then conservative A.
     if abs(a["max_drawdown"]) < abs(b["max_drawdown"]):
         return a
     if abs(b["max_drawdown"]) < abs(a["max_drawdown"]):
@@ -632,8 +722,11 @@ def load_day(kite, session_date):
     if not opportunities:
         raise SystemExit(f"No source opportunities found for {session_date}")
     symbols = sorted({op["symbol"] for op in opportunities})
-    print(f"\nFetching {session_date} | source opportunities={len(opportunities)} | symbols={len(symbols)}")
-    minute, three = base.fetch_market_data(kite, symbols)
+    print(
+        f"\nFetching {session_date} | source opportunities={len(opportunities)} "
+        f"| symbols={len(symbols)}"
+    )
+    minute, three = fetch_market_data_reliable(kite, symbols, session_date)
     return ctx, opportunities, minute, three
 
 
@@ -641,8 +734,14 @@ def main():
     print("Connecting to Kite for ANALYSIS-ONLY A/B replay...")
     kite = base.get_kite_client()
 
-    # Phase 1: in-sample selection on Aug 11.
-    ctx11, opp11, minute11, three11 = load_day(kite, "2026-08-11")
+    try:
+        ctx11, opp11, minute11, three11 = load_day(kite, "2026-08-11")
+    except Exception as exc:
+        raise SystemExit(
+            "DATA INTEGRITY BLOCK: Aug-11 replay aborted instead of using partial history. "
+            f"{exc}"
+        ) from exc
+
     aug11 = {}
     for variant in (BASELINE, VARIANT_A, VARIANT_B):
         aug11[variant] = replay_policy(
@@ -655,6 +754,16 @@ def main():
         )
 
     baseline11 = aug11[BASELINE]
+    # Cross-check against the known complete-current-policy shape. The exact net
+    # can vary by a few paise with refreshed historical data, but a collapse to
+    # only a handful of trades is never acceptable.
+    if baseline11["trade_count"] < 15:
+        raise SystemExit(
+            "DATA/REPLAY INTEGRITY BLOCK: Aug-11 baseline reconstructed only "
+            f"{baseline11['trade_count']} trades; expected the complete replay universe "
+            "to be around 20. No variant selection performed."
+        )
+
     for variant in (BASELINE, VARIANT_A, VARIANT_B):
         print_summary(
             aug11[variant],
@@ -672,8 +781,14 @@ def main():
     print(f"Improvement vs baseline : Rs {selected11['net'] - baseline11['net']:+.2f}")
     print("#" * 114)
 
-    # Phase 2: out-of-sample validation on Aug 10.
-    ctx10, opp10, minute10, three10 = load_day(kite, "2026-08-10")
+    try:
+        ctx10, opp10, minute10, three10 = load_day(kite, "2026-08-10")
+    except Exception as exc:
+        raise SystemExit(
+            "DATA INTEGRITY BLOCK: Aug-10 out-of-sample replay aborted instead of "
+            f"using partial history. {exc}"
+        ) from exc
+
     baseline10 = replay_policy(
         ctx10.session_date,
         BASELINE,
