@@ -1,0 +1,17 @@
+[Unit]
+Description=Kite Trading Bot - paper contrarian mode
+Wants=network-online.target
+After=network-online.target
+Conflicts=kitebot.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+EnvironmentFile=/etc/kitebot.env
+WorkingDirectory=/home/ubuntu/kite_trading_bot
+ExecStart=/home/ubuntu/kite_trading_bot/venv/bin/python3 /home/ubuntu/kite_trading_bot/paper_contrarian_launcher.py
+Restart=no
+UMask=0027
+StandardOutput=journal
+StandardError=journal
