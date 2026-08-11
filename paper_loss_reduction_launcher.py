@@ -12,6 +12,7 @@ Existing policy retained:
 - 20<=ADX<40 REVERSE EMA9/EMA21
 - ADX >=40 NORMAL EMA9/EMA21
 - risk/trade 0.20%, daily-loss halt 5%, emergency stop 0.75%
+- sticky daily-loss restart protection + aggregate open-risk entry guard
 - existing MAE/MFE/hybrid exit stack
 
 This launcher requires PAPER_TRADING=True and does not alter live mode.
@@ -256,6 +257,13 @@ def main() -> None:
     current.install_paper_emergency_stop_override()
     current.install_direction_only_adx_policy()
     install_consecutive_loss_guard()
+
+    # This launcher imports main.py directly instead of calling current.main(),
+    # so it must install the same sticky daily-loss + aggregate open-risk guard
+    # explicitly before main.py binds executor.place_entry_order.
+    from paper_daily_risk_guard import install_paper_daily_risk_guard
+
+    install_paper_daily_risk_guard()
 
     import paper_contrarian_launcher as base
     import paper_mae_mfe_launcher as mae
