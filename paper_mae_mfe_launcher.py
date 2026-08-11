@@ -2,16 +2,16 @@
 """Paper-only ADX/EMA/RSI entry + MAE adverse-trend + MFE/time exits.
 
 Exit precedence:
-1. Native hard stop / fixed target / hybrid target.
+1. Native emergency stop / fixed target / hybrid target.
 2. MAE early-failure exit after >10 minutes of sustained adverse EMA trend.
-3. Existing MFE + time giveback/stale exit model.
+3. Existing selected MFE + time giveback/dead-trade model.
 
-MAE early-failure rule (all conditions required):
+Current PAPER MAE early-failure rule (all conditions required):
 - time in trade > 10 minutes
 - MAE <= -0.30%
 - current P&L <= -0.15%
-- MFE < +0.15%
-- adverse EMA trend for 4 consecutive COMPLETED 3-minute candles (~12 minutes)
+- MFE < +0.30%
+- adverse EMA trend for 3 consecutive COMPLETED 3-minute candles (~9 minutes)
 
 Adverse trend definition:
 - BUY: close < EMA9 AND EMA9 < EMA21
@@ -32,11 +32,17 @@ import paper_mfe_time_launcher as mfe_time
 
 logger = logging.getLogger("paper_mae_mfe_launcher")
 
-MAE_MIN_AGE_MINUTES = 10.0
-MAE_THRESHOLD_PCT = -0.30
-CURRENT_LOSS_THRESHOLD_PCT = -0.15
-MAX_MFE_FOR_FAILURE_PCT = 0.15
-ADVERSE_CANDLES_REQUIRED = 4
+MAE_MIN_AGE_MINUTES = float(getattr(cfg, "PAPER_MAE_MIN_AGE_MINUTES", 10.0))
+MAE_THRESHOLD_PCT = float(getattr(cfg, "PAPER_MAE_THRESHOLD_PCT", -0.30))
+CURRENT_LOSS_THRESHOLD_PCT = float(
+    getattr(cfg, "PAPER_MAE_CURRENT_LOSS_THRESHOLD_PCT", -0.15)
+)
+MAX_MFE_FOR_FAILURE_PCT = float(
+    getattr(cfg, "PAPER_MAE_MAX_MFE_FAILURE_PCT", 0.30)
+)
+ADVERSE_CANDLES_REQUIRED = int(
+    getattr(cfg, "PAPER_MAE_ADVERSE_CANDLES_REQUIRED", 3)
+)
 EMA_FAST = 9
 EMA_SLOW = 21
 
@@ -78,8 +84,8 @@ def _completed_entry_candles(df, trading_main):
     if completed.empty:
         return completed
 
-    # Calculate EMA on all completed intraday history so the final four
-    # candles do not suffer from a short warm-up window.
+    # Calculate EMA on all completed intraday history so the final candles do
+    # not suffer from a short warm-up window.
     completed["mae_exit_ema9"] = completed["close"].ewm(
         span=EMA_FAST, adjust=False
     ).mean()
@@ -90,7 +96,7 @@ def _completed_entry_candles(df, trading_main):
 
 
 def _adverse_trend(position, completed, trading_main):
-    """Require four consecutive completed candles in the adverse EMA trend."""
+    """Require configured consecutive completed candles in adverse EMA trend."""
     if completed is None or len(completed) < ADVERSE_CANDLES_REQUIRED:
         return False, {}
 
@@ -139,7 +145,7 @@ def install_mae_adverse_exit_patch(trading_main):
     original_check = trading_main.check_position_exit
 
     def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk, check_trend=False):
-        # Native hard stop / target / hybrid handling always gets first priority.
+        # Native emergency stop / target / hybrid handling always gets priority.
         status = original_check(
             kite,
             symbol,
@@ -326,7 +332,13 @@ def install_mae_adverse_exit_patch(trading_main):
 
     trading_main.check_position_exit = check_position_exit
     logger.warning(
-        "PAPER MAE ADVERSE-TREND EXIT ACTIVE: >10m AND MAE<=-0.30%% AND current<=-0.15%% AND MFE<0.15%% AND 4 consecutive completed %s candles adverse to trade",
+        "PAPER MAE ADVERSE-TREND EXIT ACTIVE: >%.0fm AND MAE<=%.2f%% AND current<=%.2f%% "
+        "AND MFE<%.2f%% AND %s consecutive completed %s candles adverse to trade",
+        MAE_MIN_AGE_MINUTES,
+        MAE_THRESHOLD_PCT,
+        CURRENT_LOSS_THRESHOLD_PCT,
+        MAX_MFE_FOR_FAILURE_PCT,
+        ADVERSE_CANDLES_REQUIRED,
         cfg.ENTRY_TIMEFRAME,
     )
 
@@ -337,12 +349,12 @@ def main():
     import main as trading_main
 
     # Install MAE first. The MFE wrapper is then installed outside it, so
-    # effective precedence becomes native stop/target -> MAE -> MFE/time.
+    # effective precedence becomes native emergency stop/target -> MAE -> MFE/time.
     install_mae_adverse_exit_patch(trading_main)
     mfe_time.install_mfe_time_exit_patch(trading_main)
 
     logger.warning(
-        "PAPER EXIT STACK ACTIVE: native hard stop/target -> MAE adverse-trend -> MFE/time"
+        "PAPER EXIT STACK ACTIVE: emergency stop/target -> MAE adverse-trend -> MFE/time"
     )
     trading_main.run()
 
