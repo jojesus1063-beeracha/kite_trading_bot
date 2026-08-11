@@ -6,11 +6,16 @@ protection are untouched.
 
 Paper risk controls:
 - risk per trade: 0.50%
-- max trades per day: 30
+- max actual entries per day: 30
 - max daily loss: 5.0%
-- max entries per symbol: 2 (enforced by paper_contrarian_launcher)
-- 30-minute cooldown after a losing symbol trade
+- max actual entries per symbol: 2
+- 30-minute cooldown after a losing completed symbol trade
 - ADX 20 <= ADX < 30 paper entry block
+
+The core RiskManager counter increments on exit fills (so hybrid scalp + runner
+can count twice). Therefore its MAX_TRADES_PER_DAY guard is intentionally set to
+a non-binding value in this PAPER process, while paper_entry_guard.py enforces
+the real 30-entry limit using a durable successful-entry ledger.
 
 Paper emergency-stop model:
 - The strategy's original stop remains available for position sizing/audit and
@@ -36,7 +41,9 @@ import config as cfg
 logger = logging.getLogger("paper_50pct_risk_launcher")
 
 PAPER_RISK_PER_TRADE_PCT = 0.50
-PAPER_MAX_TRADES_PER_DAY = 30
+PAPER_MAX_ENTRIES_PER_DAY = 30
+# Non-binding core guard: RiskManager counts exit fills, not actual entries.
+PAPER_CORE_MAX_TRADES_PER_DAY = 10_000
 PAPER_MAX_DAILY_LOSS_PCT = 5.0
 PAPER_EMERGENCY_STOP_PCT = 0.75
 PAPER_MAX_TRADES_PER_SYMBOL = 2
@@ -72,10 +79,11 @@ def apply_paper_risk_overrides() -> None:
         )
 
     cfg.RISK_PER_TRADE_PCT = PAPER_RISK_PER_TRADE_PCT
-    cfg.MAX_TRADES_PER_DAY = PAPER_MAX_TRADES_PER_DAY
+    cfg.MAX_TRADES_PER_DAY = PAPER_CORE_MAX_TRADES_PER_DAY
     cfg.MAX_DAILY_LOSS_PCT = PAPER_MAX_DAILY_LOSS_PCT
 
     # Custom paper-only settings consumed by the launcher stack.
+    cfg.PAPER_MAX_ENTRIES_PER_DAY = PAPER_MAX_ENTRIES_PER_DAY
     cfg.PAPER_EMERGENCY_STOP_PCT = PAPER_EMERGENCY_STOP_PCT
     cfg.PAPER_MAX_TRADES_PER_SYMBOL = PAPER_MAX_TRADES_PER_SYMBOL
     cfg.PAPER_LOSS_REENTRY_COOLDOWN_MINUTES = PAPER_LOSS_REENTRY_COOLDOWN_MINUTES
@@ -131,12 +139,12 @@ def apply_paper_risk_overrides() -> None:
                 cleared = True
 
     logger.warning(
-        "PAPER LOSS-REDUCTION RISK ACTIVE: risk/trade=%.2f%% max_trades/day=%s "
+        "PAPER LOSS-REDUCTION RISK ACTIVE: risk/trade=%.2f%% actual_entry_cap/day=%s "
         "daily_loss=%.1f%% (Rs %.2f) max_per_symbol=%s cooldown=%.0fm "
-        "ADX_block=[%.0f,%.0f) emergency_stop=%.2f%% | today_pnl=%s trades=%s "
-        "previous_daily_loss_halt_cleared=%s",
+        "ADX_block=[%.0f,%.0f) emergency_stop=%.2f%% | core_exit_fill_counter_cap=%s "
+        "today_pnl=%s core_trades_taken=%s previous_daily_loss_halt_cleared=%s",
         PAPER_RISK_PER_TRADE_PCT,
-        PAPER_MAX_TRADES_PER_DAY,
+        PAPER_MAX_ENTRIES_PER_DAY,
         PAPER_MAX_DAILY_LOSS_PCT,
         max_loss_amount,
         PAPER_MAX_TRADES_PER_SYMBOL,
@@ -144,6 +152,7 @@ def apply_paper_risk_overrides() -> None:
         PAPER_ADX_BLOCK_LOW,
         PAPER_ADX_BLOCK_HIGH,
         PAPER_EMERGENCY_STOP_PCT,
+        PAPER_CORE_MAX_TRADES_PER_DAY,
         realized_pnl,
         trades_taken,
         cleared,
@@ -231,8 +240,12 @@ def install_paper_emergency_stop_override() -> None:
 
 
 def main() -> None:
-    # Apply config values before importing any downstream paper strategy module.
+    # Apply config values and patch executor BEFORE main.py imports functions by name.
     apply_paper_risk_overrides()
+
+    import paper_entry_guard
+
+    paper_entry_guard.install_executor_guard()
     install_paper_emergency_stop_override()
 
     import paper_mae_mfe_launcher as strategy_stack
