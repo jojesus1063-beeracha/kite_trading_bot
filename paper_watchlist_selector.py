@@ -1,245 +1,121 @@
 #!/usr/bin/env python3
-"""Paper-only momentum + volume-famine watchlist selector.
-
-This selector deliberately has only two strategy gates:
-1) high intraday momentum
-2) temporary time-adjusted volume famine
-
-It does not use Open=Low, EMA, ADX, VWAP, previous-day momentum,
-price-action, sector, market-alignment, or fallback filling.
-
-Basic data-validity checks remain so malformed quotes are not selected.
-The script refuses to write a watchlist unless config.PAPER_TRADING is True.
-"""
-
+"""Paper-only momentum + volume-famine selector with full decision audit."""
 from __future__ import annotations
-
-import argparse
-import json
-import math
-import os
-import tempfile
-import time
-from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+import argparse,json,math,os,tempfile,time
+from dataclasses import asdict,dataclass
+from datetime import datetime,timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any,Iterable
 from zoneinfo import ZoneInfo
-
 import config as cfg
 from auth import get_kite_client
-from auto_watchlist import download_nifty500, usable_nse_equity_instruments
+from auto_watchlist import download_nifty500,usable_nse_equity_instruments
 
-IST = ZoneInfo("Asia/Kolkata")
-PROJECT_DIR = Path(__file__).resolve().parent
-DEFAULT_CONFIG_PATH = PROJECT_DIR / "user_config.json"
-DEFAULT_RUNTIME_DIR = PROJECT_DIR / "runtime" / "paper_watchlist"
-DEFAULT_REPORT_PATH = DEFAULT_RUNTIME_DIR / "latest_report.json"
-DEFAULT_OUTPUT_PATH = DEFAULT_RUNTIME_DIR / "latest_watchlist.json"
-QUOTE_BATCH_SIZE = 500
-QUOTE_BATCH_DELAY_SECONDS = 1.10
-
-class PaperWatchlistError(RuntimeError):
-    pass
-
+IST=ZoneInfo("Asia/Kolkata"); PROJECT_DIR=Path(__file__).resolve().parent
+DEFAULT_CONFIG_PATH=PROJECT_DIR/"user_config.json"; DEFAULT_RUNTIME_DIR=PROJECT_DIR/"runtime"/"paper_watchlist"
+DEFAULT_REPORT_PATH=DEFAULT_RUNTIME_DIR/"latest_report.json"; DEFAULT_OUTPUT_PATH=DEFAULT_RUNTIME_DIR/"latest_watchlist.json"
+DEFAULT_AUDIT_PATH=DEFAULT_RUNTIME_DIR/"selection_audit.jsonl"; QUOTE_BATCH_SIZE=500; QUOTE_BATCH_DELAY_SECONDS=1.10
+class PaperWatchlistError(RuntimeError): pass
 @dataclass(frozen=True)
 class PaperSelectorSettings:
-    momentum_min_pct: float = 0.75
-    famine_rvol_min: float = 0.40
-    famine_rvol_max: float = 0.70
-    baseline_days: int = 20
-    historical_lookback_days: int = 45
-    historical_delay_seconds: float = 0.36
-    earliest_famine_time: str = "09:27"
-    top_n: int = 60
+    momentum_min_pct:float=.75; famine_rvol_min:float=.40; famine_rvol_max:float=.70; baseline_days:int=20
+    historical_lookback_days:int=45; historical_delay_seconds:float=.36; earliest_famine_time:str="09:27"; top_n:int=60
 
-def positive_float(value: Any, default: float = 0.0) -> float:
+def pf(v,d=0.0):
+    try:r=float(v); return r if math.isfinite(r) else d
+    except:return d
+def pi(v,d=0):
+    try:return max(int(v),0)
+    except:return d
+def chunks(v,s):
+    for i in range(0,len(v),s):yield v[i:i+s]
+def now_ist():return datetime.now(IST)
+def atomic_write_json(path,payload):
+    path.parent.mkdir(parents=True,exist_ok=True); fd,name=tempfile.mkstemp(prefix=f".{path.name}.",suffix=".tmp",dir=str(path.parent)); tmp=Path(name)
     try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return default
-    return result if math.isfinite(result) else default
+        with os.fdopen(fd,"w",encoding="utf-8") as h: json.dump(payload,h,indent=2,ensure_ascii=False); h.write("\n"); h.flush(); os.fsync(h.fileno())
+        os.replace(tmp,path)
+    except Exception: tmp.unlink(missing_ok=True); raise
+def append_jsonl(path,payload):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    with path.open("a",encoding="utf-8") as h:h.write(json.dumps(payload,ensure_ascii=False,default=str)+"\n")
+def elapsed_session_fraction(now):
+    a=now.replace(hour=9,minute=15,second=0,microsecond=0); b=now.replace(hour=15,minute=30,second=0,microsecond=0)
+    return min(max((now-a).total_seconds()/max((b-a).total_seconds(),1),0),1)
+def after_earliest_famine_time(now,hhmm):
+    h,m=map(int,hhmm.split(":",1)); return now>=now.replace(hour=h,minute=m,second=0,microsecond=0)
+def fetch_quotes(kite,keys):
+    out={}
+    for i,b in enumerate(chunks(keys,QUOTE_BATCH_SIZE)):
+        if i:time.sleep(QUOTE_BATCH_DELAY_SECONDS)
+        r=kite.quote(b)
+        if not isinstance(r,dict):raise PaperWatchlistError("Kite quote response was not a dictionary")
+        out.update(r)
+    return out
+def average_daily_volume(kite,token,s):
+    today=now_ist().date(); c=kite.historical_data(token,today-timedelta(days=s.historical_lookback_days),today-timedelta(days=1),"day",continuous=False,oi=False)
+    vols=[pi(x.get("volume")) for x in c if isinstance(x,dict) and pi(x.get("volume"))>0][-s.baseline_days:]
+    return sum(vols)/len(vols) if vols else 0.0
 
-def positive_int(value: Any, default: int = 0) -> int:
-    try:
-        return max(int(value), 0)
-    except (TypeError, ValueError):
-        return default
+def evaluate_candidate(row,quote,avg,fraction,s):
+    o=quote.get("ohlc") or {}; lp=pf(quote.get("last_price")); vol=pi(quote.get("volume")); prev=pf(o.get("close")); high=pf(o.get("high")); low=pf(o.get("low")); opn=pf(o.get("open"))
+    rec={"symbol":row["symbol"],"exchange":"NSE","instrument_token":pi(row.get("instrument_token")),"last_price":lp,"open":opn,"high":high,"low":low,"previous_close":prev,"current_volume":vol,"average_daily_volume":round(avg,2),"session_fraction":round(fraction,6),"thresholds":{"momentum_min_pct":s.momentum_min_pct,"famine_rvol_min":s.famine_rvol_min,"famine_rvol_max":s.famine_rvol_max}}
+    reasons=[]
+    if lp<=0:reasons.append("INVALID_LAST_PRICE")
+    if prev<=0:reasons.append("INVALID_PREVIOUS_CLOSE")
+    if vol<=0:reasons.append("INVALID_OR_ZERO_VOLUME")
+    if high<=0 or low<=0:reasons.append("INVALID_DAY_RANGE")
+    if avg<=0:reasons.append("NO_HISTORICAL_VOLUME_BASELINE")
+    if fraction<=0:reasons.append("INVALID_SESSION_FRACTION")
+    if reasons: rec.update({"selected":False,"decision":"REJECT","rejection_reasons":reasons}); return rec
+    change=((lp-prev)/prev)*100; rng=((high-low)/prev)*100; momentum=max(abs(change),rng); expected=avg*fraction; rvol=vol/expected if expected>0 else 0
+    rec.update({"change_pct":round(change,4),"day_range_pct":round(rng,4),"momentum_pct":round(momentum,4),"expected_volume_now":round(expected,2),"relative_volume":round(rvol,4),"momentum_pass":momentum>=s.momentum_min_pct,"famine_pass":s.famine_rvol_min<=rvol<=s.famine_rvol_max})
+    if momentum<s.momentum_min_pct:reasons.append("MOMENTUM_BELOW_THRESHOLD")
+    if rvol<s.famine_rvol_min:reasons.append("RVOL_BELOW_FAMINE_BAND")
+    elif rvol>s.famine_rvol_max:reasons.append("RVOL_ABOVE_FAMINE_BAND")
+    if reasons: rec.update({"selected":False,"decision":"REJECT","rejection_reasons":reasons}); return rec
+    mid=(s.famine_rvol_min+s.famine_rvol_max)/2; width=max((s.famine_rvol_max-s.famine_rvol_min)/2,1e-9); quality=max(0,1-abs(rvol-mid)/width); score=momentum*(1+quality)
+    rec.update({"selected":True,"decision":"SELECT","selection_reasons":["MOMENTUM_PASS","VOLUME_FAMINE_PASS"],"famine":True,"high_momentum":True,"score":round(score,6)})
+    return rec
 
-def chunks(values: list[str], size: int) -> Iterable[list[str]]:
-    for start in range(0, len(values), size):
-        yield values[start:start + size]
-
-def now_ist() -> datetime:
-    return datetime.now(IST)
-
-def atomic_write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    tmp = Path(name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
-
-def elapsed_session_fraction(now: datetime) -> float:
-    open_dt = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    close_dt = now.replace(hour=15, minute=30, second=0, microsecond=0)
-    total = (close_dt - open_dt).total_seconds()
-    elapsed = (now - open_dt).total_seconds()
-    if total <= 0:
-        return 0.0
-    return min(max(elapsed / total, 0.0), 1.0)
-
-def after_earliest_famine_time(now: datetime, hhmm: str) -> bool:
-    hour, minute = [int(part) for part in hhmm.split(":", 1)]
-    gate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    return now >= gate
-
-def fetch_quotes(kite: Any, quote_keys: list[str]) -> dict[str, dict[str, Any]]:
-    result = {}
-    batches = list(chunks(quote_keys, QUOTE_BATCH_SIZE))
-    for index, batch in enumerate(batches):
-        if index:
-            time.sleep(QUOTE_BATCH_DELAY_SECONDS)
-        response = kite.quote(batch)
-        if not isinstance(response, dict):
-            raise PaperWatchlistError("Kite quote response was not a dictionary")
-        result.update(response)
-    return result
-
-def average_daily_volume(kite: Any, token: int, settings: PaperSelectorSettings) -> float:
-    today = now_ist().date()
-    candles = kite.historical_data(token, today - timedelta(days=settings.historical_lookback_days), today - timedelta(days=1), "day", continuous=False, oi=False)
-    volumes = [positive_int(c.get("volume")) for c in candles if isinstance(c, dict) and positive_int(c.get("volume")) > 0]
-    volumes = volumes[-settings.baseline_days:]
-    return sum(volumes) / len(volumes) if volumes else 0.0
-
-def evaluate_candidate(row, quote, average_volume, session_fraction, settings):
-    last_price = positive_float(quote.get("last_price"))
-    current_volume = positive_int(quote.get("volume"))
-    ohlc = quote.get("ohlc") or {}
-    previous_close = positive_float(ohlc.get("close"))
-    high = positive_float(ohlc.get("high"))
-    low = positive_float(ohlc.get("low"))
-    if last_price <= 0 or previous_close <= 0 or current_volume <= 0:
-        return None
-    if high <= 0 or low <= 0 or average_volume <= 0 or session_fraction <= 0:
-        return None
-    change_pct = ((last_price - previous_close) / previous_close) * 100.0
-    day_range_pct = ((high - low) / previous_close) * 100.0
-    momentum_pct = max(abs(change_pct), day_range_pct)
-    expected_volume_now = average_volume * session_fraction
-    if expected_volume_now <= 0:
-        return None
-    relative_volume = current_volume / expected_volume_now
-    if momentum_pct < settings.momentum_min_pct:
-        return None
-    if not settings.famine_rvol_min <= relative_volume <= settings.famine_rvol_max:
-        return None
-    famine_mid = (settings.famine_rvol_min + settings.famine_rvol_max) / 2.0
-    famine_width = max((settings.famine_rvol_max - settings.famine_rvol_min) / 2.0, 1e-9)
-    famine_quality = max(0.0, 1.0 - abs(relative_volume - famine_mid) / famine_width)
-    score = momentum_pct * (1.0 + famine_quality)
-    return {"symbol": row["symbol"], "exchange": "NSE", "instrument_token": positive_int(row.get("instrument_token")), "last_price": round(last_price,4), "change_pct": round(change_pct,4), "day_range_pct": round(day_range_pct,4), "momentum_pct": round(momentum_pct,4), "current_volume": current_volume, "average_daily_volume": round(average_volume,2), "expected_volume_now": round(expected_volume_now,2), "relative_volume": round(relative_volume,4), "famine": True, "high_momentum": True, "score": round(score,6)}
-
-def generate_selection(kite, settings):
-    if not bool(getattr(cfg, "PAPER_TRADING", False)):
-        raise PaperWatchlistError("Refusing to run paper selector because PAPER_TRADING is not True")
-    now = now_ist()
-    if not after_earliest_famine_time(now, settings.earliest_famine_time):
-        raise PaperWatchlistError(f"Volume-famine selection is disabled before {settings.earliest_famine_time} IST")
-    fraction = elapsed_session_fraction(now)
-    universe = download_nifty500()
-    instrument_map = usable_nse_equity_instruments(kite.instruments("NSE"))
-    matched = []
+def generate_selection(kite,s,audit_path):
+    if not bool(getattr(cfg,"PAPER_TRADING",False)):raise PaperWatchlistError("Refusing to run paper selector because PAPER_TRADING is not True")
+    now=now_ist()
+    if not after_earliest_famine_time(now,s.earliest_famine_time):raise PaperWatchlistError(f"Volume-famine selection is disabled before {s.earliest_famine_time} IST")
+    fraction=elapsed_session_fraction(now); universe=download_nifty500(); imap=usable_nse_equity_instruments(kite.instruments("NSE")); matched=[]; unmatched=[]
     for row in universe:
-        instrument = instrument_map.get(row["symbol"])
-        if instrument is None:
-            continue
-        token = positive_int(instrument.get("instrument_token"))
-        if token > 0:
-            matched.append({**row, "instrument_token": token})
-    quotes = fetch_quotes(kite, [f"NSE:{row['symbol']}" for row in matched])
-    selected = []
-    baseline_failures = 0
-    for index, row in enumerate(matched):
-        quote = quotes.get(f"NSE:{row['symbol']}")
-        if not isinstance(quote, dict):
-            continue
-        try:
-            baseline = average_daily_volume(kite, positive_int(row.get("instrument_token")), settings)
-        except Exception:
-            baseline_failures += 1
-            baseline = 0.0
-        candidate = evaluate_candidate(row, quote, baseline, fraction, settings)
-        if candidate is not None:
-            selected.append(candidate)
-        if index + 1 < len(matched):
-            time.sleep(settings.historical_delay_seconds)
-    selected.sort(key=lambda item: (-positive_float(item.get("score")), -positive_float(item.get("momentum_pct")), item["symbol"]))
-    selected = selected[:settings.top_n]
-    return {"status":"success", "paper_only":True, "generated_at":now.isoformat(timespec="seconds"), "strategy":"HIGH_MOMENTUM_AND_VOLUME_FAMINE_ONLY", "settings":asdict(settings), "statistics":{"universe_rows":len(universe), "matched_symbols":len(matched), "quotes_received":len(quotes), "baseline_failures":baseline_failures, "selected_symbols":len(selected), "session_fraction":round(fraction,6)}, "selected":selected}
-
-def write_watchlist(config_path, selected):
-    if not bool(getattr(cfg, "PAPER_TRADING", False)):
-        raise PaperWatchlistError("Refusing write because PAPER_TRADING is not True")
-    payload = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
-    payload["watchlist"] = [{"symbol":item["symbol"], "exchange":"NSE"} for item in selected]
-    atomic_write_json(config_path, payload)
-
+        inst=imap.get(row["symbol"])
+        if inst is None: unmatched.append({"symbol":row["symbol"],"selected":False,"decision":"REJECT","rejection_reasons":["NOT_USABLE_NSE_EQUITY"]}); continue
+        token=pi(inst.get("instrument_token"))
+        if token<=0: unmatched.append({"symbol":row["symbol"],"selected":False,"decision":"REJECT","rejection_reasons":["INVALID_INSTRUMENT_TOKEN"]}); continue
+        matched.append({**row,"instrument_token":token})
+    quotes=fetch_quotes(kite,[f"NSE:{r['symbol']}" for r in matched]); decisions=list(unmatched); baseline_failures=0
+    for i,row in enumerate(matched):
+        q=quotes.get(f"NSE:{row['symbol']}")
+        if not isinstance(q,dict): decisions.append({"symbol":row["symbol"],"selected":False,"decision":"REJECT","rejection_reasons":["QUOTE_MISSING"]}); continue
+        try:baseline=average_daily_volume(kite,pi(row.get("instrument_token")),s)
+        except Exception as e: baseline_failures+=1; baseline=0; q=dict(q); q["baseline_error"]=str(e)
+        decisions.append(evaluate_candidate(row,q,baseline,fraction,s))
+        if i+1<len(matched):time.sleep(s.historical_delay_seconds)
+    eligible=[d for d in decisions if d.get("selected")]; eligible.sort(key=lambda x:(-pf(x.get("score")),-pf(x.get("momentum_pct")),x["symbol"])); selected=eligible[:s.top_n]; selected_symbols={x["symbol"] for x in selected}
+    for d in decisions:
+        if d.get("selected") and d["symbol"] not in selected_symbols: d.update({"selected":False,"decision":"REJECT","rejection_reasons":["QUALIFIED_BUT_OUTSIDE_TOP_N"]})
+    batch={"event":"WATCHLIST_SELECTION_RUN","generated_at":now.isoformat(timespec="seconds"),"settings":asdict(s),"statistics":{"universe_rows":len(universe),"matched_symbols":len(matched),"quotes_received":len(quotes),"baseline_failures":baseline_failures,"qualified_before_cap":len(eligible),"selected_symbols":len(selected)},"decisions":decisions}
+    append_jsonl(audit_path,batch)
+    return {"status":"success","paper_only":True,"generated_at":now.isoformat(timespec="seconds"),"strategy":"HIGH_MOMENTUM_AND_VOLUME_FAMINE_ONLY","settings":asdict(s),"statistics":{**batch["statistics"],"session_fraction":round(fraction,6)},"selected":selected,"all_decisions":decisions}
+def write_watchlist(path,selected):
+    if not bool(getattr(cfg,"PAPER_TRADING",False)):raise PaperWatchlistError("Refusing write because PAPER_TRADING is not True")
+    payload=json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}; payload["watchlist"]=[{"symbol":x["symbol"],"exchange":"NSE"} for x in selected]; atomic_write_json(path,payload)
 def parse_args():
-    parser = argparse.ArgumentParser(description="Paper-only momentum + famine watchlist selector")
-    parser.add_argument("--write", action="store_true")
-    parser.add_argument("--momentum-min-pct", type=float, default=0.75)
-    parser.add_argument("--famine-rvol-min", type=float, default=0.40)
-    parser.add_argument("--famine-rvol-max", type=float, default=0.70)
-    parser.add_argument("--baseline-days", type=int, default=20)
-    parser.add_argument("--historical-lookback-days", type=int, default=45)
-    parser.add_argument("--historical-delay-seconds", type=float, default=0.36)
-    parser.add_argument("--earliest-famine-time", default="09:27")
-    parser.add_argument("--top", type=int, default=60)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
-    parser.add_argument("--report", type=Path, default=DEFAULT_REPORT_PATH)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
-    return parser.parse_args()
-
+    p=argparse.ArgumentParser(); p.add_argument("--write",action="store_true"); p.add_argument("--momentum-min-pct",type=float,default=.75); p.add_argument("--famine-rvol-min",type=float,default=.40); p.add_argument("--famine-rvol-max",type=float,default=.70); p.add_argument("--baseline-days",type=int,default=20); p.add_argument("--historical-lookback-days",type=int,default=45); p.add_argument("--historical-delay-seconds",type=float,default=.36); p.add_argument("--earliest-famine-time",default="09:27"); p.add_argument("--top",type=int,default=60); p.add_argument("--config",type=Path,default=DEFAULT_CONFIG_PATH); p.add_argument("--report",type=Path,default=DEFAULT_REPORT_PATH); p.add_argument("--output",type=Path,default=DEFAULT_OUTPUT_PATH); p.add_argument("--audit",type=Path,default=DEFAULT_AUDIT_PATH); return p.parse_args()
 def main():
-    args = parse_args()
-    if args.momentum_min_pct < 0: raise SystemExit("ERROR: momentum threshold cannot be negative")
-    if not 0 < args.famine_rvol_min <= args.famine_rvol_max: raise SystemExit("ERROR: invalid famine RVOL range")
-    if args.top <= 0: raise SystemExit("ERROR: --top must be positive")
-    if args.baseline_days <= 0: raise SystemExit("ERROR: --baseline-days must be positive")
-    if args.historical_delay_seconds < 0.34: raise SystemExit("ERROR: historical delay must be at least 0.34 seconds")
-    settings = PaperSelectorSettings(args.momentum_min_pct,args.famine_rvol_min,args.famine_rvol_max,args.baseline_days,args.historical_lookback_days,args.historical_delay_seconds,args.earliest_famine_time,args.top)
+    a=parse_args(); s=PaperSelectorSettings(a.momentum_min_pct,a.famine_rvol_min,a.famine_rvol_max,a.baseline_days,a.historical_lookback_days,a.historical_delay_seconds,a.earliest_famine_time,a.top)
     try:
-        kite = get_kite_client()
-        result = generate_selection(kite, settings)
-        atomic_write_json(args.report, result)
-        atomic_write_json(args.output, {"status":"success","generated_at":result["generated_at"],"watchlist":[{"symbol":i["symbol"],"exchange":"NSE"} for i in result["selected"]],"selected_details":result["selected"]})
-        print("PAPER WATCHLIST: momentum + famine only")
-        print("Selected:", result["statistics"]["selected_symbols"])
-        for item in result["selected"]:
-            print(f"{item['symbol']:<14} momentum={item['momentum_pct']:>7.3f}% rvol={item['relative_volume']:>6.3f} score={item['score']:>8.3f}")
-        if args.write:
-            write_watchlist(args.config, result["selected"])
-            print("Paper watchlist written to:", args.config)
-        else:
-            print("DRY RUN: configuration not modified")
+        r=generate_selection(get_kite_client(),s,a.audit); atomic_write_json(a.report,r); atomic_write_json(a.output,{"status":"success","generated_at":r["generated_at"],"watchlist":[{"symbol":x["symbol"],"exchange":"NSE"} for x in r["selected"]],"selected_details":r["selected"]})
+        print("PAPER WATCHLIST: momentum + famine only"); print("Selected:",r["statistics"]["selected_symbols"]); print("Audited decisions:",len(r["all_decisions"]));
+        for x in r["selected"]:print(f"{x['symbol']:<14} momentum={x['momentum_pct']:>7.3f}% rvol={x['relative_volume']:>6.3f} score={x['score']:>8.3f}")
+        if a.write:write_watchlist(a.config,r["selected"]); print("Paper watchlist written to:",a.config)
         return 0
-    except Exception as exc:
-        failure={"status":"failed","paper_only":True,"generated_at":now_ist().isoformat(timespec="seconds"),"error_type":type(exc).__name__,"error":str(exc),"configuration_changed":False}
-        try: atomic_write_json(args.report, failure)
-        except Exception: pass
-        print("PAPER WATCHLIST FAILED")
-        print("Error:", exc)
-        return 1
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    except Exception as e:
+        f={"status":"failed","paper_only":True,"generated_at":now_ist().isoformat(timespec="seconds"),"error_type":type(e).__name__,"error":str(e),"configuration_changed":False}; atomic_write_json(a.report,f); append_jsonl(a.audit,{"event":"WATCHLIST_SELECTION_FAILURE",**f}); print("PAPER WATCHLIST FAILED\nError:",e); return 1
+if __name__=="__main__":raise SystemExit(main())
