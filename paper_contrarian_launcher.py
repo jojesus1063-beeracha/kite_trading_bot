@@ -7,7 +7,7 @@ Safety properties:
 - Reversed RSI(14) direction on completed entry candles:
     RSI >= 70 -> BUY search
     RSI <= 30 -> SELL search
-    30 < RSI < 70 -> no directional signal
+    30 < RSI < 70 -> PASS; normal strategy parameters decide
 - The existing confirmation, risk, stop, target and execution pipeline remains active.
 """
 
@@ -47,6 +47,7 @@ def calculate_rsi(df: pd.DataFrame, period: int = RSI_PERIOD):
 
 
 def rsi_direction(rsi):
+    """Return a forced RSI direction at extremes; None means PASS."""
     if rsi is None:
         return None
     if rsi >= RSI_OVERBOUGHT:
@@ -68,10 +69,23 @@ def install_contrarian_patch() -> None:
             df_entry = args[2]
         rsi = calculate_rsi(df_entry)
         direction = rsi_direction(rsi)
-        if direction is None:
-            logger.info("PAPER RSI DIRECTION | RSI=%s | neutral/no trade", "NA" if rsi is None else f"{rsi:.2f}")
-            return None
 
+        # Mid-range RSI is neutral, not a rejection: let the normal strategy
+        # decide BUY/SELL using its existing trend, pullback, VWAP, volume,
+        # macro, risk and timing logic.
+        if direction is None:
+            logger.info(
+                "PAPER RSI PASS | RSI=%s | normal strategy decides",
+                "NA" if rsi is None else f"{rsi:.2f}",
+            )
+            signal = original_evaluate(*args, **kwargs)
+            if signal is not None:
+                rsi_text = "NA" if rsi is None else f"{rsi:.2f}"
+                signal.reason = f"PAPER RSI({RSI_PERIOD})={rsi_text} PASS | " + str(signal.reason)
+            return signal
+
+        # At RSI extremes, force the reversed RSI-selected side while keeping
+        # the normal strategy confirmation/risk pipeline active.
         original_get_trend = strategy.get_trend
         desired_trend = "UP" if direction == "BUY" else "DOWN"
 
@@ -91,7 +105,7 @@ def install_contrarian_patch() -> None:
 
     strategy.evaluate = rsi_directed_evaluate
     logger.warning(
-        "PAPER RSI DIRECTION ACTIVE (REVERSED): RSI >= %.0f -> BUY; RSI <= %.0f -> SELL; neutral -> no trade",
+        "PAPER RSI ACTIVE: RSI >= %.0f -> BUY; RSI <= %.0f -> SELL; 30-70 -> PASS to normal strategy",
         RSI_OVERBOUGHT,
         RSI_OVERSOLD,
     )
