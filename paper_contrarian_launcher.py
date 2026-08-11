@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Paper-only reversed EMA9/EMA21 + RSI strategy with exhaustive audit logging.
+"""Paper-only EMA9/EMA21 + RSI strategy with ADX direction regime switching.
 
-Directional signals:
-- EMA9 > EMA21 -> SELL
-- EMA9 < EMA21 -> BUY
+Directional policy:
+- ADX <= 40 (or unavailable): reversed EMA logic
+    EMA9 > EMA21 -> SELL
+    EMA9 < EMA21 -> BUY
+- ADX > 40: normal EMA logic
+    EMA9 > EMA21 -> BUY
+    EMA9 < EMA21 -> SELL
 - RSI >= 70 -> BUY override
 - RSI <= 30 -> SELL override
-- RSI 30-70 -> PASS to reversed EMA direction
+- RSI 30-70 -> PASS to the ADX-selected EMA direction
 
-Only EMA9/EMA21 and RSI may determine the paper trade direction. Legacy
-technical gates (EMA200/watchlist direction, RVOL, entry quality, CHoCH/context,
-price action, relative strength, market alignment, news) are observational in
-this launcher and cannot reject or re-rank a candidate. Execution/risk safety
-controls in main.py/executor.py remain active: trading window, risk limits,
-position limits, quantity validity, fresh-price protection, stops/targets and
-square-off.
+ADX never blocks a trade; it only chooses whether EMA9/EMA21 is interpreted
+normally or in reverse. Legacy technical gates (EMA200/watchlist direction,
+RVOL, entry quality, CHoCH/context, price action, relative strength, market
+alignment, news) remain observational and cannot reject or re-rank a candidate.
+Execution/risk safety controls in main.py/executor.py remain active.
 """
 from __future__ import annotations
 
@@ -41,6 +43,7 @@ EMA_SLOW = 21
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
+ADX_REGIME_THRESHOLD = 40.0
 AUDIT_DIR = Path(__file__).resolve().parent / "runtime" / "paper_audit"
 ENTRY_AUDIT = AUDIT_DIR / "entry_audit.jsonl"
 CONFIG_AUDIT = AUDIT_DIR / "session_config.json"
@@ -88,6 +91,8 @@ def _config_snapshot():
     names = [n for n in dir(cfg) if n.isupper()]
     snap = {n: _safe(getattr(cfg, n)) for n in names}
     snap["PAPER_TWO_INDICATOR_LEGACY_GATES"] = "OBSERVATIONAL_ONLY"
+    snap["PAPER_ADX_DIRECTION_THRESHOLD"] = ADX_REGIME_THRESHOLD
+    snap["PAPER_ADX_ROLE"] = "DIRECTION_REGIME_ONLY_NEVER_BLOCK"
     AUDIT_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_AUDIT.write_text(json.dumps(snap, indent=2, default=str), encoding="utf-8")
 
@@ -109,7 +114,23 @@ def calculate_rsi(df, period=RSI_PERIOD):
     return float(100 - (100 / (1 + rs)))
 
 
-def ema_direction(df):
+def _latest_adx(df_15m):
+    """Return latest available stock ADX without ever causing a rejection."""
+    if df_15m is None or df_15m.empty or "adx" not in df_15m.columns:
+        return None
+    values = pd.to_numeric(df_15m["adx"], errors="coerce").dropna()
+    if values.empty:
+        return None
+    return float(values.iloc[-1])
+
+
+def ema_direction(df, adx=None):
+    """Return EMA direction under the ADX regime; ADX never blocks.
+
+    ADX > 40  -> normal EMA interpretation.
+    ADX <= 40 -> reversed EMA interpretation.
+    Missing ADX falls back to reversed interpretation.
+    """
     if df is None or df.empty or "close" not in df.columns or len(df) < EMA_SLOW:
         return None, None, None
     c = pd.to_numeric(df["close"], errors="coerce")
@@ -117,11 +138,15 @@ def ema_direction(df):
     e21 = c.ewm(span=EMA_SLOW, adjust=False).mean().iloc[-1]
     if pd.isna(e9) or pd.isna(e21):
         return None, None, None
+
+    normal_regime = adx is not None and adx > ADX_REGIME_THRESHOLD
     if e9 > e21:
-        return "SELL", float(e9), float(e21)
-    if e9 < e21:
-        return "BUY", float(e9), float(e21)
-    return None, float(e9), float(e21)
+        direction = "BUY" if normal_regime else "SELL"
+    elif e9 < e21:
+        direction = "SELL" if normal_regime else "BUY"
+    else:
+        direction = None
+    return direction, float(e9), float(e21)
 
 
 def rsi_direction(rsi):
@@ -164,6 +189,8 @@ def _legacy_observations(df15, dfentry, index15):
             "trend_ema_relation": None if ef is None or es is None else ("UP" if ef > es else "DOWN" if ef < es else "FLAT"),
             "price_vs_vwap": None if close is None or vwap is None else ("ABOVE" if close > vwap else "BELOW" if close < vwap else "AT"),
             "adx": adx,
+            "adx_direction_threshold": ADX_REGIME_THRESHOLD,
+            "adx_direction_regime": "NORMAL" if adx is not None and adx > ADX_REGIME_THRESHOLD else "REVERSED",
             "ema200": ema200,
             "would_adx_pass_25": None if adx is None else adx >= 25,
             "would_price_be_above_ema200": None if close is None or ema200 is None else close > ema200,
@@ -286,8 +313,6 @@ def install_legacy_gate_bypass():
     relative_strength.assess_relative_strength = observational_relative_strength
     price_action.evaluate_price_action = observational_price_action
 
-    # main.py imports these names at module import time. These module patches
-    # therefore become the functions main.py receives when runpy loads it.
     cfg.ENABLE_MARKET_ALIGNMENT_FILTER = False
     cfg.ENABLE_NEWS_FILTER = False
     cfg.ENABLE_RVOL_FILTER = False
@@ -306,20 +331,31 @@ def install_two_indicator_patch():
     _config_snapshot()
 
     def evaluate(symbol, df_15m, df_5m, df_index_15m, cfg_obj):
+        observations = _legacy_observations(df_15m, df_5m, df_index_15m)
+        adx = _latest_adx(df_15m)
+        adx_regime = "NORMAL" if adx is not None and adx > ADX_REGIME_THRESHOLD else "REVERSED"
         event = {
             "event": "ENTRY_EVALUATION",
             "logged_at": pd.Timestamp.now(tz="Asia/Kolkata").isoformat(),
             "symbol": symbol,
             "paper_only": True,
             "directional_policy": {
-                "ema9_gt_ema21": "SELL",
-                "ema9_lt_ema21": "BUY",
+                "adx_lte_40_or_unavailable": "REVERSED_EMA",
+                "adx_gt_40": "NORMAL_EMA",
+                "normal_ema9_gt_ema21": "BUY",
+                "normal_ema9_lt_ema21": "SELL",
+                "reversed_ema9_gt_ema21": "SELL",
+                "reversed_ema9_lt_ema21": "BUY",
                 "rsi_gte_70": "BUY_OVERRIDE",
                 "rsi_lte_30": "SELL_OVERRIDE",
-                "rsi_30_70": "PASS_EMA",
+                "rsi_30_70": "PASS_ADX_EMA_DIRECTION",
             },
+            "adx": adx,
+            "adx_threshold": ADX_REGIME_THRESHOLD,
+            "adx_regime": adx_regime,
+            "adx_blocks_trade": False,
             "legacy_gates": "OBSERVATIONAL_ONLY",
-            "observations": _legacy_observations(df_15m, df_5m, df_index_15m),
+            "observations": observations,
         }
         if df_5m is None or df_5m.empty:
             event.update({"decision": "REJECT", "stage": "ENTRY_DATA", "reasons": ["NO_ENTRY_CANDLES"]})
@@ -339,7 +375,7 @@ def install_two_indicator_patch():
             _append(event)
             return None
 
-        base, e9, e21 = ema_direction(df_5m)
+        base, e9, e21 = ema_direction(df_5m, adx=adx)
         rsi = calculate_rsi(df_5m)
         override = rsi_direction(rsi)
         final = override or base
@@ -374,25 +410,29 @@ def install_two_indicator_patch():
 
         event.update({
             "decision": "SIGNAL_SELECTED",
-            "stage": "TWO_INDICATOR_SIGNAL",
+            "stage": "ADX_EMA_RSI_SIGNAL",
             "entry_price": entry,
             "stop_loss": stop,
             "target": target,
             "stop_loss_percent": sp * 100,
             "profit_target_percent": tp * 100,
-            "selection_reasons": ["EMA9_EMA21_DIRECTION_AVAILABLE", ("RSI_OVERRIDE" if override else "RSI_PASS")],
+            "selection_reasons": [
+                f"ADX_{adx_regime}_EMA_DIRECTION",
+                ("RSI_OVERRIDE" if override else "RSI_PASS"),
+            ],
             "observational_filters_blocked": False,
         })
         _append(event)
         logger.info(
-            "PAPER AUDIT SIGNAL | %s | EMA9=%s EMA21=%s base=%s RSI=%s override=%s FINAL=%s",
-            symbol, e9, e21, base, rsi, override, final,
+            "PAPER AUDIT SIGNAL | %s | ADX=%s regime=%s | EMA9=%s EMA21=%s base=%s RSI=%s override=%s FINAL=%s",
+            symbol, adx, adx_regime, e9, e21, base, rsi, override, final,
         )
         reason = (
-            f"PAPER TWO-INDICATOR | REVERSED EMA9={e9:.4f} EMA21={e21:.4f} -> {base} | "
+            f"PAPER ADX-EMA-RSI | ADX={'NA' if adx is None else f'{adx:.2f}'} regime={adx_regime} "
+            f"(threshold>{ADX_REGIME_THRESHOLD:.0f}=NORMAL) | EMA9={e9:.4f} EMA21={e21:.4f} -> {base} | "
             f"RSI({RSI_PERIOD})={'NA' if rsi is None else f'{rsi:.2f}'} "
             f"{'RSI_OVERRIDE' if override else 'RSI_PASS'} -> {final} | "
-            f"legacy technical gates observational only | audit={ENTRY_AUDIT}"
+            f"ADX direction only, never blocking | legacy technical gates observational only | audit={ENTRY_AUDIT}"
         )
         return strategy.Signal(
             symbol=symbol,
@@ -407,7 +447,12 @@ def install_two_indicator_patch():
 
     strategy.evaluate = evaluate
     logger.warning(
-        "PAPER TWO-INDICATOR AUDIT MODE ACTIVE: every entry evaluation and available legacy metric is persisted to %s",
+        "PAPER ADX DIRECTION REGIME ACTIVE: ADX<=%.0f/unavailable -> reversed EMA; ADX>%.0f -> normal EMA; ADX never blocks",
+        ADX_REGIME_THRESHOLD,
+        ADX_REGIME_THRESHOLD,
+    )
+    logger.warning(
+        "PAPER AUDIT MODE ACTIVE: every entry evaluation and available legacy metric is persisted to %s",
         ENTRY_AUDIT,
     )
 
