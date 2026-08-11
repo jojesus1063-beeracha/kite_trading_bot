@@ -1,8 +1,11 @@
 [Unit]
-Description=Select paper high-momentum volume-famine watchlist each weekday
+Description=Build cleaned full-Zerodha PAPER top-60 each weekday at the 09:16 opening snapshot
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 09:27:10 Asia/Kolkata
+# Fire 20 seconds early so the service can stop the old PAPER process first;
+# run_paper_watchlist_daily.sh then waits 20 seconds and begins quotes at
+# approximately 09:16:10 Asia/Kolkata.
+OnCalendar=Mon..Fri *-*-* 09:15:50 Asia/Kolkata
 Persistent=false
 AccuracySec=1s
 RandomizedDelaySec=0
