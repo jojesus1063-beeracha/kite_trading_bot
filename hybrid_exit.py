@@ -20,6 +20,11 @@ def configure_hybrid_exit(position: dict, cfg) -> dict:
     Positions with fewer than two shares cannot be split and retain the
     ordinary fixed target. Live order/stop coordination is implemented by
     main.py; this pure helper never performs broker side effects.
+
+    Recovery may deliberately produce an unresolved position with ``entry``
+    and ``stop`` set to ``None`` while manual reconciliation is required.
+    Hybrid planning must fail closed for that state rather than raising during
+    restart recovery.
     """
 
     enabled = bool(getattr(cfg, "ENABLE_HYBRID_EXIT", False))
@@ -31,9 +36,16 @@ def configure_hybrid_exit(position: dict, cfg) -> dict:
     if not enabled or not fixed_target or quantity < 2:
         return position
 
-    entry = float(position["entry"])
-    stop = float(position["stop"])
-    direction = str(position["direction"]).upper()
+    # Fail closed on unresolved or malformed recovery levels.  Do not invent a
+    # fill/stop price: the caller's manual-reconciliation state must remain the
+    # authority until real broker data is available.
+    try:
+        entry = float(position.get("entry"))
+        stop = float(position.get("stop"))
+    except (TypeError, ValueError):
+        return position
+
+    direction = str(position.get("direction") or "").upper()
     risk_per_share = abs(entry - stop)
     scalp_r = float(getattr(cfg, "HYBRID_SCALP_R", 1.0))
     runner_r = float(getattr(cfg, "HYBRID_RUNNER_R", 2.0))
@@ -44,6 +56,7 @@ def configure_hybrid_exit(position: dict, cfg) -> dict:
         direction not in {"BUY", "SELL"}
         or not all(math.isfinite(value) for value in values)
         or entry <= 0
+        or stop <= 0
         or risk_per_share <= 0
         or scalp_r <= 0
         or runner_r <= scalp_r
