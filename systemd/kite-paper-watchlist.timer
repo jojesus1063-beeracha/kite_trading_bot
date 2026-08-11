@@ -2,7 +2,7 @@
 Description=Select paper high-momentum volume-famine watchlist each weekday
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 09:45:10 Asia/Kolkata
+OnCalendar=Mon..Fri *-*-* 09:27:10 Asia/Kolkata
 Persistent=false
 AccuracySec=1s
 RandomizedDelaySec=0
