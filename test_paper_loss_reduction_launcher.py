@@ -24,6 +24,15 @@ def test_apply_loss_reduction_config(monkeypatch):
     assert cfg.PAPER_EARLY_FAILURE_MAX_MFE_PCT == 0.15
 
 
+def test_loss_reduction_launcher_installs_daily_risk_guard_before_main_import():
+    source = (Path(__file__).resolve().parent / "paper_loss_reduction_launcher.py").read_text(
+        encoding="utf-8"
+    )
+    install_pos = source.index("install_paper_daily_risk_guard()")
+    main_import_pos = source.index("import main as trading_main")
+    assert install_pos < main_import_pos
+
+
 def _write_trade(path: Path, signal_id, pnl, time_text, symbol="ABC"):
     with path.open("a", encoding="utf-8") as h:
         h.write(json.dumps({
