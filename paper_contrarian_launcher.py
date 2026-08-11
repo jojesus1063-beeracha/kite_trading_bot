@@ -4,9 +4,9 @@
 Safety properties:
 - Refuses to run unless config.PAPER_TRADING is True.
 - Does not modify strategy.py or live service behavior.
-- RSI(14) on completed entry candles supplies the BUY/SELL direction:
-    RSI >= 70 -> SELL search
-    RSI <= 30 -> BUY search
+- Reversed RSI(14) direction on completed entry candles:
+    RSI >= 70 -> BUY search
+    RSI <= 30 -> SELL search
     30 < RSI < 70 -> no directional signal
 - The existing confirmation, risk, stop, target and execution pipeline remains active.
 """
@@ -50,9 +50,9 @@ def rsi_direction(rsi):
     if rsi is None:
         return None
     if rsi >= RSI_OVERBOUGHT:
-        return "SELL"
-    if rsi <= RSI_OVERSOLD:
         return "BUY"
+    if rsi <= RSI_OVERSOLD:
+        return "SELL"
     return None
 
 
@@ -63,8 +63,6 @@ def install_contrarian_patch() -> None:
     original_evaluate = strategy.evaluate
 
     def rsi_directed_evaluate(*args, **kwargs):
-        # strategy.evaluate receives the entry-candle dataframe as df_5m in the
-        # current engine even when ENTRY_TIMEFRAME is configured as 3minute.
         df_entry = kwargs.get("df_5m")
         if df_entry is None and len(args) >= 3:
             df_entry = args[2]
@@ -74,14 +72,10 @@ def install_contrarian_patch() -> None:
             logger.info("PAPER RSI DIRECTION | RSI=%s | neutral/no trade", "NA" if rsi is None else f"{rsi:.2f}")
             return None
 
-        # Preserve the normal strategy's confirmation/risk pipeline, but make
-        # its trend input agree with the RSI-selected side for this call only.
         original_get_trend = strategy.get_trend
         desired_trend = "UP" if direction == "BUY" else "DOWN"
 
         def rsi_get_trend(row_15m, cfg=None, require_vwap=True):
-            # First require the underlying trend calculation to be valid; then
-            # replace only its direction in this paper experiment.
             normal = original_get_trend(row_15m, cfg, require_vwap=require_vwap)
             return desired_trend if normal is not None else None
 
@@ -97,7 +91,7 @@ def install_contrarian_patch() -> None:
 
     strategy.evaluate = rsi_directed_evaluate
     logger.warning(
-        "PAPER RSI DIRECTION ACTIVE: RSI >= %.0f -> SELL; RSI <= %.0f -> BUY; neutral -> no trade",
+        "PAPER RSI DIRECTION ACTIVE (REVERSED): RSI >= %.0f -> BUY; RSI <= %.0f -> SELL; neutral -> no trade",
         RSI_OVERBOUGHT,
         RSI_OVERSOLD,
     )
