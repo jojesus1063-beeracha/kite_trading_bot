@@ -101,6 +101,11 @@ logger = logging.getLogger("main")
 POLL_SECONDS = 60  # legacy polling fallback; aligned mode uses ENTRY_TIMEFRAME
 
 
+def market_alignment_blocks_entry(alignment: str) -> bool:
+    """Block only genuine opposition to the final BUY/SELL signal."""
+    return alignment in ("MISALIGNED", "STRONG_MISALIGNMENT")
+
+
 def within_trading_window() -> bool:
     now = datetime.now().time()
     start = datetime.strptime(cfg.NO_ENTRY_BEFORE, "%H:%M").time()
@@ -573,7 +578,7 @@ def run_full_scan(
                 sector_trend_reason = "FETCH_ERROR"
 
             if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and \
-               signal.market_alignment not in ("ALIGNED", "STRONG_ALIGNMENT"):
+               market_alignment_blocks_entry(signal.market_alignment):
                 logger.info(f"{symbol}: skipped -- market_alignment={signal.market_alignment} "
                             f"(trading against market/sector trend)")
                 status_this_cycle.append({"symbol": symbol,
