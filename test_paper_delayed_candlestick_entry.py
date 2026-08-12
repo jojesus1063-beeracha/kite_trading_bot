@@ -41,7 +41,9 @@ def run():
     print("PASS: bullish Marubozu detected")
     passed += 1
 
-    assert is_hammer(candle(100.4, 100.5, 99.7, 100.3))
+    # Body = 0.10, lower wick = 0.25 (2.5x body), upper wick = 0.03.
+    # This fixture intentionally satisfies the configured Hammer geometry.
+    assert is_hammer(candle(100.4, 100.43, 100.05, 100.3))
     print("PASS: Hammer detected")
     passed += 1
 
@@ -72,23 +74,25 @@ def run():
     passed += 1
 
     # Build a closed Hammer on index 20 with volume > SMA20 and close above EMA/VWAP.
+    # High=100.43, so with a 0.05 tick the confirmation trigger is 100.48.
     df = base_df()
-    df.loc[20, ["open", "high", "low", "close", "volume"]] = [100.4, 100.5, 99.7, 100.3, 2000]
+    df.loc[20, ["open", "high", "low", "close", "volume"]] = [100.4, 100.43, 100.05, 100.3, 2000]
     enriched = add_indicators(df)
     setup = detect_setup(enriched, 20, 0.05)
     assert setup is not None and setup.pattern == Pattern.HAMMER
     print("PASS: closed Hammer creates pending setup")
     passed += 1
 
-    # Next closed candle must CLOSE above trigger 100.55; intrabar high alone is insufficient.
-    df.loc[21, ["open", "high", "low", "close", "volume"]] = [100.3, 100.7, 100.2, 100.50, 1800]
+    # Intrabar high may cross 100.48, but close below 100.48 must NOT confirm.
+    df.loc[21, ["open", "high", "low", "close", "volume"]] = [100.3, 100.60, 100.2, 100.45, 1800]
     enriched = add_indicators(df)
     setup = detect_setup(enriched, 20, 0.05)
     assert confirm_setup(enriched, setup, 21, 5000, 0.05, 0.20) is None
     print("PASS: intrabar touch does not trigger; closed-candle confirmation enforced")
     passed += 1
 
-    df.loc[21, ["open", "high", "low", "close", "volume"]] = [100.3, 100.8, 100.2, 100.65, 1800]
+    # Closed candle above 100.48 confirms the pending Hammer setup.
+    df.loc[21, ["open", "high", "low", "close", "volume"]] = [100.3, 100.70, 100.2, 100.55, 1800]
     enriched = add_indicators(df)
     setup = detect_setup(enriched, 20, 0.05)
     confirmed = confirm_setup(enriched, setup, 21, 5000, 0.05, 0.20)
