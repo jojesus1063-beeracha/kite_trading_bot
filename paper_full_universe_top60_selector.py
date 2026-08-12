@@ -6,8 +6,8 @@ Universe:
 - Only ordinary company-equity style rows are retained before quote fetching.
 - ETF/fund/debt-like rows, special-series suffixes, non-unit lot sizes and
   non-EQ/non-cash rows are rejected fail-closed.
-- ISIN is used as an additional discriminator when Kite supplies it; a missing
-  ISIN is not itself a rejection because the instrument master may omit it.
+- Kite's instrument master does not expose an ISIN column, so ISIN is treated
+  only as optional metadata if a test fixture or alternate source supplies it.
 
 Selection policy (frozen from the verified read-only trial):
 - price Rs20-Rs2200
@@ -30,6 +30,7 @@ import json
 import math
 import re
 import shutil
+import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +42,6 @@ from auto_watchlist import (
     SelectorSettings,
     atomic_write_json,
     evaluate_quote,
-    fetch_full_quotes,
     positive_float,
     positive_int,
 )
@@ -71,18 +71,30 @@ DEFAULT_REPORT = DEFAULT_RUNTIME / "latest_report.json"
 
 ALLOWED_EXCHANGES = {"NSE", "BSE"}
 DISALLOWED_SUFFIXES = (
-    "-BE", "-BZ", "-ST", "-SM", "-IL", "-BT", "-GC", "-W1", "-W2"
+    "-BE", "-BZ", "-ST", "-SM", "-IL", "-BT", "-GC", "-W1", "-W2",
 )
-# Kite's instrument master does not always include ISIN. When present, ISIN is
-# an additional discriminator: ordinary company securities normally use INE...
-# while ETF/fund units commonly use INF.... Missing ISIN must not collapse the
-# entire clean universe. Symbol/name rules remain the secondary defence and we
-# intentionally avoid broad GOLD/SILVER substrings so legitimate names such as
-# GOLDIAM are not rejected.
+# Kite documents full quote snapshots for up to 500 instruments, but a full
+# 500-symbol GET can create a very long URL and the Aug-12 Oracle VM run was
+# challenged by the upstream HTTP edge before Kite returned JSON. Keep this
+# PAPER selector deliberately below that ceiling while respecting Kite's
+# documented 1 quote request/second rate limit.
+SELECTOR_QUOTE_BATCH_SIZE = 200
+SELECTOR_QUOTE_BATCH_DELAY_SECONDS = 1.10
+
+# Ordinary cash-company symbols can legitimately contain hyphens (for example
+# HCL-INSYS and NAM-INDIA), so do not reject all hyphenated symbols. These
+# patterns target the exchange series observed for SGB/G-Sec/NCD/debt, InvIT
+# and REIT rows that Kite can expose with instrument_type=EQ in cash segments.
+NON_ORDINARY_SERIES_RE = re.compile(
+    r"(?:^SGB|-(?:GB|GS|IV|RR|N[A-Z0-9]|Y[A-Z0-9])$",
+    re.IGNORECASE,
+)
 NON_ORDINARY_SYMBOL_RE = re.compile(r"(?:ETF|IETF|BEES|NETF)$", re.IGNORECASE)
 NON_ORDINARY_NAME_RE = re.compile(
     r"\b(?:ETF|EXCHANGE\s+TRADED\s+FUND|MUTUAL\s+FUND|INDEX\s+FUND|"
-    r"SOVEREIGN\s+GOLD\s+BOND|TREASURY\s+BILL|GOVERNMENT\s+SECURIT(?:Y|IES))\b",
+    r"SOVEREIGN\s+GOLD\s+BOND|TREASURY\s+BILL|GOVERNMENT\s+SECURIT(?:Y|IES)|"
+    r"NON[- ]CONVERTIBLE\s+DEBENTURE|DEBENTURE|NCD|INFRASTRUCTURE\s+INVESTMENT\s+TRUST|"
+    r"REAL\s+ESTATE\s+INVESTMENT\s+TRUST)\b",
     re.IGNORECASE,
 )
 STRATEGY_NAME = "FULL_ZERODHA_CLEAN_TOP60_MOMENTUM"
@@ -130,8 +142,10 @@ def ordinary_equity_rejection_reason(instrument: dict[str, Any], exchange: str) 
         return "lot_size_not_one"
     if symbol.endswith(DISALLOWED_SUFFIXES):
         return "special_series_suffix"
-    # IMPORTANT: Kite may omit ISIN from the instrument master. Reject a
-    # supplied non-INE ISIN, but do not reject solely because ISIN is absent.
+    if NON_ORDINARY_SERIES_RE.search(symbol):
+        return "non_ordinary_series"
+    # Kite's documented instrument-master columns do not include ISIN. Keep
+    # this check only for supplied metadata/fixtures; absence itself is valid.
     if isin and not isin.startswith("INE"):
         return "non_ordinary_isin"
     if NON_ORDINARY_SYMBOL_RE.search(symbol):
@@ -189,6 +203,23 @@ def cleaned_equity_instruments(kite: Any) -> tuple[list[dict[str, Any]], dict[st
         "clean_by_exchange": dict(clean_by_exchange),
         "cleaning_rejections": dict(sorted(rejected.items())),
     }
+
+
+def fetch_selector_quotes(
+    kite: Any,
+    quote_keys: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Fetch full quotes in shorter, rate-limited batches for this selector."""
+    quotes: dict[str, dict[str, Any]] = {}
+    for start in range(0, len(quote_keys), SELECTOR_QUOTE_BATCH_SIZE):
+        if start:
+            time.sleep(SELECTOR_QUOTE_BATCH_DELAY_SECONDS)
+        batch = quote_keys[start : start + SELECTOR_QUOTE_BATCH_SIZE]
+        response = kite.quote(batch)
+        if not isinstance(response, dict):
+            raise RuntimeError("Kite quote response was not a dictionary")
+        quotes.update(response)
+    return quotes
 
 
 def write_paper_watchlist(
@@ -264,7 +295,7 @@ def main() -> int:
         raise SystemExit("FAIL: cleaned ordinary-equity universe is too small")
 
     quote_keys = [f"{row['exchange']}:{row['symbol']}" for row in rows]
-    quotes = fetch_full_quotes(kite, quote_keys)
+    quotes = fetch_selector_quotes(kite, quote_keys)
     minimum_quotes = math.ceil(len(rows) * 0.90)
     if len(quotes) < minimum_quotes:
         raise SystemExit(
@@ -365,6 +396,7 @@ def main() -> int:
         "cleaning": cleaning,
         "universe_total": len(rows),
         "quotes_received": len(quotes),
+        "quote_batch_size": SELECTOR_QUOTE_BATCH_SIZE,
         "hard_filter": {
             "min_price": MIN_PRICE,
             "max_price": args.max_price,
@@ -415,6 +447,7 @@ def main() -> int:
     print("\n===== CLEAN FULL-ZERODHA PAPER TOP-60 =====")
     print("Status: success")
     print("Mode:", report["mode"])
+    print("Quote batch size:", SELECTOR_QUOTE_BATCH_SIZE)
     print("Quotes received:", len(quotes))
     print("Eligible before dedupe:", len(eligible))
     print("Duplicate same-symbol listings removed:", duplicate_listings_removed)
