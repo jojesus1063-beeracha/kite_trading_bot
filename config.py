@@ -44,7 +44,7 @@ ENTRY_HISTORY_LOOKBACK_DAYS = 5
 # Indicator settings
 # ---------------------------------------------------------------------
 TREND_EMA_FAST = 9      # on 15-min chart
-TREND_EMA_SLOW = 35     # on 15-min chart
+TREND_EMA_SLOW = 21     # on 15-min chart
 ENTRY_EMA = 20          # on entry-timeframe chart
 VOLUME_LOOKBACK = 20    # bars, for entry-candle average-volume comparison
 VOLUME_MULTIPLIER = 1.2  # entry candle volume must exceed avg volume * this
@@ -56,6 +56,10 @@ TREND_GATE_MODE = "enforce"
 PULLBACK_GATE_MODE = "enforce"
 EXPERIMENTAL_PAPER_ONLY = True
 EXPERIMENT_OBSERVATION_FILE = "runtime/strategy_experiment.jsonl"
+# Paper-only research mode. A fresh 15-minute EMA9/EMA21 crossover is
+# the sole technical entry gate; all other technical filters are logged
+# as observations. Operational risk/execution safeguards remain enforced.
+EMA_CROSSOVER_OBSERVATION_MODE = False
 
 # ADX (Average Directional Index) — measures trend STRENGTH (0-100),
 # used as an optional filter on top of the existing EMA/VWAP trend
@@ -284,6 +288,9 @@ if os.path.exists(_USER_CONFIG_PATH):
     )
     EXPERIMENT_OBSERVATION_FILE = _overrides.get(
         "experiment_observation_file", EXPERIMENT_OBSERVATION_FILE
+    )
+    EMA_CROSSOVER_OBSERVATION_MODE = _overrides.get(
+        "ema_crossover_observation_mode", EMA_CROSSOVER_OBSERVATION_MODE
     )
     PAPER_TRADING = _overrides.get("paper_trading", PAPER_TRADING)
     USE_ADX_FILTER = _overrides.get("use_adx_filter", USE_ADX_FILTER)
