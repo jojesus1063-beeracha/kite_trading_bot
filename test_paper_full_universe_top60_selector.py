@@ -24,9 +24,19 @@ def test_regular_ine_equity_is_allowed():
     assert s.ordinary_equity_rejection_reason(instrument(), "NSE") is None
 
 
+def test_regular_equity_with_missing_isin_is_allowed():
+    row = instrument(isin="")
+    assert s.ordinary_equity_rejection_reason(row, "NSE") is None
+
+
 def test_etf_isin_is_rejected():
     row = instrument("SILVERIETF", isin="INF109KC1Y56", name="ICICI PRUDENTIAL SILVER ETF")
     assert s.ordinary_equity_rejection_reason(row, "NSE") == "non_ordinary_isin"
+
+
+def test_missing_isin_does_not_bypass_fund_symbol_filter():
+    row = instrument("SILVERIETF", isin="", name="ICICI PRUDENTIAL SILVER ETF")
+    assert s.ordinary_equity_rejection_reason(row, "NSE") == "fund_like_symbol"
 
 
 def test_special_be_series_is_rejected():
