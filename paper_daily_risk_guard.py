@@ -344,12 +344,23 @@ def estimate_proposed_risk(direction: str, quantity: int, entry_plan: dict | Non
     if direction not in {"BUY", "SELL"}:
         raise OpenRiskUnavailable("proposed direction is unavailable")
 
-    if bool(entry_plan.get("fixed_target_enabled")):
-        stop_pct = _finite_float(entry_plan.get("stop_loss_percent"), "stop_loss_percent")
-        fraction = stop_pct / 100.0
-        stop = entry * (1.0 - fraction) if direction == "BUY" else entry * (1.0 + fraction)
-    else:
-        stop = _finite_float(entry_plan.get("signal_stop_price"), "proposed sizing stop")
+    # Always validate against the SAME stop that risk.position_size() used
+    # to size this quantity (main.py: planned_stop_price = signal.stop_loss,
+    # then qty = risk.position_size(signal.entry_price, planned_stop_price)).
+    #
+    # The previous logic recomputed a DIFFERENT stop here whenever
+    # fixed_target_enabled was True -- a flat STOP_LOSS_PERCENT (0.45%)
+    # distance from entry, completely independent of the geometric stop
+    # actually used for sizing. Confirmed end-to-end against a real
+    # rejected trade (VAML, 2026-08-12 09:46:43): quantity=143 was sized
+    # for ~Rs10 of risk against a tight geometric stop, but this function
+    # then validated it against a reconstructed 0.4498% stop (matching
+    # cfg.STOP_LOSS_PERCENT=0.45 to within rounding) instead of that same
+    # geometric stop, producing proposed_risk=Rs305.76 -- ~30x the actual
+    # sizing risk -- which the Rs250 daily budget then correctly rejected,
+    # every time, for every symbol, all day. The guard was never wrong
+    # about the budget; it was validating a trade that was never proposed.
+    stop = _finite_float(entry_plan.get("signal_stop_price"), "proposed sizing stop")
 
     proposed = abs(entry - stop) * int(quantity)
     if not math.isfinite(proposed):
