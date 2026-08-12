@@ -1,46 +1,51 @@
-"""Read-only Aug-12 candlestick-gate replay: 3m baseline vs 5m resample.
+"""Read-only Aug-12 candlestick-gate replay across 3m, 5m, 10m and 15m.
 
-This harness keeps ``candlestick_engine.py`` untouched.  It replays the actual
-Aug-12 PAPER trades using each trade's already-decided BUY/SELL direction as the
-upstream intended_direction and compares:
+The candlestick engine itself is intentionally untouched.  This harness replays
+all actual Aug-12 PAPER trades using the already-decided BUY/SELL direction as
+``intended_direction`` and compares four entry-candle views:
 
-1) the original 3-minute candle geometry; and
-2) a 5-minute OHLCV view resampled from the historical 3-minute bars.
+- 3m: original Kite historical bars
+- 5m: resampled from 3m
+- 10m: resampled from 3m
+- 15m: resampled from 3m
 
-5-minute aggregation rule:
+Resampling rule for every derived timeframe:
     open   = first
     high   = max
     low    = min
     close  = last
     volume = sum
 
-The candlestick engine recalculates EMA50, session VWAP, prior-20-bar volume SMA
-and average-body statistics from whichever OHLCV dataframe is supplied to it.
-Thus the 5m pass uses 5m-native indicators derived from the resampled OHLCV.
+The engine recalculates its own EMA50, session VWAP, prior-20-bar volume SMA and
+average-body statistics from whichever OHLCV dataframe is supplied.  Therefore
+5m/10m/15m evaluations use timeframe-native indicators derived from the
+resampled OHLCV.
 
-IMPORTANT QUANT NOTE
---------------------
-Three-minute bars do not partition exactly into five-minute bars.  Therefore a
-3m->5m resample cannot reconstruct a broker-native 5m candle perfectly.  This
-script records the latest completion time of every contributing 3m source bar
-(`available_at`) and refuses to expose a derived 5m bar before all contributing
-3m bars have closed.  That prevents look-ahead, but the resulting geometry is
-still an approximation.  A production-grade conclusion should be verified with
-Kite's native ``5minute`` historical candles before deployment.
+NO-LOOKAHEAD / AGGREGATION NOTE
+-------------------------------
+Kite timestamps each 3m candle by its start time.  Derived bars carry
+``available_at`` = the latest close time among all contributing 3m source bars.
+The replay never exposes a resampled candle before every source candle used to
+build it has completed.
+
+15m aligns exactly with 3m when anchored at 09:15 IST (five 3m bars per 15m).
+5m and 10m do NOT partition exactly into 3m bars, so those two geometries are
+approximations.  They remain useful for research, but production conclusions
+should be verified against native Kite 5minute/10minute data where available.
 
 Safety / interpretation:
 - Historical Kite reads only; no broker orders are submitted.
 - No production state files are written.
 - Output CSV is written only to /tmp.
-- PAPER risk remains 0.20%; minimum target remains 2R; pending lifetime is 2 bars.
+- PAPER risk remains 0.20%; minimum target remains 2R.
+- Pending lifetime remains max 2 completed bars.
 - Strict BUY context remains close > VWAP AND close > EMA50; SELL is the mirror.
-- The engine's volume rule remains unchanged.
-- NEXT_OPEN plans remain flagged as semantic-risk rows and are excluded from the
-  simulated P&L because the current engine learns that bar only after it closes.
-- Simulated P&L below is a simple candlestick-plan stop/2R-target path, not a full
-  replay of CP9/hybrid exits.  If stop and target occur in the same OHLC bar, the
-  conservative assumption is STOP first.  If neither is hit by EOD, the position
-  is marked to the final available close.  Estimated Zerodha costs are deducted.
+- The engine's strict completed-bar Volume > Volume SMA20 rule is unchanged.
+- NEXT_OPEN plans remain flagged and excluded from simulated P&L because current
+  engine semantics learn the next bar only after it closes.
+- Simulated P&L uses only the candlestick plan's geometric stop / 2R target / EOD
+  close, with estimated costs.  It is not a full CP9/hybrid-exit replay.
+- If stop and target are both inside one OHLC bar, STOP is assumed first.
 """
 
 from __future__ import annotations
@@ -50,7 +55,7 @@ import math
 import os
 import re
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 
 import pandas as pd
 
@@ -69,21 +74,30 @@ SESSION_DATE = "2026-08-12"
 IST = "Asia/Kolkata"
 SOURCE_INTERVAL = "3minute"
 SOURCE_BAR_MINUTES = 3
-FIVE_MINUTES = 5
 FROM_TS = pd.Timestamp("2026-08-11 09:15", tz=IST)
 TO_TS = pd.Timestamp("2026-08-12 15:30", tz=IST)
-OUTPUT_CSV = "/tmp/candlestick_gate_aug12_3m_vs_5m.csv"
+OUTPUT_CSV = "/tmp/candlestick_gate_aug12_3m_5m_10m_15m.csv"
 EQUITY = 5000.0
 CFG = EngineConfig(risk_pct=0.20, min_rr=2.0, max_wait_bars=2)
 WARMUP_BARS = max(CFG.volume_lookback, CFG.body_lookback) + 5
+
+TIMEFRAMES = (
+    ("3m", 3, False),
+    ("5m_resampled", 5, True),
+    ("10m_resampled", 10, True),
+    ("15m_resampled", 15, True),
+)
+
+FOCUS_SYMBOLS = {"SAPPHIRE", "POLYPLEX", "FORTIS"}
 
 
 def load_aug12_trades(path: str = LOG_PATH) -> list[dict]:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Trade history not found: {path}")
+
     trades = []
-    with open(path) as f:
-        for line in f:
+    with open(path) as handle:
+        for line in handle:
             line = line.strip()
             if not line:
                 continue
@@ -99,20 +113,23 @@ def load_aug12_trades(path: str = LOG_PATH) -> list[dict]:
 def to_ist(value, date_hint: str = SESSION_DATE):
     if value is None or value == "":
         return None
+
     text = str(value).strip()
     if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?", text):
         text = f"{date_hint} {text}"
+
     try:
         ts = pd.Timestamp(text)
     except Exception:
         return None
+
     if ts.tzinfo is None:
         return ts.tz_localize(IST)
     return ts.tz_convert(IST)
 
 
 def signal_timestamp(trade: dict):
-    # Prefer the exact completed signal-candle close recorded by the PAPER bot.
+    # Prefer the exact completed signal-candle close recorded by PAPER.
     for key in ("signal_candle_close", "entry_time"):
         ts = to_ist(trade.get(key), str(trade.get("date") or SESSION_DATE))
         if ts is not None:
@@ -123,19 +140,22 @@ def signal_timestamp(trade: dict):
 def build_instrument_maps(kite, exchanges: set[str]):
     token_map = {}
     tick_map = {}
+
     for exchange in sorted(exchanges):
         for inst in kite.instruments(exchange):
             symbol = inst.get("tradingsymbol")
             if not symbol:
                 continue
+
             key = (exchange, symbol)
             token_map[key] = inst.get("instrument_token")
-            tick = inst.get("tick_size")
+
             try:
-                tick = float(tick)
+                tick = float(inst.get("tick_size"))
             except (TypeError, ValueError):
                 tick = None
             tick_map[key] = tick if tick and tick > 0 else 0.05
+
     return token_map, tick_map
 
 
@@ -143,12 +163,14 @@ def normalize_candles(raw) -> pd.DataFrame:
     df = pd.DataFrame(raw)
     if df.empty:
         return df
+
     df["date"] = pd.to_datetime(df["date"])
     tz = df["date"].dt.tz
     if tz is None:
         df["date"] = df["date"].dt.tz_localize(IST)
     else:
         df["date"] = df["date"].dt.tz_convert(IST)
+
     cols = ["date", "open", "high", "low", "close", "volume"]
     return df[cols].sort_values("date").reset_index(drop=True)
 
@@ -160,20 +182,21 @@ def fetch_symbol_3m_candles(kite, token: int) -> pd.DataFrame:
         TO_TS.to_pydatetime(),
         SOURCE_INTERVAL,
     )
-    # Keep the replay gentle on Kite's historical endpoint.
+    # Keep historical requests gentle on Kite.
     time.sleep(0.35)
     return normalize_candles(raw)
 
 
-def resample_3m_to_5m(df_3m: pd.DataFrame) -> pd.DataFrame:
-    """Resample normalized 3m OHLCV into a no-lookahead 5m approximation.
+def resample_3m(df_3m: pd.DataFrame, minutes: int) -> pd.DataFrame:
+    """Resample normalized 3m OHLCV to ``minutes`` with no look-ahead.
 
-    The timestamps on Kite candles are bar-start timestamps.  We align bins to
-    the NSE cash-session origin (09:15 IST), aggregate OHLCV exactly as specified,
-    and carry ``available_at`` = max(source_start + 3 minutes).  Replay consumers
-    use ``available_at`` rather than nominal 5m close time, so a 3m-derived bar is
-    never visible before every source candle contributing to it has completed.
+    Bars are anchored to the 09:15 IST cash-session origin.  ``available_at`` is
+    the latest source 3m close contributing to each derived candle, and replay
+    visibility is based on that timestamp rather than merely the nominal bucket
+    end.
     """
+    if minutes <= SOURCE_BAR_MINUTES:
+        raise ValueError("resample target must be greater than 3 minutes")
     if df_3m is None or df_3m.empty:
         return pd.DataFrame()
 
@@ -183,15 +206,15 @@ def resample_3m_to_5m(df_3m: pd.DataFrame) -> pd.DataFrame:
     )
     work = work.set_index("date")
 
-    resampler_kwargs = dict(
-        rule="5min",
+    kwargs = dict(
+        rule=f"{minutes}min",
         origin="start_day",
         offset="9h15min",
         label="left",
         closed="left",
     )
 
-    bars = work.resample(**resampler_kwargs).agg(
+    bars = work.resample(**kwargs).agg(
         {
             "open": "first",
             "high": "max",
@@ -201,15 +224,11 @@ def resample_3m_to_5m(df_3m: pd.DataFrame) -> pd.DataFrame:
             "source_available_at": "max",
         }
     )
-    counts = work["open"].resample(**resampler_kwargs).count()
-
-    bars["source_bar_count"] = counts
+    bars["source_bar_count"] = work["open"].resample(**kwargs).count()
     bars = bars.dropna(subset=["open", "high", "low", "close"])
     bars = bars.rename(columns={"source_available_at": "available_at"})
     bars = bars.reset_index()
 
-    # Keep only normal NSE/BSE cash-session starts.  Empty overnight bins have
-    # already been dropped; this also protects against accidental extended data.
     clock = bars["date"].dt.time
     session_start = pd.Timestamp("09:15").time()
     session_last_start = pd.Timestamp("15:25").time()
@@ -239,6 +258,8 @@ def next_completed_bars(
     bar_minutes: int,
     limit: int = 2,
 ) -> list[pd.Timestamp]:
+    if df is None or df.empty:
+        return []
     available = bar_available_times(df, bar_minutes)
     return list(available.loc[available > cutoff].drop_duplicates().iloc[:limit])
 
@@ -256,25 +277,21 @@ def session_rows_after(
     after_time,
     bar_minutes: int,
 ) -> pd.DataFrame:
-    """Return subsequent bars from Aug 12 after a confirmed close-time entry."""
     if candles is None or candles.empty or after_time is None:
         return pd.DataFrame()
+
     starts = pd.to_datetime(candles["date"])
     same_day = starts.dt.strftime("%Y-%m-%d") == SESSION_DATE
-    # Entry plans from CLOSED_CANDLE/BREAKOUT are created at the completed-bar
-    # information boundary.  Only a later bar can hit the new stop/target.
-    later = starts >= pd.Timestamp(after_time)
     available = bar_available_times(candles, bar_minutes)
+
+    # Only bars whose information arrives after the entry decision may hit a new
+    # candlestick-plan stop/target.
     visible = available > pd.Timestamp(after_time)
-    return candles.loc[same_day & later & visible].copy().reset_index(drop=True)
+    return candles.loc[same_day & visible].copy().reset_index(drop=True)
 
 
 def simulate_plan_pnl(plan, candles: pd.DataFrame, entry_time, bar_minutes: int) -> dict:
-    """Conservative OHLC path for the candlestick plan only.
-
-    This intentionally does not emulate CP9, MAE/MFE, hybrid exits or the real
-    PAPER executor.  It tests only the engine's geometric stop and minimum-2R TP.
-    """
+    """Conservative OHLC simulation for the candlestick plan only."""
     result = {
         "sim_exit": None,
         "sim_exit_reason": None,
@@ -282,6 +299,7 @@ def simulate_plan_pnl(plan, candles: pd.DataFrame, entry_time, bar_minutes: int)
         "sim_costs": None,
         "sim_net_pnl": None,
     }
+
     if plan is None:
         return result
     if plan.trigger == Trigger.NEXT_OPEN:
@@ -300,6 +318,7 @@ def simulate_plan_pnl(plan, candles: pd.DataFrame, entry_time, bar_minutes: int)
     for _, bar in future.iterrows():
         high = float(bar["high"])
         low = float(bar["low"])
+
         if side == "BUY":
             stop_hit = low <= plan.stop_price
             target_hit = high >= plan.target_price
@@ -308,7 +327,6 @@ def simulate_plan_pnl(plan, candles: pd.DataFrame, entry_time, bar_minutes: int)
             target_hit = low <= plan.target_price
 
         if stop_hit and target_hit:
-            # OHLC cannot identify intrabar ordering.  Use conservative stop-first.
             exit_price = plan.stop_price
             exit_reason = "BOTH_HIT_STOP_ASSUMED"
             break
@@ -349,22 +367,21 @@ def attach_plan_fields(
         return
 
     base["confirmed_pattern"] = plan.pattern.value
+    base["confirmed_trigger"] = plan.trigger.value
     base["plan_entry"] = plan.entry_price
     base["plan_stop"] = plan.stop_price
     base["plan_target"] = plan.target_price
     base["planned_risk"] = plan.planned_risk
     base["quantity"] = plan.quantity
     base["rr"] = plan.rr
-    base["confirmed_trigger"] = plan.trigger.value
 
+    entry_time = None
     if 0 <= plan.entry_index < len(hist):
         entry_bar = hist.iloc[plan.entry_index]
         base["entry_bar_start"] = pd.Timestamp(entry_bar["date"]).isoformat()
         entry_times = bar_available_times(hist, bar_minutes)
         entry_time = pd.Timestamp(entry_times.iloc[plan.entry_index])
         base["entry_decision_time"] = entry_time.isoformat()
-    else:
-        entry_time = None
 
     if plan.trigger == Trigger.NEXT_OPEN:
         base["next_open_semantics"] = True
@@ -429,12 +446,14 @@ def replay_trade(
 
     hist = completed_slice(candles, sig_ts, bar_minutes)
     base["bars_at_signal"] = len(hist)
+
     if len(hist) < WARMUP_BARS:
         base["final_outcome"] = "INSUFFICIENT_HISTORY"
         return base
 
     engine = CandlestickEngine(CFG)
     result = evaluate_trade_entry(symbol, hist, direction, EQUITY, tick_size, engine)
+
     base["initial_state"] = result.state.value
     if result.pattern is not None:
         base["initial_pattern"] = result.pattern.value
@@ -453,9 +472,13 @@ def replay_trade(
         base["final_outcome"] = "NO_PATTERN"
         return base
 
-    # Existing WAITING setup: preserve the engine's 2-bar pending lifetime.
     for delay, next_time in enumerate(
-        next_completed_bars(candles, sig_ts, bar_minutes, limit=CFG.max_wait_bars),
+        next_completed_bars(
+            candles,
+            sig_ts,
+            bar_minutes,
+            limit=CFG.max_wait_bars,
+        ),
         start=1,
     ):
         step_hist = completed_slice(candles, next_time, bar_minutes)
@@ -493,7 +516,11 @@ def summary_metrics(rows: list[dict], timeframe: str) -> dict:
         r.get("final_outcome") == "BLOCKED_AFTER_2_BARS" for r in subset
     )
     confirmed = sum(is_confirmed(r) for r in subset)
-    other = total - no_pattern - blocked - confirmed
+    insufficient = sum(
+        r.get("final_outcome") == "INSUFFICIENT_HISTORY" for r in subset
+    )
+    other = total - no_pattern - blocked - confirmed - insufficient
+
     actual_total = sum(
         r["actual_pnl"] for r in subset if r.get("actual_pnl") is not None
     )
@@ -502,18 +529,21 @@ def summary_metrics(rows: list[dict], timeframe: str) -> dict:
         for r in subset
         if is_confirmed(r) and r.get("actual_pnl") is not None
     )
+
     sim_rows = [
         r
         for r in subset
         if is_confirmed(r) and r.get("sim_net_pnl") is not None
     ]
     sim_net = sum(r["sim_net_pnl"] for r in sim_rows)
+
     return {
         "timeframe": timeframe,
         "total": total,
         "no_pattern": no_pattern,
         "blocked": blocked,
         "confirmed": confirmed,
+        "insufficient": insufficient,
         "other": other,
         "actual_total": actual_total,
         "confirmed_actual": confirmed_actual,
@@ -522,90 +552,116 @@ def summary_metrics(rows: list[dict], timeframe: str) -> dict:
     }
 
 
-def print_metric_row(m: dict):
-    total = m["total"]
+def print_summary_table(metrics: list[dict]):
+    print("\n===== AUG-12 CANDLESTICK GATE MATRIX =====")
     print(
-        f"{m['timeframe']}: total={total} | "
-        f"NO_PATTERN={m['no_pattern']} ({pct(m['no_pattern'], total):.2f}%) | "
-        f"BLOCKED_AFTER_2_BARS={m['blocked']} ({pct(m['blocked'], total):.2f}%) | "
-        f"CONFIRMED={m['confirmed']} ({pct(m['confirmed'], total):.2f}%) | "
-        f"OTHER={m['other']} ({pct(m['other'], total):.2f}%)"
+        f"{'TIMEFRAME':<16} {'TOTAL':>5} {'NO_PATTERN':>18} "
+        f"{'EXPIRED_WAIT':>18} {'CONFIRMED':>18} {'SIM_NET':>11}"
     )
+    print("-" * 92)
+
+    for m in metrics:
+        total = m["total"]
+        print(
+            f"{m['timeframe']:<16} {total:>5} "
+            f"{m['no_pattern']:>5} ({pct(m['no_pattern'], total):>6.2f}%) "
+            f"{m['blocked']:>5} ({pct(m['blocked'], total):>6.2f}%) "
+            f"{m['confirmed']:>5} ({pct(m['confirmed'], total):>6.2f}%) "
+            f"{m['simulated_net']:>11.2f}"
+        )
+
+    if any(m["insufficient"] for m in metrics):
+        print("\nINSUFFICIENT_HISTORY by timeframe:")
+        for m in metrics:
+            if m["insufficient"]:
+                print(f"  {m['timeframe']}: {m['insufficient']}")
+
+
+def print_pnl_summary(metrics: list[dict]):
+    baseline = metrics[0]["actual_total"] if metrics else 0.0
+
+    print("\n===== BASELINE / SIMULATED P&L SUMMARY =====")
+    print(f"Actual Aug-12 baseline net P&L: {baseline:.2f}")
+    print(
+        "Simulated net P&L below includes only safe CONFIRMED candlestick-plan "
+        "trades; blocked/no-pattern trades contribute zero by design."
+    )
+
+    for m in metrics:
+        print(
+            f"{m['timeframe']}: confirmed={m['confirmed']} | "
+            f"baseline actual P&L of confirmed subset={m['confirmed_actual']:.2f} | "
+            f"safe simulated trades={m['simulated_count']} | "
+            f"simulated net P&L={m['simulated_net']:.2f} | "
+            f"vs baseline={m['simulated_net'] - baseline:+.2f}"
+        )
 
 
 def print_focus(rows: list[dict]):
-    print("\n===== SAPPHIRE / POLYPLEX: 3m vs 5m =====")
-    focus = [r for r in rows if r.get("symbol") in {"SAPPHIRE", "POLYPLEX"}]
+    print("\n===== SAPPHIRE / POLYPLEX / FORTIS BY TIMEFRAME =====")
+    focus = [r for r in rows if r.get("symbol") in FOCUS_SYMBOLS]
     if not focus:
-        print("No matching Aug-12 trade-history rows found.")
+        print("No focus rows found.")
         return
+
+    tf_order = {name: i for i, (name, _, _) in enumerate(TIMEFRAMES)}
+    focus.sort(
+        key=lambda r: (
+            r.get("symbol") or "",
+            r.get("signal_timestamp") or "",
+            tf_order.get(r.get("timeframe"), 999),
+        )
+    )
 
     for r in focus:
         print(
-            f"{r['timeframe']} | {r['symbol']} {r['direction']} "
-            f"signal={r['signal_timestamp']} "
-            f"initial={r['initial_state']}/{r['initial_pattern']} "
-            f"outcome={r['final_outcome']} delay={r['confirm_delay_bars']} "
-            f"pattern={r['confirmed_pattern']} trigger={r['confirmed_trigger']} "
+            f"{r['timeframe']:<15} | {r['symbol']} {r['direction']} "
+            f"signal={r['signal_timestamp']} | "
+            f"initial={r['initial_state']}/{r['initial_pattern']} | "
+            f"outcome={r['final_outcome']} delay={r['confirm_delay_bars']} | "
+            f"pattern={r['confirmed_pattern']} trigger={r['confirmed_trigger']} | "
             f"entry={r['plan_entry']} SL={r['plan_stop']} TP={r['plan_target']} "
-            f"sim_net={r['sim_net_pnl']} baseline_actual={r['actual_pnl']}"
+            f"qty={r['quantity']} | sim_net={r['sim_net_pnl']} | "
+            f"baseline_actual={r['actual_pnl']}"
         )
 
 
 def print_confirmed_comparison(rows: list[dict]):
-    print("\n===== CONFIRMED-TRADE P&L COMPARISON =====")
+    print("\n===== CONFIRMED-TRADE DETAIL =====")
     print(
         "Simulated P&L = candlestick plan only (geometric SL / 2R TP / EOD close, "
-        "estimated costs). It is NOT the full PAPER exit-stack replay."
+        "estimated costs); not the full PAPER exit stack."
     )
+
     confirmed = [r for r in rows if is_confirmed(r)]
     if not confirmed:
-        print("No CONFIRMED trades in either timeframe.")
+        print("No CONFIRMED trades in any timeframe.")
         return
 
     for r in confirmed:
+        entry = "None" if r.get("plan_entry") is None else f"{r['plan_entry']:.4f}"
+        stop = "None" if r.get("plan_stop") is None else f"{r['plan_stop']:.4f}"
+        target = "None" if r.get("plan_target") is None else f"{r['plan_target']:.4f}"
         print(
             f"{r['timeframe']} | {r['symbol']} {r['direction']} "
             f"{r['final_outcome']} {r['confirmed_pattern']} | "
-            f"entry={r['plan_entry']:.4f} SL={r['plan_stop']:.4f} "
-            f"TP={r['plan_target']:.4f} qty={r['quantity']} | "
+            f"entry={entry} SL={stop} TP={target} qty={r['quantity']} | "
             f"sim_exit={r['sim_exit']} reason={r['sim_exit_reason']} "
             f"sim_net={r['sim_net_pnl']} | baseline_actual={r['actual_pnl']}"
         )
 
 
-def print_summary(rows: list[dict]):
-    m3 = summary_metrics(rows, "3m")
-    m5 = summary_metrics(rows, "5m_resampled")
-
-    print("\n===== AUG-12 CANDLESTICK GATE: 3m vs 5m =====")
-    print_metric_row(m3)
-    print_metric_row(m5)
-
-    print("\n===== TIMEFRAME DELTA =====")
-    print(f"Confirmed delta: {m5['confirmed'] - m3['confirmed']:+d} trades")
-    print(f"NO_PATTERN delta: {m5['no_pattern'] - m3['no_pattern']:+d} trades")
-    print(
-        "BLOCKED_AFTER_2_BARS delta: "
-        f"{m5['blocked'] - m3['blocked']:+d} trades"
-    )
-
-    print("\n===== BASELINE / SIMULATED P&L SUMMARY =====")
-    print(
-        f"Actual Aug-12 baseline net P&L: {m3['actual_total']:.2f} "
-        "(same 75 trades for both timeframe classifications)"
-    )
-    for m in (m3, m5):
-        print(
-            f"{m['timeframe']}: confirmed={m['confirmed']} | "
-            f"baseline actual P&L of confirmed subset={m['confirmed_actual']:.2f} | "
-            f"simulated safe confirmed trades={m['simulated_count']} | "
-            f"candlestick-plan simulated net P&L={m['simulated_net']:.2f}"
-        )
+def print_diagnostics(rows: list[dict]):
+    metrics = [summary_metrics(rows, name) for name, _, _ in TIMEFRAMES]
+    print_summary_table(metrics)
+    print_pnl_summary(metrics)
 
     next_open = [r for r in rows if r.get("next_open_semantics")]
-    print(f"\nNEXT_OPEN semantic-risk rows across both passes: {len(next_open)}")
-    print("NEXT_OPEN rows are excluded from simulated P&L until a true bar-boundary execution path exists.")
+    print(f"\nNEXT_OPEN semantic-risk rows across all passes: {len(next_open)}")
+    print(
+        "NEXT_OPEN rows are excluded from simulated P&L until a true bar-boundary "
+        "execution path exists."
+    )
 
     print_focus(rows)
     print_confirmed_comparison(rows)
@@ -615,8 +671,12 @@ def main():
     print("READ-ONLY MODE: historical data only; no orders; no production-state writes.")
     print("Engine unchanged: risk=0.20%, minRR=2.0, pending lifetime=2 bars.")
     print(
-        "WARNING: 3m->5m resampling is an approximation because 3 and 5 minute "
-        "boundaries are incommensurate; available_at prevents look-ahead."
+        "Matrix: native 3m plus 5m/10m/15m OHLCV resamples from 3m; "
+        "available_at prevents source-bar look-ahead."
+    )
+    print(
+        "NOTE: 15m is exactly composable from aligned 3m bars; 5m and 10m are "
+        "approximate because their boundaries are incommensurate with 3m."
     )
 
     trades = load_aug12_trades()
@@ -628,9 +688,9 @@ def main():
     exchanges = {str(t.get("exchange") or "NSE") for t in trades}
     token_map, tick_map = build_instrument_maps(kite, exchanges)
 
-    source_cache = {}
-    five_cache = {}
-    rows = []
+    source_cache: dict[tuple[str, str], pd.DataFrame] = {}
+    timeframe_cache: dict[tuple[str, str, str], pd.DataFrame] = {}
+    rows: list[dict] = []
 
     for idx, trade in enumerate(trades, start=1):
         symbol = str(trade.get("symbol") or "")
@@ -640,8 +700,14 @@ def main():
         tick = tick_map.get(key, 0.05)
 
         if not token:
-            for timeframe, minutes in (("3m", SOURCE_BAR_MINUTES), ("5m_resampled", FIVE_MINUTES)):
-                row = replay_trade(trade, pd.DataFrame(), tick, timeframe, minutes)
+            for timeframe, minutes, _ in TIMEFRAMES:
+                row = replay_trade(
+                    trade,
+                    pd.DataFrame(),
+                    tick,
+                    timeframe,
+                    minutes,
+                )
                 row["final_outcome"] = "INSTRUMENT_NOT_FOUND"
                 row["error"] = f"No instrument token for {exchange}:{symbol}"
                 rows.append(row)
@@ -650,20 +716,38 @@ def main():
 
         if key not in source_cache:
             try:
-                source_cache[key] = fetch_symbol_3m_candles(kite, token)
-                five_cache[key] = resample_3m_to_5m(source_cache[key])
+                source = fetch_symbol_3m_candles(kite, token)
+                source_cache[key] = source
+                timeframe_cache[(exchange, symbol, "3m")] = source
+                timeframe_cache[(exchange, symbol, "5m_resampled")] = resample_3m(
+                    source, 5
+                )
+                timeframe_cache[(exchange, symbol, "10m_resampled")] = resample_3m(
+                    source, 10
+                )
+                timeframe_cache[(exchange, symbol, "15m_resampled")] = resample_3m(
+                    source, 15
+                )
             except Exception as exc:
                 source_cache[key] = pd.DataFrame()
-                five_cache[key] = pd.DataFrame()
+                for timeframe, _, _ in TIMEFRAMES:
+                    timeframe_cache[(exchange, symbol, timeframe)] = pd.DataFrame()
                 print(f"Historical fetch/resample failed for {exchange}:{symbol}: {exc}")
 
-        pair = []
-        for timeframe, candles, minutes in (
-            ("3m", source_cache[key], SOURCE_BAR_MINUTES),
-            ("5m_resampled", five_cache[key], FIVE_MINUTES),
-        ):
+        line = []
+        for timeframe, minutes, _ in TIMEFRAMES:
+            candles = timeframe_cache.get(
+                (exchange, symbol, timeframe),
+                pd.DataFrame(),
+            )
             try:
-                row = replay_trade(trade, candles, tick, timeframe, minutes)
+                row = replay_trade(
+                    trade,
+                    candles,
+                    tick,
+                    timeframe,
+                    minutes,
+                )
             except Exception as exc:
                 row = {
                     "timeframe": timeframe,
@@ -675,13 +759,17 @@ def main():
                     "final_outcome": "ERROR",
                     "error": repr(exc),
                 }
-            rows.append(row)
-            pair.append(f"{timeframe}={row.get('final_outcome')}")
 
-        print(f"[{idx}/{len(trades)}] {exchange}:{symbol} {trade.get('direction')} | " + " | ".join(pair))
+            rows.append(row)
+            line.append(f"{timeframe}={row.get('final_outcome')}")
+
+        print(
+            f"[{idx}/{len(trades)}] {exchange}:{symbol} {trade.get('direction')} | "
+            + " | ".join(line)
+        )
 
     pd.DataFrame(rows).to_csv(OUTPUT_CSV, index=False)
-    print_summary(rows)
+    print_diagnostics(rows)
     print(f"\nDetailed CSV: {OUTPUT_CSV}")
 
 
