@@ -569,7 +569,7 @@ def test_falling_three_methods_negative_if_middle_breaks_first_range():
 def test_inside_bar_squeeze_positive_and_breakout_confirmation():
     mother = candle(100.0, 101.0, 99.0, 100.2)
     inside1 = candle(100.2, 100.7, 99.4, 100.3)
-    inside2 = candle(100.3, 100.8, 99.3, 100.4)
+    inside2 = candle(100.3, 100.8, 99.3, 100.55)
     engine = CandlestickEngine(CFG)
     waiting = evaluate_trade_entry("SQUEEZE", make_df([mother, inside1, inside2]), "BUY", EQUITY, TICK, engine)
     assert waiting.state == GateState.WAITING
