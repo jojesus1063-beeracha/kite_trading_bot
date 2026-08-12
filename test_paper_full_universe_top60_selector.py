@@ -49,6 +49,31 @@ def test_sme_and_st_series_are_rejected():
     assert s.ordinary_equity_rejection_reason(instrument("ABC-ST"), "NSE") == "special_series_suffix"
 
 
+@pytest.mark.parametrize(
+    "symbol",
+    [
+        "SGBSEP28VI-GB",
+        "622GS2035-GS",
+        "850NHAI29-N5",
+        "903SFL28-YI",
+        "PGINVIT-IV",
+        "BIRET-RR",
+    ],
+)
+def test_non_company_cash_series_are_rejected(symbol):
+    row = instrument(symbol, isin="", name="ISSUER")
+    assert s.ordinary_equity_rejection_reason(row, "NSE") == "non_ordinary_series"
+
+
+def test_legitimate_hyphenated_company_symbols_are_not_rejected():
+    assert s.ordinary_equity_rejection_reason(
+        instrument("HCL-INSYS", isin="", name="HCL INFOSYSTEMS"), "NSE"
+    ) is None
+    assert s.ordinary_equity_rejection_reason(
+        instrument("NAM-INDIA", isin="", name="NIPPON LIFE INDIA ASSET MANAGEMENT"), "NSE"
+    ) is None
+
+
 def test_goldiam_is_not_false_positive():
     row = instrument("GOLDIAM", name="GOLDIAM INTERNATIONAL LIMITED", isin="INE025B01025")
     assert s.ordinary_equity_rejection_reason(row, "NSE") is None
@@ -62,6 +87,25 @@ def test_non_unit_lot_is_rejected():
 def test_name_level_etf_defence_rejects_even_ine_fixture():
     row = instrument("ODDNAME", isin="INE000A00001", name="SAMPLE EXCHANGE TRADED FUND")
     assert s.ordinary_equity_rejection_reason(row, "NSE") == "fund_or_debt_like_name"
+
+
+def test_selector_quotes_use_short_batches(monkeypatch):
+    class FakeKite:
+        def __init__(self):
+            self.calls = []
+
+        def quote(self, keys):
+            self.calls.append(list(keys))
+            return {key: {"last_price": 100.0} for key in keys}
+
+    monkeypatch.setattr(s.time, "sleep", lambda _seconds: None)
+    kite = FakeKite()
+    keys = [f"NSE:SYM{i}" for i in range(s.SELECTOR_QUOTE_BATCH_SIZE * 2 + 1)]
+    quotes = s.fetch_selector_quotes(kite, keys)
+
+    assert len(kite.calls) == 3
+    assert all(len(batch) <= s.SELECTOR_QUOTE_BATCH_SIZE for batch in kite.calls)
+    assert len(quotes) == len(keys)
 
 
 def test_write_preserves_settings_and_exchange(tmp_path: Path):
