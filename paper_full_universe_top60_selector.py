@@ -86,7 +86,7 @@ SELECTOR_QUOTE_BATCH_DELAY_SECONDS = 1.10
 # patterns target the exchange series observed for SGB/G-Sec/NCD/debt, InvIT
 # and REIT rows that Kite can expose with instrument_type=EQ in cash segments.
 NON_ORDINARY_SERIES_RE = re.compile(
-    r"(?:^SGB|-(?:GB|GS|IV|RR|N[A-Z0-9]|Y[A-Z0-9])$",
+    r"(?:^SGB|-(?:GB|GS|IV|RR|N[A-Z0-9]|Y[A-Z0-9])$)",
     re.IGNORECASE,
 )
 NON_ORDINARY_SYMBOL_RE = re.compile(r"(?:ETF|IETF|BEES|NETF)$", re.IGNORECASE)
