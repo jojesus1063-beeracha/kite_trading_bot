@@ -106,6 +106,34 @@ def market_alignment_blocks_entry(alignment: str) -> bool:
     return alignment in ("MISALIGNED", "STRONG_MISALIGNMENT")
 
 
+def price_action_blocks_entry(score: float, cfg_module=cfg) -> bool:
+    """
+    PAPER-only Price Action hard gate.
+
+    The Aug-12 replay classified a signal as PA-confirmed only when its
+    aggregate Price Action score was positive.  Preserve that exact
+    experiment rule here:
+
+        score > 0  -> PASS
+        score <= 0 -> BLOCK
+
+    Live trading is deliberately unaffected.
+    """
+    if not getattr(cfg_module, "PAPER_TRADING", False):
+        return False
+
+    if not getattr(cfg_module, "ENABLE_PRICE_ACTION", False):
+        return False
+
+    try:
+        return float(score) <= 0.0
+    except (TypeError, ValueError):
+        # PA is explicitly enabled as a hard safety gate in PAPER mode.
+        # An unusable score therefore fails closed rather than allowing
+        # an unconfirmed entry.
+        return True
+
+
 def within_trading_window() -> bool:
     now = datetime.now().time()
     start = datetime.strptime(cfg.NO_ENTRY_BEFORE, "%H:%M").time()
@@ -609,6 +637,44 @@ def run_full_scan(
             _base_score += pa_score
             signal.price_action_score = pa_score
             signal.price_action_detail = pa_detail
+
+            if price_action_blocks_entry(pa_score):
+                logger.info(
+                    f"{symbol}: skipped -- Price Action hard gate "
+                    f"| score={pa_score} "
+                    f"| detail={pa_detail}"
+                )
+
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "skipped, Price Action hard gate "
+                            f"(score={pa_score})"
+                        ),
+                    }
+                )
+
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **signal_snapshot(signal),
+                        "reason_code": "PRICE_ACTION_HARD_FILTER",
+                        "reason": (
+                            "Price Action score must be greater than zero"
+                        ),
+                        "price_action_score": pa_score,
+                        "price_action_detail": pa_detail,
+                        "market_trend": market_trend,
+                        "market_trend_reason": market_trend_reason,
+                        "sector": sector,
+                        "sector_trend": sector_trend,
+                        "sector_trend_reason": sector_trend_reason,
+                        "market_alignment": signal.market_alignment,
+                    },
+                )
+
+                continue
 
             quality = assess_entry_quality(
                 signal,
