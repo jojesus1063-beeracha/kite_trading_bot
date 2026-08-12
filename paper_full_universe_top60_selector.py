@@ -4,8 +4,10 @@
 Universe:
 - Kite NSE + BSE cash-market instruments.
 - Only ordinary company-equity style rows are retained before quote fetching.
-- ETF/fund/debt-like ISINs, special-series suffixes, non-unit lot sizes and
+- ETF/fund/debt-like rows, special-series suffixes, non-unit lot sizes and
   non-EQ/non-cash rows are rejected fail-closed.
+- ISIN is used as an additional discriminator when Kite supplies it; a missing
+  ISIN is not itself a rejection because the instrument master may omit it.
 
 Selection policy (frozen from the verified read-only trial):
 - price Rs20-Rs2200
@@ -71,10 +73,12 @@ ALLOWED_EXCHANGES = {"NSE", "BSE"}
 DISALLOWED_SUFFIXES = (
     "-BE", "-BZ", "-ST", "-SM", "-IL", "-BT", "-GC", "-W1", "-W2"
 )
-# Secondary defence. The ISIN rule is the primary ETF/fund discriminator:
-# ordinary company securities normally arrive with INE..., while ETF/fund
-# units commonly arrive with INF... . Avoid broad GOLD/SILVER substrings so
-# legitimate names such as GOLDIAM are not rejected.
+# Kite's instrument master does not always include ISIN. When present, ISIN is
+# an additional discriminator: ordinary company securities normally use INE...
+# while ETF/fund units commonly use INF.... Missing ISIN must not collapse the
+# entire clean universe. Symbol/name rules remain the secondary defence and we
+# intentionally avoid broad GOLD/SILVER substrings so legitimate names such as
+# GOLDIAM are not rejected.
 NON_ORDINARY_SYMBOL_RE = re.compile(r"(?:ETF|IETF|BEES|NETF)$", re.IGNORECASE)
 NON_ORDINARY_NAME_RE = re.compile(
     r"\b(?:ETF|EXCHANGE\s+TRADED\s+FUND|MUTUAL\s+FUND|INDEX\s+FUND|"
@@ -126,7 +130,9 @@ def ordinary_equity_rejection_reason(instrument: dict[str, Any], exchange: str) 
         return "lot_size_not_one"
     if symbol.endswith(DISALLOWED_SUFFIXES):
         return "special_series_suffix"
-    if not isin.startswith("INE"):
+    # IMPORTANT: Kite may omit ISIN from the instrument master. Reject a
+    # supplied non-INE ISIN, but do not reject solely because ISIN is absent.
+    if isin and not isin.startswith("INE"):
         return "non_ordinary_isin"
     if NON_ORDINARY_SYMBOL_RE.search(symbol):
         return "fund_like_symbol"
