@@ -122,6 +122,12 @@ def price_action_blocks_entry(score: float, cfg_module=cfg) -> bool:
     if not getattr(cfg_module, "PAPER_TRADING", False):
         return False
 
+    # PAPER observational mode:
+    # Price Action is still calculated, logged and audited,
+    # but it must never reject/block an entry.
+    if getattr(cfg_module, "PAPER_PRICE_ACTION_OBSERVATIONAL", False):
+        return False
+
     if not getattr(cfg_module, "ENABLE_PRICE_ACTION", False):
         return False
 
