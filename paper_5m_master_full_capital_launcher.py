@@ -11,12 +11,14 @@ risk guard, then installs PAPER-only entry changes:
 4. ADX remains computed/audited but is observational only: it cannot block an
    entry and cannot reverse/switch EMA direction. EMA9/EMA21 use normal trend
    direction, with the existing RSI override retained.
+5. PAPER risk-per-trade and max-daily-loss percentages are both set to 100%
+   for this explicit stress-test configuration.
 
 Safety properties:
 - PAPER_TRADING must be True.
 - MAX_OPEN_POSITIONS is forced to 1 so 100% cash cannot be allocated twice.
 - no leverage is assumed or invented.
-- daily-loss and aggregate-open-risk guards remain active.
+- aggregate-open-risk guard remains active but uses the 100% PAPER thresholds.
 - PRICE ACTION remains enabled and fully evaluated/logged, but is OBSERVATIONAL
   only and cannot hard-block an entry in this dedicated PAPER process.
 - ADX remains available for audit only and cannot block or alter direction.
@@ -52,6 +54,12 @@ def apply_tested_paper_overrides() -> None:
     cfg.PAPER_MASTER_CANDLESTICK_MAX_WAIT_BARS = 2
     cfg.PAPER_MASTER_CANDLESTICK_NEXT_OPEN = "FAIL_CLOSED"
 
+    # Explicit PAPER stress-test risk settings requested by the operator.
+    # These override the inherited 0.20% per-trade / 5% daily limits only in
+    # this dedicated PAPER launcher. LIVE configuration is untouched.
+    cfg.RISK_PER_TRADE_PCT = 100.0
+    cfg.MAX_DAILY_LOSS_PCT = 100.0
+
     # The Master engine supplies a geometric stop. Do not replace it with the
     # legacy flat 0.45% stop before the aggregate-risk guard sees the proposal.
     cfg.ENABLE_FIXED_TARGET = False
@@ -76,7 +84,7 @@ def apply_tested_paper_overrides() -> None:
     cfg.ENABLE_MARKET_ALIGNMENT_FILTER = True
 
     logger.warning(
-        "PAPER TEST OVERRIDES: master_tf=5m(resampled from completed 3m), minRR=2, wait=2, full_cash=100%%, max_open=1, fixed_stop_reconstruction=OFF, PA=OBSERVATIONAL, ADX=OBSERVATIONAL, MA=HARD"
+        "PAPER TEST OVERRIDES: master_tf=5m(resampled from completed 3m), minRR=2, wait=2, full_cash=100%%, risk_per_trade=100%%, daily_loss=100%%, max_open=1, fixed_stop_reconstruction=OFF, PA=OBSERVATIONAL, ADX=OBSERVATIONAL, MA=HARD"
     )
 
 
@@ -171,8 +179,8 @@ def install_observational_adx_policy(contrarian_module):
 
 
 def main() -> None:
-    # Preserve the current PAPER risk/daily-loss stack first, then layer the
-    # requested experiment overrides on top.
+    # Preserve the current PAPER stack first, then layer the requested
+    # full-capital / 100%-risk stress-test overrides on top.
     base_launcher.apply_paper_risk_overrides()
     apply_tested_paper_overrides()
     cp9_launcher.apply_cp9_overrides()
@@ -181,7 +189,7 @@ def main() -> None:
     # aggregate-risk proposal itself is still calculated from the Master
     # geometric stop because ENABLE_FIXED_TARGET=False and entry_plan stores the
     # signal stop. This intentionally preserves the existing PAPER safety exit
-    # stack rather than weakening it while increasing capital allocation.
+    # stack even though the percentage risk ceilings are now 100%.
     base_launcher.install_paper_emergency_stop_override()
     base_launcher.install_direction_only_adx_policy()
 
@@ -202,6 +210,8 @@ def main() -> None:
     import main as trading_main
 
     # Defensive re-assertion in case another imported wrapper touched flags.
+    cfg.RISK_PER_TRADE_PCT = 100.0
+    cfg.MAX_DAILY_LOSS_PCT = 100.0
     cfg.ENABLE_PRICE_ACTION = True
     cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
     cfg.PAPER_ADX_OBSERVATIONAL = True
@@ -218,13 +228,14 @@ def main() -> None:
     strategy_stack.mfe_time.install_mfe_time_exit_patch(trading_main)
 
     logger.warning(
-        "PAPER 5m MASTER + FULL-CAPITAL POLICY ACTIVE | capital=Rs %.2f | max_open=%s | daily_loss=%.2f%% | PA=OBSERVATIONAL | ADX=OBSERVATIONAL | MA=HARD",
+        "PAPER 5m MASTER + FULL-CAPITAL POLICY ACTIVE | capital=Rs %.2f | risk_per_trade=%.2f%% | max_open=%s | daily_loss=%.2f%% | PA=OBSERVATIONAL | ADX=OBSERVATIONAL | MA=HARD",
         float(getattr(cfg, "CAPITAL", 0.0) or 0.0),
+        float(getattr(cfg, "RISK_PER_TRADE_PCT", 0.0) or 0.0),
         getattr(cfg, "MAX_OPEN_POSITIONS", None),
         float(getattr(cfg, "MAX_DAILY_LOSS_PCT", 0.0) or 0.0),
     )
     logger.warning(
-        "PAPER EXIT STACK RETAINED: emergency stop -> CP9 -> MAE adverse-trend -> MFE/time; aggregate risk guard remains binding"
+        "PAPER EXIT STACK RETAINED: emergency stop -> CP9 -> MAE adverse-trend -> MFE/time; aggregate risk guard remains binding at 100%% PAPER thresholds"
     )
     trading_main.run()
 
