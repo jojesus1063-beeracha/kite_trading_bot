@@ -2,11 +2,15 @@
 """Dedicated PAPER launcher for tested 5m Master Candlestick + full cash capital.
 
 This launcher preserves the existing CP9/MAE/MFE PAPER stack and daily aggregate
-risk guard, then installs two PAPER-only entry changes:
+risk guard, then installs PAPER-only entry changes:
 
 1. Final entry timing gate = Master Candlestick Engine on the same approximate
    3m->5m geometry used by the Aug-12 replay where FORTIS simulated +Rs6.81.
 2. Position sizing = up to 100% of configured PAPER cash CAPITAL per trade.
+3. Price Action remains computed/audited but is observational only.
+4. ADX remains computed/audited but is observational only: it cannot block an
+   entry and cannot reverse/switch EMA direction. EMA9/EMA21 use normal trend
+   direction, with the existing RSI override retained.
 
 Safety properties:
 - PAPER_TRADING must be True.
@@ -15,6 +19,7 @@ Safety properties:
 - daily-loss and aggregate-open-risk guards remain active.
 - PRICE ACTION remains enabled and fully evaluated/logged, but is OBSERVATIONAL
   only and cannot hard-block an entry in this dedicated PAPER process.
+- ADX remains available for audit only and cannot block or alter direction.
 - MARKET ALIGNMENT remains a hard upstream gate.
 - NEXT_OPEN candlestick plans fail closed until a true 5m bar-boundary execution
   path is separately implemented/tested.
@@ -63,11 +68,15 @@ def apply_tested_paper_overrides() -> None:
     cfg.ENABLE_PRICE_ACTION = True
     cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
 
+    # ADX remains calculated/audited, but this dedicated PAPER experiment must
+    # not use ADX to block entries or choose normal-vs-reversed EMA direction.
+    cfg.PAPER_ADX_OBSERVATIONAL = True
+
     # Market Alignment remains a genuine hard gate.
     cfg.ENABLE_MARKET_ALIGNMENT_FILTER = True
 
     logger.warning(
-        "PAPER TEST OVERRIDES: master_tf=5m(resampled from completed 3m), minRR=2, wait=2, full_cash=100%%, max_open=1, fixed_stop_reconstruction=OFF, PA=OBSERVATIONAL, MA=HARD"
+        "PAPER TEST OVERRIDES: master_tf=5m(resampled from completed 3m), minRR=2, wait=2, full_cash=100%%, max_open=1, fixed_stop_reconstruction=OFF, PA=OBSERVATIONAL, ADX=OBSERVATIONAL, MA=HARD"
     )
 
 
@@ -123,8 +132,46 @@ def install_observational_price_action_gate(trading_main):
     return original
 
 
+def install_observational_adx_policy(contrarian_module):
+    """Make ADX observational-only for this dedicated PAPER process.
+
+    The inherited contrarian evaluator still computes/logs ADX. This patch only
+    removes ADX's two decision effects:
+      1. no ADX range may hard-block an entry;
+      2. ADX may not switch EMA9/EMA21 between reversed and normal regimes.
+
+    EMA direction therefore becomes the normal relation for every usable bar:
+      EMA9 > EMA21 -> BUY
+      EMA9 < EMA21 -> SELL
+    The existing RSI >=70 BUY / <=30 SELL override remains unchanged because it
+    is applied later by the inherited evaluator.
+    """
+    if not bool(getattr(cfg, "PAPER_TRADING", False)):
+        raise SystemExit("SAFETY BLOCK: observational ADX patch requires PAPER_TRADING=True")
+
+    original_blocker = contrarian_module._adx_entry_blocked
+    original_ema_direction = contrarian_module.ema_direction
+
+    def _never_block(_adx):
+        return False
+
+    def _normal_ema_only(df, adx=None):
+        # Force the inherited helper into its NORMAL branch without changing or
+        # fabricating the ADX value that is separately logged/audited.
+        return original_ema_direction(df, adx=float("inf"))
+
+    contrarian_module._adx_entry_blocked = _never_block
+    contrarian_module.ema_direction = _normal_ema_only
+    cfg.PAPER_ADX_OBSERVATIONAL = True
+
+    logger.warning(
+        "PAPER ADX OBSERVATIONAL: ADX still calculated/audited; no ADX block and no ADX regime reversal; EMA9>EMA21 BUY, EMA9<EMA21 SELL; RSI override retained"
+    )
+    return original_blocker, original_ema_direction
+
+
 def main() -> None:
-    # Preserve the current PAPER risk/daily-loss/ADX policy first, then layer the
+    # Preserve the current PAPER risk/daily-loss stack first, then layer the
     # requested experiment overrides on top.
     base_launcher.apply_paper_risk_overrides()
     apply_tested_paper_overrides()
@@ -146,10 +193,10 @@ def main() -> None:
 
     cp9_launcher.install_stack_hooks(strategy_stack, cp9)
 
-    # The inherited PAPER signal patch remains the ADX/EMA/RSI direction source.
-    # Restore the real PA evaluator for diagnostics and re-enable hard MA before
-    # importing main.py so main binds the intended evaluator/config state.
+    # Install the inherited EMA/RSI signal source first, then neutralize ADX's
+    # decision role while preserving its audit value.
     strategy_stack.base.install_two_indicator_patch()
+    install_observational_adx_policy(strategy_stack.base)
     restore_pa_evaluator_and_ma_after_two_indicator_patch()
 
     import main as trading_main
@@ -157,6 +204,7 @@ def main() -> None:
     # Defensive re-assertion in case another imported wrapper touched flags.
     cfg.ENABLE_PRICE_ACTION = True
     cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
+    cfg.PAPER_ADX_OBSERVATIONAL = True
     cfg.ENABLE_MARKET_ALIGNMENT_FILTER = True
 
     # PA is observational only: compute/log it, but never reject on PA score.
@@ -170,7 +218,7 @@ def main() -> None:
     strategy_stack.mfe_time.install_mfe_time_exit_patch(trading_main)
 
     logger.warning(
-        "PAPER 5m MASTER + FULL-CAPITAL POLICY ACTIVE | capital=Rs %.2f | max_open=%s | daily_loss=%.2f%% | PA=OBSERVATIONAL | MA=HARD",
+        "PAPER 5m MASTER + FULL-CAPITAL POLICY ACTIVE | capital=Rs %.2f | max_open=%s | daily_loss=%.2f%% | PA=OBSERVATIONAL | ADX=OBSERVATIONAL | MA=HARD",
         float(getattr(cfg, "CAPITAL", 0.0) or 0.0),
         getattr(cfg, "MAX_OPEN_POSITIONS", None),
         float(getattr(cfg, "MAX_DAILY_LOSS_PCT", 0.0) or 0.0),
