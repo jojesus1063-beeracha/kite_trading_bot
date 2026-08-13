@@ -27,8 +27,10 @@ def test_pa_evaluator_restore_refuses_live_mode(monkeypatch):
         raise AssertionError("LIVE mode must fail closed")
 
 
-def test_tested_overrides_keep_full_cash_pa_adx_observational_ma_hard(monkeypatch):
+def test_tested_overrides_keep_full_cash_100pct_risk_pa_adx_observational_ma_hard(monkeypatch):
     monkeypatch.setattr(cfg, "PAPER_TRADING", True)
+    monkeypatch.setattr(cfg, "RISK_PER_TRADE_PCT", 0.2)
+    monkeypatch.setattr(cfg, "MAX_DAILY_LOSS_PCT", 5.0)
     monkeypatch.setattr(cfg, "MAX_OPEN_POSITIONS", 999)
     monkeypatch.setattr(cfg, "MAX_POSITION_SIZE_PCT", 20.0)
     monkeypatch.setattr(cfg, "ENABLE_PRICE_ACTION", False)
@@ -36,6 +38,8 @@ def test_tested_overrides_keep_full_cash_pa_adx_observational_ma_hard(monkeypatc
 
     launcher.apply_tested_paper_overrides()
 
+    assert cfg.RISK_PER_TRADE_PCT == 100.0
+    assert cfg.MAX_DAILY_LOSS_PCT == 100.0
     assert cfg.PAPER_FULL_CAPITAL_PER_TRADE is True
     assert cfg.PAPER_CAPITAL_FRACTION_PER_TRADE == 1.0
     assert cfg.MAX_POSITION_SIZE_PCT == 100.0
