@@ -13,9 +13,9 @@ Safety properties:
 - MAX_OPEN_POSITIONS is forced to 1 so 100% cash cannot be allocated twice.
 - no leverage is assumed or invented.
 - daily-loss and aggregate-open-risk guards remain active.
-- PRICE ACTION and MARKET ALIGNMENT are restored as hard upstream gates after
-  the inherited two-indicator launcher temporarily makes legacy gates
-  observational.
+- PRICE ACTION remains enabled and fully evaluated/logged, but is OBSERVATIONAL
+  only and cannot hard-block an entry in this dedicated PAPER process.
+- MARKET ALIGNMENT remains a hard upstream gate.
 - NEXT_OPEN candlestick plans fail closed until a true 5m bar-boundary execution
   path is separately implemented/tested.
 - LIVE code/configuration is untouched; all changes are runtime monkey patches
@@ -47,52 +47,80 @@ def apply_tested_paper_overrides() -> None:
     cfg.PAPER_MASTER_CANDLESTICK_MAX_WAIT_BARS = 2
     cfg.PAPER_MASTER_CANDLESTICK_NEXT_OPEN = "FAIL_CLOSED"
 
-    # The Master engine supplies a geometric stop.  Do not replace it with the
+    # The Master engine supplies a geometric stop. Do not replace it with the
     # legacy flat 0.45% stop before the aggregate-risk guard sees the proposal.
     cfg.ENABLE_FIXED_TARGET = False
 
-    # Make 100% of CASH capital available to one PAPER trade.  One open position
+    # Make 100% of CASH capital available to one PAPER trade. One open position
     # at a time prevents double-allocation of the same capital.
     cfg.PAPER_FULL_CAPITAL_PER_TRADE = True
     cfg.PAPER_CAPITAL_FRACTION_PER_TRADE = 1.0
     cfg.MAX_POSITION_SIZE_PCT = 100.0
     cfg.MAX_OPEN_POSITIONS = 1
 
-    # These are mandatory upstream hard gates for this experiment.
+    # PA must stay enabled so its score/detail continue to be computed and
+    # audited. Its blocking decision is disabled later, after main.py imports.
     cfg.ENABLE_PRICE_ACTION = True
+    cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
+
+    # Market Alignment remains a genuine hard gate.
     cfg.ENABLE_MARKET_ALIGNMENT_FILTER = True
 
     logger.warning(
-        "PAPER TEST OVERRIDES: master_tf=5m(resampled from completed 3m), minRR=2, wait=2, full_cash=100%%, max_open=1, fixed_stop_reconstruction=OFF"
+        "PAPER TEST OVERRIDES: master_tf=5m(resampled from completed 3m), minRR=2, wait=2, full_cash=100%%, max_open=1, fixed_stop_reconstruction=OFF, PA=OBSERVATIONAL, MA=HARD"
     )
 
 
-def restore_strict_pa_ma_after_two_indicator_patch():
-    """Undo only the inherited PA/MA observational bypass for this PAPER run.
+def restore_pa_evaluator_and_ma_after_two_indicator_patch():
+    """Restore real PA computation and hard MA after inherited PAPER patching.
 
-    paper_contrarian_launcher.install_two_indicator_patch() intentionally turns
-    legacy filters into observations and sets market alignment off.  That is not
-    the architecture tested for this branch: PA and MA must remain hard gates
-    upstream of the Master Candlestick engine.
+    paper_contrarian_launcher.install_two_indicator_patch() temporarily makes
+    legacy filters observational and can replace the PA evaluator. For this run
+    we still want the REAL PA score/detail for audit, but PA must not block.
+    Therefore we reload price_action while keeping ENABLE_PRICE_ACTION=True.
+    The separate blocking function in main.py is patched only after main import.
 
-    Reloading price_action restores the real evaluate_price_action function
-    before main.py imports it.  Market alignment itself is computed in main.py;
-    restoring its config flag is sufficient to make genuine MISALIGNED /
-    STRONG_MISALIGNMENT outcomes block again.
+    Market Alignment remains enabled as a hard gate.
     """
     if not bool(getattr(cfg, "PAPER_TRADING", False)):
-        raise SystemExit("SAFETY BLOCK: strict PA/MA restore requires PAPER_TRADING=True")
+        raise SystemExit("SAFETY BLOCK: PA/MA restore requires PAPER_TRADING=True")
 
     import price_action as price_action_module
 
     restored_price_action = importlib.reload(price_action_module)
     cfg.ENABLE_PRICE_ACTION = True
+    cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
     cfg.ENABLE_MARKET_ALIGNMENT_FILTER = True
 
     logger.warning(
-        "PAPER STRICT UPSTREAM GATES RESTORED: Price Action hard gate=ON; Market Alignment hard gate=ON"
+        "PAPER UPSTREAM POLICY RESTORED: Price Action evaluator=ON observational-only; Market Alignment hard gate=ON"
     )
     return restored_price_action.evaluate_price_action
+
+
+def install_observational_price_action_gate(trading_main):
+    """Keep PA scoring/detail, but make its PAPER hard-block decision impossible.
+
+    main.py still calls evaluate_price_action() for every candidate and stores
+    signal.price_action_score / signal.price_action_detail. We replace only the
+    final boolean blocker. This is deliberately PAPER-only and does not touch
+    LIVE behavior or the Market Alignment gate.
+    """
+    if not bool(getattr(cfg, "PAPER_TRADING", False)):
+        raise SystemExit("SAFETY BLOCK: observational PA patch requires PAPER_TRADING=True")
+
+    original = trading_main.price_action_blocks_entry
+
+    def _observational_only(_score, cfg_module=cfg):
+        return False
+
+    trading_main.price_action_blocks_entry = _observational_only
+    cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
+
+    logger.warning(
+        "PAPER PRICE ACTION OBSERVATIONAL: score/detail still computed and audited; PA cannot block entries"
+    )
+    return original
 
 
 def main() -> None:
@@ -102,10 +130,10 @@ def main() -> None:
     apply_tested_paper_overrides()
     cp9_launcher.apply_cp9_overrides()
 
-    # Keep the current executable PAPER emergency-stop safety layer.  The
+    # Keep the current executable PAPER emergency-stop safety layer. The
     # aggregate-risk proposal itself is still calculated from the Master
     # geometric stop because ENABLE_FIXED_TARGET=False and entry_plan stores the
-    # signal stop.  This intentionally preserves the existing PAPER safety exit
+    # signal stop. This intentionally preserves the existing PAPER safety exit
     # stack rather than weakening it while increasing capital allocation.
     base_launcher.install_paper_emergency_stop_override()
     base_launcher.install_direction_only_adx_policy()
@@ -118,18 +146,21 @@ def main() -> None:
 
     cp9_launcher.install_stack_hooks(strategy_stack, cp9)
 
-    # The inherited PAPER signal patch is still the ADX/EMA/RSI direction
-    # source, but it temporarily makes PA/MA observational.  Restore PA/MA
-    # immediately after installing that patch and BEFORE importing main.py so
-    # main binds the real price-action evaluator and sees MA enabled.
+    # The inherited PAPER signal patch remains the ADX/EMA/RSI direction source.
+    # Restore the real PA evaluator for diagnostics and re-enable hard MA before
+    # importing main.py so main binds the intended evaluator/config state.
     strategy_stack.base.install_two_indicator_patch()
-    restore_strict_pa_ma_after_two_indicator_patch()
+    restore_pa_evaluator_and_ma_after_two_indicator_patch()
 
     import main as trading_main
 
     # Defensive re-assertion in case another imported wrapper touched flags.
     cfg.ENABLE_PRICE_ACTION = True
+    cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
     cfg.ENABLE_MARKET_ALIGNMENT_FILTER = True
+
+    # PA is observational only: compute/log it, but never reject on PA score.
+    install_observational_price_action_gate(trading_main)
 
     reset_runtime_state()
     install_on_trading_main(trading_main)
@@ -139,7 +170,7 @@ def main() -> None:
     strategy_stack.mfe_time.install_mfe_time_exit_patch(trading_main)
 
     logger.warning(
-        "PAPER 5m MASTER + FULL-CAPITAL POLICY ACTIVE | capital=Rs %.2f | max_open=%s | daily_loss=%.2f%% | PA=HARD | MA=HARD",
+        "PAPER 5m MASTER + FULL-CAPITAL POLICY ACTIVE | capital=Rs %.2f | max_open=%s | daily_loss=%.2f%% | PA=OBSERVATIONAL | MA=HARD",
         float(getattr(cfg, "CAPITAL", 0.0) or 0.0),
         getattr(cfg, "MAX_OPEN_POSITIONS", None),
         float(getattr(cfg, "MAX_DAILY_LOSS_PCT", 0.0) or 0.0),
