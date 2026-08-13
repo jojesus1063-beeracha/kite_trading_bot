@@ -1,0 +1,109 @@
+import unittest
+from types import SimpleNamespace
+
+import numpy as np
+import pandas as pd
+
+from candle_eligibility import evaluate_candle_eligibility
+
+
+class FakeTalib:
+    def __init__(self, scores=None):
+        self.scores = scores or {}
+
+    def __getattr__(self, name):
+        if not name.startswith("CDL"):
+            raise AttributeError(name)
+
+        def detector(open_, high, low, close):
+            result = np.zeros(len(close), dtype=int)
+            result[-1] = self.scores.get(name, 0)
+            return result
+
+        return detector
+
+
+def config():
+    return SimpleNamespace(
+        ENTRY_TIMEFRAME="3minute",
+        PAPER_CANDLE_MAX_FRESH_SECONDS=90.0,
+        PAPER_CANDLE_COMPLETION_GRACE_SECONDS=5.0,
+        PAPER_CANDLE_VOLUME_LOOKBACK=20,
+        PAPER_CANDLE_MIN_VOLUME_RATIO=1.5,
+        PAPER_BUY_MIN_ADX=25.0,
+        PAPER_SELL_MIN_ADX=20.0,
+    )
+
+
+def entry_frame(direction="BUY"):
+    start = 100.0 if direction == "BUY" else 110.0
+    end = 110.0 if direction == "BUY" else 100.0
+    close = np.linspace(start, end, 25)
+    frame = pd.DataFrame({
+        "date": pd.date_range("2026-08-13 08:48", periods=25, freq="3min", tz="Asia/Kolkata"),
+        "open": close - 0.1 if direction == "BUY" else close + 0.1,
+        "high": close + 0.3,
+        "low": close - 0.3,
+        "close": close,
+        "volume": [100.0] * 24 + [200.0],
+        "vwap": [95.0] * 25 if direction == "BUY" else [115.0] * 25,
+    })
+    return frame
+
+
+def trend_frame(direction="BUY", adx=30.0):
+    if direction == "BUY":
+        return pd.DataFrame([{"close": 110.0, "ema200": 90.0, "adx": adx}])
+    return pd.DataFrame([{"close": 100.0, "ema200": 120.0, "adx": adx}])
+
+
+class CandleEligibilityTests(unittest.TestCase):
+    def test_accepts_confluent_buy(self):
+        result = evaluate_candle_eligibility(
+            entry_frame("BUY"), trend_frame("BUY"), "BUY", config(),
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib({"CDLENGULFING": 100}),
+        )
+        self.assertTrue(result.accepted, result.to_dict())
+
+    def test_buy_requires_stronger_adx(self):
+        result = evaluate_candle_eligibility(
+            entry_frame("BUY"), trend_frame("BUY", adx=22.0), "BUY", config(),
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib({"CDLENGULFING": 100}),
+        )
+        self.assertFalse(result.accepted)
+        self.assertIn("ADX_STRENGTH_BELOW_MINIMUM_OR_UNAVAILABLE", result.reasons)
+
+    def test_accepts_confluent_sell_at_adx_20_plus(self):
+        result = evaluate_candle_eligibility(
+            entry_frame("SELL"), trend_frame("SELL", adx=22.0), "SELL", config(),
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib({"CDLENGULFING": -100}),
+        )
+        self.assertTrue(result.accepted, result.to_dict())
+
+    def test_conflicting_tier1_patterns_reject(self):
+        result = evaluate_candle_eligibility(
+            entry_frame("BUY"), trend_frame("BUY"), "BUY", config(),
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib({
+                "CDLENGULFING": 100,
+                "CDLSHOOTINGSTAR": -100,
+            }),
+        )
+        self.assertFalse(result.accepted)
+        self.assertIn("CONFLICTING_TIER1_PATTERNS", result.reasons)
+
+    def test_stale_candle_rejects(self):
+        result = evaluate_candle_eligibility(
+            entry_frame("BUY"), trend_frame("BUY"), "BUY", config(),
+            now="2026-08-13 10:06:00+05:30",
+            talib_module=FakeTalib({"CDLENGULFING": 100}),
+        )
+        self.assertFalse(result.accepted)
+        self.assertIn("CANDLE_NOT_COMPLETED_OR_FRESH", result.reasons)
+
+
+if __name__ == "__main__":
+    unittest.main()

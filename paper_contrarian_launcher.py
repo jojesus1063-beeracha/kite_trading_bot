@@ -1,26 +1,9 @@
 #!/usr/bin/env python3
-"""Paper-only EMA9/EMA21 + RSI strategy with ADX regime switching.
+"""Paper-only clean EMA direction and candlestick eligibility launcher.
 
-Directional policy:
-- ADX <= 40 (or unavailable): reversed EMA logic
-    EMA9 > EMA21 -> SELL
-    EMA9 < EMA21 -> BUY
-- ADX > 40: normal EMA logic
-    EMA9 > EMA21 -> BUY
-    EMA9 < EMA21 -> SELL
-- RSI >= 70 -> BUY override
-- RSI <= 30 -> SELL override
-- RSI 30-70 -> PASS to the ADX-selected EMA direction
-
-Loss-reduction PAPER entry controls:
-- 20 <= ADX < 30 is blocked before a signal is returned.
-- maximum 2 completed entries per symbol per day.
-- after a completed losing symbol trade, block re-entry for 30 minutes.
-
-Legacy technical gates (EMA200/watchlist direction, RVOL, entry quality,
-CHoCH/context, price action, relative strength, market alignment, news) remain
-observational and cannot reject or re-rank a candidate. Execution/risk safety
-controls in main.py/executor.py remain active.
+ADX measures strength only, EMA9/EMA21 always selects the normal direction,
+RSI is observational, and a fail-closed TA-Lib/confluence gate must approve the
+latest completed entry candle.  The core technical gates remain enforced.
 """
 from __future__ import annotations
 
@@ -34,12 +17,7 @@ import pandas as pd
 
 import config as cfg
 import strategy
-import watchlist_filters
-import rvol
-import entry_quality
-import entry_confirmation
-import relative_strength
-import price_action
+from candle_eligibility import evaluate_candle_eligibility
 
 logger = logging.getLogger("paper_contrarian_launcher")
 EMA_FAST = 9
@@ -47,7 +25,7 @@ EMA_SLOW = 21
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
-ADX_REGIME_THRESHOLD = 40.0
+ADX_MIN_STRENGTH = 20.0
 AUDIT_DIR = Path(__file__).resolve().parent / "runtime" / "paper_audit"
 ENTRY_AUDIT = AUDIT_DIR / "entry_audit.jsonl"
 CONFIG_AUDIT = AUDIT_DIR / "session_config.json"
@@ -95,19 +73,18 @@ def _append(payload):
 def _config_snapshot():
     names = [n for n in dir(cfg) if n.isupper()]
     snap = {n: _safe(getattr(cfg, n)) for n in names}
-    snap["PAPER_TWO_INDICATOR_LEGACY_GATES"] = "OBSERVATIONAL_ONLY"
-    snap["PAPER_ADX_DIRECTION_THRESHOLD"] = ADX_REGIME_THRESHOLD
-    snap["PAPER_ADX_ROLE"] = "DIRECTION_REGIME_PLUS_PAPER_20_30_ENTRY_BLOCK"
+    snap["PAPER_TWO_INDICATOR_LEGACY_GATES"] = "DISABLED"
+    snap["PAPER_ADX_MIN_STRENGTH"] = ADX_MIN_STRENGTH
+    snap["PAPER_ADX_ROLE"] = "STRENGTH_ONLY_NEVER_REVERSES_DIRECTION"
     AUDIT_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_AUDIT.write_text(json.dumps(snap, indent=2, default=str), encoding="utf-8")
 
 
 def _adx_entry_blocked(adx):
     if adx is None:
-        return False
-    low = float(getattr(cfg, "PAPER_ADX_BLOCK_LOW", 20.0))
-    high = float(getattr(cfg, "PAPER_ADX_BLOCK_HIGH", 30.0))
-    return low <= float(adx) < high
+        return True
+    minimum = float(getattr(cfg, "PAPER_ADX_MIN_STRENGTH", ADX_MIN_STRENGTH))
+    return float(adx) < minimum
 
 
 def _trade_group_key(record):
@@ -247,7 +224,7 @@ def _latest_adx(df_15m):
 
 
 def ema_direction(df, adx=None):
-    """Return EMA direction under the ADX direction regime."""
+    """Return normal EMA direction; ADX never reverses the signal."""
     if df is None or df.empty or "close" not in df.columns or len(df) < EMA_SLOW:
         return None, None, None
     c = pd.to_numeric(df["close"], errors="coerce")
@@ -256,23 +233,17 @@ def ema_direction(df, adx=None):
     if pd.isna(e9) or pd.isna(e21):
         return None, None, None
 
-    normal_regime = adx is not None and adx > ADX_REGIME_THRESHOLD
     if e9 > e21:
-        direction = "BUY" if normal_regime else "SELL"
+        direction = "BUY"
     elif e9 < e21:
-        direction = "SELL" if normal_regime else "BUY"
+        direction = "SELL"
     else:
         direction = None
     return direction, float(e9), float(e21)
 
 
 def rsi_direction(rsi):
-    if rsi is None:
-        return None
-    if rsi >= RSI_OVERBOUGHT:
-        return "BUY"
-    if rsi <= RSI_OVERSOLD:
-        return "SELL"
+    """RSI is retained for audit only and can never override direction."""
     return None
 
 
@@ -306,8 +277,8 @@ def _legacy_observations(df15, dfentry, index15):
             "trend_ema_relation": None if ef is None or es is None else ("UP" if ef > es else "DOWN" if ef < es else "FLAT"),
             "price_vs_vwap": None if close is None or vwap is None else ("ABOVE" if close > vwap else "BELOW" if close < vwap else "AT"),
             "adx": adx,
-            "adx_direction_threshold": ADX_REGIME_THRESHOLD,
-            "adx_direction_regime": "NORMAL" if adx is not None and adx > ADX_REGIME_THRESHOLD else "REVERSED",
+            "adx_min_strength": ADX_MIN_STRENGTH,
+            "adx_role": "STRENGTH_ONLY",
             "ema200": ema200,
             "would_adx_pass_25": None if adx is None else adx >= 25,
             "would_price_be_above_ema200": None if close is None or ema200 is None else close > ema200,
@@ -335,122 +306,31 @@ def _legacy_observations(df15, dfentry, index15):
     return obs
 
 
-def install_legacy_gate_bypass():
-    """Make legacy technical gates observational only for this paper process."""
-    original_classify = watchlist_filters.classify_direction_eligibility
-    original_rvol = rvol.passes_rvol_threshold
-    original_quality = entry_quality.assess_entry_quality
-    original_context = entry_confirmation.assess_entry_context
-    original_relative_strength = relative_strength.assess_relative_strength
-    original_price_action = price_action.evaluate_price_action
-
-    def observational_classify(df_15m, cfg_obj):
-        eligibility, detail = original_classify(df_15m, cfg_obj)
-        enriched = dict(detail) if isinstance(detail, dict) else {"detail": str(detail)}
-        enriched.update({
-            "observational_only": True,
-            "original_eligibility": eligibility,
-            "paper_two_indicator_bypass": True,
-        })
-        return watchlist_filters.NOT_ENABLED, enriched
-
-    def observational_rvol(df_entry, cfg_obj):
-        passed, value, detail = original_rvol(df_entry, cfg_obj)
-        enriched = dict(detail) if isinstance(detail, dict) else {"detail": str(detail)}
-        enriched.update({
-            "observational_only": True,
-            "original_passed": bool(passed),
-            "paper_two_indicator_bypass": True,
-        })
-        return True, value, enriched
-
-    def observational_quality(signal, df_entry):
-        result = original_quality(signal, df_entry)
-        detail = dict(result.detail) if isinstance(result.detail, dict) else {"detail": str(result.detail)}
-        detail.update({
-            "observational_only": True,
-            "original_accepted": bool(result.accepted),
-            "original_score": result.score,
-            "original_reason": result.reason,
-            "paper_two_indicator_bypass": True,
-        })
-        return entry_quality.EntryQuality(
-            accepted=True,
-            score=0.0,
-            reason="observational only in paper two-indicator mode",
-            detail=detail,
-        )
-
-    def observational_context(signal, df_15m):
-        result = original_context(signal, df_15m)
-        detail = dict(result.detail) if isinstance(result.detail, dict) else {"detail": str(result.detail)}
-        detail.update({
-            "observational_only": True,
-            "original_accepted": bool(result.accepted),
-            "original_score_adjustment": result.score_adjustment,
-            "original_reason": result.reason,
-            "paper_two_indicator_bypass": True,
-        })
-        return entry_confirmation.EntryContext(
-            accepted=True,
-            score_adjustment=0.0,
-            reason="observational only in paper two-indicator mode",
-            detail=detail,
-        )
-
-    def observational_relative_strength(signal, df_15m, market_df_15m, sector_df_15m):
-        result = original_relative_strength(signal, df_15m, market_df_15m, sector_df_15m)
-        detail = dict(result.detail) if isinstance(result.detail, dict) else {"detail": str(result.detail)}
-        detail.update({
-            "observational_only": True,
-            "original_score_adjustment": result.score_adjustment,
-            "original_reason": result.reason,
-            "paper_two_indicator_bypass": True,
-        })
-        return relative_strength.RelativeStrengthAssessment(
-            score_adjustment=0.0,
-            reason="observational only in paper two-indicator mode",
-            detail=detail,
-        )
-
-    def observational_price_action(df_entry, direction, cfg_obj):
-        score, detail = original_price_action(df_entry, direction, cfg_obj)
-        enriched = dict(detail) if isinstance(detail, dict) else {"detail": str(detail)}
-        enriched.update({
-            "observational_only": True,
-            "original_score": score,
-            "paper_two_indicator_bypass": True,
-        })
-        return 0.0, enriched
-
-    watchlist_filters.classify_direction_eligibility = observational_classify
-    rvol.passes_rvol_threshold = observational_rvol
-    entry_quality.assess_entry_quality = observational_quality
-    entry_confirmation.assess_entry_context = observational_context
-    relative_strength.assess_relative_strength = observational_relative_strength
-    price_action.evaluate_price_action = observational_price_action
-
-    cfg.ENABLE_MARKET_ALIGNMENT_FILTER = False
-    cfg.ENABLE_NEWS_FILTER = False
-    cfg.ENABLE_RVOL_FILTER = False
-
-    logger.warning(
-        "PAPER LEGACY GATES OBSERVATIONAL: EMA200, RVOL, entry quality, CHoCH/context, "
-        "price action, relative strength, market alignment and news cannot block/re-rank entries"
-    )
-
-
 def install_two_indicator_patch():
     if not bool(getattr(cfg, "PAPER_TRADING", False)):
         raise SystemExit("SAFETY BLOCK: EMA/RSI launcher requires PAPER_TRADING=True")
 
-    install_legacy_gate_bypass()
+    cfg.PAPER_ADX_MIN_STRENGTH = float(getattr(cfg, "PAPER_ADX_MIN_STRENGTH", 20.0))
+    cfg.PAPER_BUY_MIN_ADX = float(getattr(cfg, "PAPER_BUY_MIN_ADX", 25.0))
+    cfg.PAPER_SELL_MIN_ADX = float(getattr(cfg, "PAPER_SELL_MIN_ADX", 20.0))
+    cfg.PAPER_CANDLE_MIN_VOLUME_RATIO = float(getattr(cfg, "PAPER_CANDLE_MIN_VOLUME_RATIO", 1.5))
+    cfg.PAPER_CANDLE_MAX_FRESH_SECONDS = float(getattr(cfg, "PAPER_CANDLE_MAX_FRESH_SECONDS", 90.0))
+    cfg.PAPER_CANDLE_COMPLETION_GRACE_SECONDS = float(getattr(cfg, "PAPER_CANDLE_COMPLETION_GRACE_SECONDS", 5.0))
+    cfg.ENABLE_RVOL_FILTER = True
+    cfg.RVOL_THRESHOLD = max(float(getattr(cfg, "RVOL_THRESHOLD", 1.5)), 1.5)
+    cfg.ENABLE_200_EMA_FILTER = True
+    cfg.ENABLE_EMA200_WATCHLIST = True
+    cfg.ENABLE_ENTRY_TIMING_FILTER = True
+    cfg.ENABLE_CONFIRMATION_QUALITY_FILTER = True
+    cfg.ENABLE_VOLUME_ACCELERATION_FILTER = True
+    cfg.ENABLE_PRICE_ACTION = True
+    cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = False
     _config_snapshot()
 
     def evaluate(symbol, df_15m, df_5m, df_index_15m, cfg_obj):
         observations = _legacy_observations(df_15m, df_5m, df_index_15m)
         adx = _latest_adx(df_15m)
-        adx_regime = "NORMAL" if adx is not None and adx > ADX_REGIME_THRESHOLD else "REVERSED"
+        adx_regime = "STRENGTH_PASS" if not _adx_entry_blocked(adx) else "STRENGTH_REJECT"
         adx_blocked = _adx_entry_blocked(adx)
         event = {
             "event": "ENTRY_EVALUATION",
@@ -458,22 +338,17 @@ def install_two_indicator_patch():
             "symbol": symbol,
             "paper_only": True,
             "directional_policy": {
-                "adx_lte_40_or_unavailable": "REVERSED_EMA",
-                "adx_gt_40": "NORMAL_EMA",
-                "adx_20_to_30": "BLOCK_ENTRY_PAPER_TEST",
+                "adx_unavailable_or_lt_20": "BLOCK_ENTRY",
+                "adx_gte_20": "STRENGTH_ONLY",
                 "normal_ema9_gt_ema21": "BUY",
                 "normal_ema9_lt_ema21": "SELL",
-                "reversed_ema9_gt_ema21": "SELL",
-                "reversed_ema9_lt_ema21": "BUY",
-                "rsi_gte_70": "BUY_OVERRIDE",
-                "rsi_lte_30": "SELL_OVERRIDE",
-                "rsi_30_70": "PASS_ADX_EMA_DIRECTION",
+                "rsi14": "OBSERVATIONAL_ONLY",
             },
             "adx": adx,
-            "adx_threshold": ADX_REGIME_THRESHOLD,
+            "adx_threshold": ADX_MIN_STRENGTH,
             "adx_regime": adx_regime,
             "adx_blocks_trade": adx_blocked,
-            "legacy_gates": "OBSERVATIONAL_ONLY",
+            "legacy_gates": "ENFORCED",
             "observations": observations,
         }
         if df_5m is None or df_5m.empty:
@@ -494,21 +369,45 @@ def install_two_indicator_patch():
             _append(event)
             return None
 
+        timeframe_text = str(getattr(cfg_obj, "ENTRY_TIMEFRAME", "3minute"))
+        timeframe_digits = "".join(ch for ch in timeframe_text if ch.isdigit())
+        decision_time = pd.Timestamp(cur["date"]) + pd.Timedelta(
+            minutes=int(timeframe_digits or 3)
+        )
+        completed_trend = strategy.latest_completed_15m_row(df_15m, decision_time)
+        if completed_trend is None:
+            event.update({
+                "decision": "REJECT",
+                "stage": "COMPLETED_15M_CONTEXT",
+                "reasons": ["NO_COMPLETED_15M_CANDLE"],
+            })
+            _append(event)
+            return None
+
+        completed_df_15m = completed_trend.to_frame().T
+        adx = _latest_adx(completed_df_15m)
+        adx_blocked = _adx_entry_blocked(adx)
+        adx_regime = "STRENGTH_PASS" if not adx_blocked else "STRENGTH_REJECT"
+        event.update({
+            "adx": adx,
+            "adx_regime": adx_regime,
+            "adx_blocks_trade": adx_blocked,
+            "completed_15m_candle": _row_snapshot(completed_trend),
+        })
+
         if adx_blocked:
             event.update({
                 "decision": "REJECT",
-                "stage": "ADX_20_30_TEST_BLOCK",
-                "reasons": ["ADX_IN_LOSS_HEAVY_20_30_BAND"],
-                "adx_block_low": getattr(cfg, "PAPER_ADX_BLOCK_LOW", 20.0),
-                "adx_block_high": getattr(cfg, "PAPER_ADX_BLOCK_HIGH", 30.0),
+                "stage": "ADX_STRENGTH_GATE",
+                "reasons": ["ADX_BELOW_MINIMUM_OR_UNAVAILABLE"],
+                "adx_minimum": getattr(cfg, "PAPER_ADX_MIN_STRENGTH", 20.0),
             })
             _append(event)
             logger.info(
-                "PAPER ENTRY BLOCK | %s | ADX=%.2f in [%.0f, %.0f)",
+                "PAPER ENTRY BLOCK | %s | ADX=%s below/unavailable minimum %.0f",
                 symbol,
                 adx,
-                float(getattr(cfg, "PAPER_ADX_BLOCK_LOW", 20.0)),
-                float(getattr(cfg, "PAPER_ADX_BLOCK_HIGH", 30.0)),
+                float(getattr(cfg, "PAPER_ADX_MIN_STRENGTH", 20.0)),
             )
             return None
 
@@ -530,8 +429,8 @@ def install_two_indicator_patch():
 
         base, e9, e21 = ema_direction(df_5m, adx=adx)
         rsi = calculate_rsi(df_5m)
-        override = rsi_direction(rsi)
-        final = override or base
+        override = None
+        final = base
         event.update({
             "ema9": e9,
             "ema21": e21,
@@ -544,6 +443,23 @@ def install_two_indicator_patch():
         if base is None:
             event.update({"decision": "REJECT", "stage": "EMA_DIRECTION", "reasons": ["EMA9_EMA21_UNAVAILABLE_OR_EQUAL"]})
             _append(event)
+            return None
+
+        candle_result = evaluate_candle_eligibility(
+            df_5m, completed_df_15m, final, cfg_obj
+        )
+        event["candle_eligibility"] = candle_result.to_dict()
+        if not candle_result.accepted:
+            event.update({
+                "decision": "REJECT",
+                "stage": "CANDLE_ELIGIBILITY",
+                "reasons": candle_result.reasons,
+            })
+            _append(event)
+            logger.info(
+                "PAPER CANDLE BLOCK | %s | direction=%s | reasons=%s",
+                symbol, final, candle_result.reasons,
+            )
             return None
 
         entry = float(cur["close"]) if not pd.isna(cur.get("close")) else 0.0
@@ -563,29 +479,30 @@ def install_two_indicator_patch():
 
         event.update({
             "decision": "SIGNAL_SELECTED",
-            "stage": "ADX_EMA_RSI_SIGNAL",
+            "stage": "CLEAN_CANDLE_ELIGIBILITY_SIGNAL",
             "entry_price": entry,
             "stop_loss": stop,
             "target": target,
             "stop_loss_percent": sp * 100,
             "profit_target_percent": tp * 100,
             "selection_reasons": [
-                f"ADX_{adx_regime}_EMA_DIRECTION",
-                ("RSI_OVERRIDE" if override else "RSI_PASS"),
+                "NORMAL_EMA9_EMA21_DIRECTION",
+                "ADX_STRENGTH_PASS",
+                "RSI_OBSERVATIONAL",
+                "TALIB_CANDLE_CONFLUENCE_PASS",
             ],
-            "observational_filters_blocked": False,
+            "legacy_filters": "ENFORCED",
         })
         _append(event)
         logger.info(
-            "PAPER AUDIT SIGNAL | %s | ADX=%s regime=%s | EMA9=%s EMA21=%s base=%s RSI=%s override=%s FINAL=%s",
-            symbol, adx, adx_regime, e9, e21, base, rsi, override, final,
+            "PAPER CLEAN SIGNAL | %s | ADX=%s | EMA9=%s EMA21=%s direction=%s RSI(obs)=%s",
+            symbol, adx, e9, e21, final, rsi,
         )
         reason = (
-            f"PAPER ADX-EMA-RSI | ADX={'NA' if adx is None else f'{adx:.2f}'} regime={adx_regime} "
-            f"(threshold>{ADX_REGIME_THRESHOLD:.0f}=NORMAL; 20-30 blocked) | EMA9={e9:.4f} EMA21={e21:.4f} -> {base} | "
-            f"RSI({RSI_PERIOD})={'NA' if rsi is None else f'{rsi:.2f}'} "
-            f"{'RSI_OVERRIDE' if override else 'RSI_PASS'} -> {final} | "
-            f"legacy technical gates observational only | audit={ENTRY_AUDIT}"
+            f"PAPER CLEAN CANDLE | ADX={adx:.2f} strength-only | "
+            f"EMA9={e9:.4f} EMA21={e21:.4f} -> {final} | "
+            f"RSI({RSI_PERIOD})={'NA' if rsi is None else f'{rsi:.2f}'} observational | "
+            f"TA-Lib pattern + volume + VWAP + EMA200 passed | core gates enforced | audit={ENTRY_AUDIT}"
         )
         return strategy.Signal(
             symbol=symbol,
@@ -600,10 +517,9 @@ def install_two_indicator_patch():
 
     strategy.evaluate = evaluate
     logger.warning(
-        "PAPER ADX POLICY ACTIVE: ADX<=%.0f/unavailable -> reversed EMA; ADX>%.0f -> normal EMA; "
-        "20<=ADX<30 blocks PAPER entries",
-        ADX_REGIME_THRESHOLD,
-        ADX_REGIME_THRESHOLD,
+        "PAPER CLEAN ENTRY ACTIVE: normal EMA direction; ADX strength only (minimum %.0f); "
+        "RSI observational; TA-Lib candle confluence fail-closed",
+        ADX_MIN_STRENGTH,
     )
     logger.warning(
         "PAPER SYMBOL GUARD ACTIVE: max %s completed entries/symbol/day; %.0f-minute cooldown after losing trade",

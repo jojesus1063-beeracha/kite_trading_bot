@@ -6,14 +6,11 @@ protection remain untouched.
 
 Current PAPER policy:
 - risk per trade: 0.20%
-- ADX <20: BLOCK entry
-- 20 <= ADX <40: REVERSED EMA9/EMA21 direction
-- ADX >=40: NORMAL EMA9/EMA21 direction
-- no ADX entry rejection at or above 20
-- no paper daily entry-count cap
-- no paper per-symbol completed-entry cap
-- no post-loss cooldown
-- no practical max-open-position count cap for distinct symbols
+- ADX is strength-only and never reverses EMA9/EMA21 direction
+- ADX <20 or unavailable: BLOCK entry
+- maximum 5 completed entries per day
+- maximum 2 simultaneous positions
+- maximum 2 completed entries per symbol with a 30-minute post-loss cooldown
 - aggregate realized-loss + open-risk + proposed-risk guard remains binding
 - same-symbol concurrent entries remain blocked by the core position model,
   because open_positions is keyed by symbol and cannot safely represent two
@@ -39,19 +36,16 @@ import config as cfg
 logger = logging.getLogger("paper_50pct_risk_launcher")
 
 PAPER_RISK_PER_TRADE_PCT = 0.20
-PAPER_MAX_ENTRIES_PER_DAY = 10_000
-PAPER_CORE_MAX_TRADES_PER_DAY = 10_000
-PAPER_MAX_OPEN_POSITIONS = 10_000
+PAPER_MAX_ENTRIES_PER_DAY = 5
+PAPER_CORE_MAX_TRADES_PER_DAY = 5
+PAPER_MAX_OPEN_POSITIONS = 2
 PAPER_MAX_DAILY_LOSS_PCT = 5.0
 PAPER_EMERGENCY_STOP_PCT = 0.75
-PAPER_MAX_TRADES_PER_SYMBOL = 0
-PAPER_LOSS_REENTRY_COOLDOWN_MINUTES = 0.0
-PAPER_ADX_BLOCK_LOW = 0.0
-PAPER_ADX_BLOCK_HIGH = 20.0
-PAPER_ADX_REVERSE_FROM = 20.0
-PAPER_ADX_HIGH_NORMAL_FROM = 40.0
-# Backward-compatible audit/config name: NORMAL begins at the high zone.
-PAPER_ADX_NORMAL_FROM = PAPER_ADX_HIGH_NORMAL_FROM
+PAPER_MAX_TRADES_PER_SYMBOL = 2
+PAPER_LOSS_REENTRY_COOLDOWN_MINUTES = 30.0
+PAPER_ADX_MIN_STRENGTH = 20.0
+PAPER_BUY_MIN_ADX = 25.0
+PAPER_SELL_MIN_ADX = 20.0
 
 PAPER_MAE_MIN_AGE_MINUTES = 10.0
 PAPER_MAE_THRESHOLD_PCT = -0.30
@@ -83,11 +77,9 @@ def apply_paper_risk_overrides() -> None:
     cfg.PAPER_MAX_ENTRIES_PER_DAY = PAPER_MAX_ENTRIES_PER_DAY
     cfg.PAPER_MAX_TRADES_PER_SYMBOL = PAPER_MAX_TRADES_PER_SYMBOL
     cfg.PAPER_LOSS_REENTRY_COOLDOWN_MINUTES = PAPER_LOSS_REENTRY_COOLDOWN_MINUTES
-    cfg.PAPER_ADX_BLOCK_LOW = PAPER_ADX_BLOCK_LOW
-    cfg.PAPER_ADX_BLOCK_HIGH = PAPER_ADX_BLOCK_HIGH
-    cfg.PAPER_ADX_REVERSE_FROM = PAPER_ADX_REVERSE_FROM
-    cfg.PAPER_ADX_HIGH_NORMAL_FROM = PAPER_ADX_HIGH_NORMAL_FROM
-    cfg.PAPER_ADX_NORMAL_FROM = PAPER_ADX_NORMAL_FROM
+    cfg.PAPER_ADX_MIN_STRENGTH = PAPER_ADX_MIN_STRENGTH
+    cfg.PAPER_BUY_MIN_ADX = PAPER_BUY_MIN_ADX
+    cfg.PAPER_SELL_MIN_ADX = PAPER_SELL_MIN_ADX
     cfg.PAPER_EMERGENCY_STOP_PCT = PAPER_EMERGENCY_STOP_PCT
 
     cfg.PAPER_MAE_MIN_AGE_MINUTES = PAPER_MAE_MIN_AGE_MINUTES
@@ -116,11 +108,14 @@ def apply_paper_risk_overrides() -> None:
     startup_halt = reconcile_startup_halt()
 
     logger.warning(
-        "PAPER POLICY ACTIVE: risk/trade=%.2f%% ADX=<20 BLOCK, 20<=ADX<40 REVERSE, >=40 NORMAL, "
-        "entry cap=OFF, per-symbol completed-entry cap=OFF, loss cooldown=OFF, "
+        "PAPER POLICY ACTIVE: risk/trade=%.2f%% ADX strength-only (<20/unavailable BLOCK), "
+        "entry cap=%s, per-symbol completed-entry cap=%s, loss cooldown=%.0f min, "
         "max distinct open=%s, daily_loss=%.1f%% (Rs %.2f), emergency_stop=%.2f%% | "
         "daily_halt_retained=%s explicit_halt_clear=%s",
         PAPER_RISK_PER_TRADE_PCT,
+        PAPER_MAX_ENTRIES_PER_DAY,
+        PAPER_MAX_TRADES_PER_SYMBOL,
+        PAPER_LOSS_REENTRY_COOLDOWN_MINUTES,
         PAPER_MAX_OPEN_POSITIONS,
         PAPER_MAX_DAILY_LOSS_PCT,
         max_loss_amount,
@@ -199,128 +194,16 @@ def install_paper_emergency_stop_override() -> None:
 
 
 def install_direction_only_adx_policy() -> None:
-    """Install the requested ADX gate/regime while leaving frequency guards off."""
+    """Keep ADX as a fail-closed strength gate; never patch EMA direction."""
     if not bool(getattr(cfg, "PAPER_TRADING", False)):
         raise SystemExit("SAFETY BLOCK: ADX paper policy requires PAPER_TRADING=True")
 
-    import paper_contrarian_launcher as base
-
-    def adx_entry_blocked(adx):
-        if adx is None:
-            return False
-        try:
-            return float(adx) < PAPER_ADX_REVERSE_FROM
-        except (TypeError, ValueError):
-            return False
-
-    base._adx_entry_blocked = adx_entry_blocked
-
-    def allow_symbol_guard(symbol, now=None, log_path=None):
-        return True, {
-            "paper_only": True,
-            "active": False,
-            "decision": "ALLOW",
-            "reason": "PAPER_FREQUENCY_GUARDS_DISABLED",
-        }
-
-    base._paper_entry_guard = allow_symbol_guard
-
-    def regime_ema_direction(df, adx=None):
-        if df is None or df.empty or "close" not in df.columns or len(df) < base.EMA_SLOW:
-            return None, None, None
-
-        close = base.pd.to_numeric(df["close"], errors="coerce")
-        e9 = close.ewm(span=base.EMA_FAST, adjust=False).mean().iloc[-1]
-        e21 = close.ewm(span=base.EMA_SLOW, adjust=False).mean().iloc[-1]
-        if base.pd.isna(e9) or base.pd.isna(e21):
-            return None, None, None
-
-        # ADX below 20 is rejected before this point. Missing ADX retains the
-        # previous fail-safe reversed behavior. 20<=ADX<40 is reversed and
-        # ADX>=40 follows normal EMA direction.
-        normal = adx is not None and float(adx) >= PAPER_ADX_HIGH_NORMAL_FROM
-
-        if e9 > e21:
-            direction = "BUY" if normal else "SELL"
-        elif e9 < e21:
-            direction = "SELL" if normal else "BUY"
-        else:
-            direction = None
-        return direction, float(e9), float(e21)
-
-    base.ema_direction = regime_ema_direction
-    # Keep the base evaluator's displayed single-threshold regime aligned with
-    # the high-NORMAL boundary; exact ADX=40 must be NORMAL.
-    base.ADX_REGIME_THRESHOLD = PAPER_ADX_HIGH_NORMAL_FROM - 1e-9
-
-    original_append = base._append
-    if not getattr(original_append, "_adx_block_reverse_normal_sanitizer", False):
-        def append_policy(payload):
-            if isinstance(payload, dict) and payload.get("event") == "ENTRY_EVALUATION":
-                adx = payload.get("adx")
-                if adx is None:
-                    regime = "REVERSED_ADX_UNAVAILABLE"
-                    blocked = False
-                else:
-                    value = float(adx)
-                    blocked = value < PAPER_ADX_REVERSE_FROM
-                    if blocked:
-                        regime = "BLOCKED_WEAK_ADX"
-                    elif value < PAPER_ADX_HIGH_NORMAL_FROM:
-                        regime = "REVERSED"
-                    else:
-                        regime = "NORMAL"
-
-                payload["adx_regime"] = regime
-                payload["adx_blocks_trade"] = blocked
-                policy = payload.setdefault("directional_policy", {})
-                policy.clear()
-                policy.update({
-                    "adx_lt_20": "BLOCK_ENTRY",
-                    "adx_20_to_lt_40": "REVERSED_EMA",
-                    "adx_gte_40": "NORMAL_EMA",
-                    "adx_unavailable": "REVERSED_EMA_FAILSAFE",
-                    "normal_ema9_gt_ema21": "BUY",
-                    "normal_ema9_lt_ema21": "SELL",
-                    "reversed_ema9_gt_ema21": "SELL",
-                    "reversed_ema9_lt_ema21": "BUY",
-                    "rsi_gte_70": "BUY_OVERRIDE_AFTER_ADX_GATE",
-                    "rsi_lte_30": "SELL_OVERRIDE_AFTER_ADX_GATE",
-                    "rsi_30_70": "PASS_ADX_EMA_DIRECTION",
-                })
-            original_append(payload)
-
-        append_policy._adx_block_reverse_normal_sanitizer = True
-        base._append = append_policy
-
-    original_snapshot = base._config_snapshot
-    if not getattr(original_snapshot, "_adx_block_reverse_normal_snapshot", False):
-        def snapshot_policy():
-            original_snapshot()
-            try:
-                data = json.loads(base.CONFIG_AUDIT.read_text(encoding="utf-8"))
-                data.update({
-                    "PAPER_ADX_ROLE": "ENTRY_GATE_PLUS_DIRECTION_REGIME",
-                    "PAPER_ADX_POLICY": "ADX<20_BLOCK__20<=ADX<40_REVERSE__ADX>=40_NORMAL",
-                    "PAPER_ADX_BLOCK_BELOW": PAPER_ADX_REVERSE_FROM,
-                    "PAPER_ADX_REVERSE_FROM": PAPER_ADX_REVERSE_FROM,
-                    "PAPER_ADX_HIGH_NORMAL_FROM": PAPER_ADX_HIGH_NORMAL_FROM,
-                    "PAPER_ENTRY_CAP": "DISABLED",
-                    "PAPER_PER_SYMBOL_COMPLETED_ENTRY_CAP": "DISABLED",
-                    "PAPER_LOSS_REENTRY_COOLDOWN": "DISABLED",
-                })
-                base.CONFIG_AUDIT.write_text(
-                    json.dumps(data, indent=2, default=str),
-                    encoding="utf-8",
-                )
-            except Exception as exc:
-                logger.warning("Could not augment paper config audit: %s", exc)
-
-        snapshot_policy._adx_block_reverse_normal_snapshot = True
-        base._config_snapshot = snapshot_policy
-
+    cfg.PAPER_ADX_MIN_STRENGTH = PAPER_ADX_MIN_STRENGTH
+    cfg.PAPER_BUY_MIN_ADX = PAPER_BUY_MIN_ADX
+    cfg.PAPER_SELL_MIN_ADX = PAPER_SELL_MIN_ADX
     logger.warning(
-        "PAPER ADX POLICY ACTIVE: ADX<20 BLOCK; 20<=ADX<40 REVERSE; ADX>=40 NORMAL"
+        "PAPER ADX STRENGTH POLICY ACTIVE: missing/<20 BLOCK; BUY requires >=25; "
+        "SELL requires >=20; EMA direction is never reversed"
     )
 
 
@@ -335,9 +218,8 @@ def main() -> None:
 
     install_paper_daily_risk_guard()
 
-    # Do NOT install paper_entry_guard: daily/per-symbol/cooldown frequency
-    # blockers remain intentionally disabled.  Daily-loss and aggregate-open-risk
-    # safety are handled independently by paper_daily_risk_guard.
+    # The clean base launcher enforces per-symbol count and post-loss cooldown;
+    # paper_daily_risk_guard independently enforces daily loss/open-risk safety.
     import paper_mae_mfe_launcher as strategy_stack
     strategy_stack.main()
 
