@@ -29,7 +29,8 @@ def config():
         PAPER_CANDLE_MAX_FRESH_SECONDS=90.0,
         PAPER_CANDLE_COMPLETION_GRACE_SECONDS=5.0,
         PAPER_CANDLE_VOLUME_LOOKBACK=20,
-        PAPER_CANDLE_MIN_VOLUME_RATIO=1.5,
+        PAPER_CANDLE_MIN_VOLUME_RATIO=1.2,
+        PAPER_CANDLE_REQUIRED_CONFIRMATIONS=2,
         PAPER_BUY_MIN_ADX=25.0,
         PAPER_SELL_MIN_ADX=20.0,
     )
@@ -63,6 +64,7 @@ class CandleEligibilityTests(unittest.TestCase):
             entry_frame("BUY"), trend_frame("BUY"), "BUY", config(),
             now="2026-08-13 10:03:12+05:30",
             talib_module=FakeTalib({"CDLENGULFING": 100}),
+            price_action_score=0.0,
         )
         self.assertTrue(result.accepted, result.to_dict())
 
@@ -71,6 +73,7 @@ class CandleEligibilityTests(unittest.TestCase):
             entry_frame("BUY"), trend_frame("BUY", adx=22.0), "BUY", config(),
             now="2026-08-13 10:03:12+05:30",
             talib_module=FakeTalib({"CDLENGULFING": 100}),
+            price_action_score=0.0,
         )
         self.assertFalse(result.accepted)
         self.assertIn("ADX_STRENGTH_BELOW_MINIMUM_OR_UNAVAILABLE", result.reasons)
@@ -80,6 +83,7 @@ class CandleEligibilityTests(unittest.TestCase):
             entry_frame("SELL"), trend_frame("SELL", adx=22.0), "SELL", config(),
             now="2026-08-13 10:03:12+05:30",
             talib_module=FakeTalib({"CDLENGULFING": -100}),
+            price_action_score=0.0,
         )
         self.assertTrue(result.accepted, result.to_dict())
 
@@ -91,6 +95,7 @@ class CandleEligibilityTests(unittest.TestCase):
                 "CDLENGULFING": 100,
                 "CDLSHOOTINGSTAR": -100,
             }),
+            price_action_score=10.0,
         )
         self.assertFalse(result.accepted)
         self.assertIn("CONFLICTING_TIER1_PATTERNS", result.reasons)
@@ -100,9 +105,44 @@ class CandleEligibilityTests(unittest.TestCase):
             entry_frame("BUY"), trend_frame("BUY"), "BUY", config(),
             now="2026-08-13 10:06:00+05:30",
             talib_module=FakeTalib({"CDLENGULFING": 100}),
+            price_action_score=0.0,
         )
         self.assertFalse(result.accepted)
         self.assertIn("CANDLE_NOT_COMPLETED_OR_FRESH", result.reasons)
+
+
+    def test_accepts_volume_plus_price_action_without_tier1_pattern(self):
+        result = evaluate_candle_eligibility(
+            entry_frame("BUY"), trend_frame("BUY"), "BUY", config(),
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib(),
+            price_action_score=10.0,
+        )
+        self.assertTrue(result.accepted, result.to_dict())
+        self.assertEqual(result.detail["confirmation_count"], 2)
+
+    def test_accepts_pattern_plus_price_action_without_volume_spike(self):
+        frame = entry_frame("BUY")
+        frame.loc[frame.index[-1], "volume"] = 110.0
+        result = evaluate_candle_eligibility(
+            frame, trend_frame("BUY"), "BUY", config(),
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib({"CDLENGULFING": 100}),
+            price_action_score=10.0,
+        )
+        self.assertTrue(result.accepted, result.to_dict())
+
+    def test_rejects_when_only_one_confirmation_is_present(self):
+        frame = entry_frame("BUY")
+        frame.loc[frame.index[-1], "volume"] = 110.0
+        result = evaluate_candle_eligibility(
+            frame, trend_frame("BUY"), "BUY", config(),
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib(),
+            price_action_score=10.0,
+        )
+        self.assertFalse(result.accepted)
+        self.assertIn("INSUFFICIENT_ENTRY_CONFIRMATIONS", result.reasons)
 
 
 if __name__ == "__main__":

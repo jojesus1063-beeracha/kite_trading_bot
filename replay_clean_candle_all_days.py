@@ -62,17 +62,18 @@ def configure_replay() -> None:
     cfg.PAPER_BUY_MIN_ADX = 25.0
     cfg.PAPER_SELL_MIN_ADX = 20.0
     cfg.PAPER_CANDLE_VOLUME_LOOKBACK = 20
-    cfg.PAPER_CANDLE_MIN_VOLUME_RATIO = 1.5
+    cfg.PAPER_CANDLE_MIN_VOLUME_RATIO = 1.2
+    cfg.PAPER_CANDLE_REQUIRED_CONFIRMATIONS = 2
     cfg.PAPER_CANDLE_MAX_FRESH_SECONDS = 90.0
     cfg.PAPER_CANDLE_COMPLETION_GRACE_SECONDS = 5.0
-    cfg.ENABLE_RVOL_FILTER = True
-    cfg.RVOL_THRESHOLD = max(float(getattr(cfg, "RVOL_THRESHOLD", 1.5)), 1.5)
+    cfg.ENABLE_RVOL_FILTER = False
+    cfg.RVOL_THRESHOLD = 1.2
     cfg.ENABLE_EMA200_WATCHLIST = True
     cfg.ENABLE_ENTRY_TIMING_FILTER = True
     cfg.ENABLE_CONFIRMATION_QUALITY_FILTER = True
     cfg.ENABLE_VOLUME_ACCELERATION_FILTER = True
     cfg.ENABLE_PRICE_ACTION = True
-    cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = False
+    cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
 
 
 def ist_timestamp(value, date_hint=None) -> pd.Timestamp | None:
@@ -200,14 +201,21 @@ def technical_decision(data, candidate):
     if direction is None:
         return False, "EMA_DIRECTION_UNAVAILABLE", {}, None
 
+    pa_score, pa_detail = evaluate_price_action(entry, direction, cfg)
     gate = evaluate_candle_eligibility(
         entry,
         trend.tail(1),
         direction,
         cfg,
         now=decision_time + pd.Timedelta(seconds=12),
+        price_action_score=pa_score,
     )
-    detail = {"candle_gate": gate.to_dict(), "ema9": e9, "ema21": e21}
+    detail = {
+        "candle_gate": gate.to_dict(),
+        "ema9": e9,
+        "ema21": e21,
+        "price_action": {"score": pa_score, **(pa_detail or {})},
+    }
     if not gate.accepted:
         return False, "CANDLE:" + ",".join(gate.reasons), detail, direction
 
@@ -229,11 +237,6 @@ def technical_decision(data, candidate):
     detail["entry_timing"] = {"classification": timing, **timing_detail}
     if timing == TIMING_INVALID:
         return False, "ENTRY_TIMING", detail, direction
-
-    pa_score, pa_detail = evaluate_price_action(entry, direction, cfg)
-    detail["price_action"] = {"score": pa_score, **(pa_detail or {})}
-    if float(pa_score or 0.0) <= 0.0:
-        return False, "PRICE_ACTION", detail, direction
 
     entry_price = float(current["close"])
     geometric_stop = entry_price * (0.9955 if direction == "BUY" else 1.0045)

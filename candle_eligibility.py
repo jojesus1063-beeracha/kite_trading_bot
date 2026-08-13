@@ -2,7 +2,8 @@
 
 This module never creates a direction.  It validates a direction selected by
 normal EMA9/EMA21 logic against a completed entry candle, TA-Lib patterns,
-volume, VWAP, 15-minute EMA200, and ADX strength.
+volume, price action, VWAP, 15-minute EMA200, and ADX strength. Pattern,
+volume and price action use a two-of-three confirmation policy.
 """
 from __future__ import annotations
 
@@ -149,6 +150,7 @@ def evaluate_candle_eligibility(
     *,
     now: Any = None,
     talib_module: Any = None,
+    price_action_score: float | None = None,
 ) -> CandleEligibility:
     """Return whether the latest fully completed entry candle is actionable."""
     reasons: list[str] = []
@@ -199,15 +201,14 @@ def evaluate_candle_eligibility(
     volume_sma = _number(prior_volume.rolling(volume_lookback).mean().iloc[-1])
     volume = _number(latest.get("volume"))
     volume_ratio = None if not volume_sma or volume is None else volume / volume_sma
-    min_ratio = float(getattr(cfg_obj, "PAPER_CANDLE_MIN_VOLUME_RATIO", 1.5))
+    min_ratio = float(getattr(cfg_obj, "PAPER_CANDLE_MIN_VOLUME_RATIO", 1.2))
     detail.update({
         "volume": volume,
         "prior_volume_sma": volume_sma,
         "volume_ratio": volume_ratio,
         "minimum_volume_ratio": min_ratio,
     })
-    if volume_ratio is None or volume_ratio <= min_ratio:
-        reasons.append("VOLUME_SPIKE_NOT_CONFIRMED")
+    volume_confirmed = volume_ratio is not None and volume_ratio > min_ratio
 
     entry_close = _number(latest.get("close"))
     trend_close = _number(trend.get("close"))
@@ -229,6 +230,7 @@ def evaluate_candle_eligibility(
     ):
         reasons.append("EMA200_DIRECTION_NOT_ACCEPTED_OR_UNAVAILABLE")
 
+    pattern_confirmed = False
     if talib_module is None:
         try:
             import talib as talib_module  # type: ignore[no-redef]
@@ -244,12 +246,45 @@ def evaluate_candle_eligibility(
             bearish = patterns["tier1_bearish"]
             if bullish and bearish:
                 reasons.append("CONFLICTING_TIER1_PATTERNS")
-            elif direction == "BUY" and not bullish:
-                reasons.append("NO_DIRECTION_MATCHING_TIER1_PATTERN")
-            elif direction == "SELL" and not bearish:
-                reasons.append("NO_DIRECTION_MATCHING_TIER1_PATTERN")
+            else:
+                pattern_confirmed = bool(
+                    bullish if direction == "BUY" else bearish
+                )
         except Exception as exc:
             detail["pattern_error"] = str(exc)
             reasons.append("PATTERN_ENGINE_FAILED")
+
+    if price_action_score is None:
+        try:
+            from price_action import evaluate_price_action
+            price_action_score, price_action_detail = evaluate_price_action(
+                df_entry, direction, cfg_obj
+            )
+            detail["price_action"] = price_action_detail
+        except Exception as exc:
+            detail["price_action_error"] = str(exc)
+            reasons.append("PRICE_ACTION_ENGINE_FAILED")
+
+    price_action_value = _number(price_action_score)
+    price_action_confirmed = (
+        price_action_value is not None and price_action_value > 0.0
+    )
+    confirmations = {
+        "tier1_pattern": pattern_confirmed,
+        "volume_above_prior_sma": volume_confirmed,
+        "positive_price_action": price_action_confirmed,
+    }
+    confirmation_count = sum(bool(value) for value in confirmations.values())
+    required_confirmations = int(
+        getattr(cfg_obj, "PAPER_CANDLE_REQUIRED_CONFIRMATIONS", 2)
+    )
+    detail.update({
+        "price_action_score": price_action_value,
+        "confirmations": confirmations,
+        "confirmation_count": confirmation_count,
+        "required_confirmations": required_confirmations,
+    })
+    if confirmation_count < required_confirmations:
+        reasons.append("INSUFFICIENT_ENTRY_CONFIRMATIONS")
 
     return CandleEligibility(not reasons, reasons, detail)

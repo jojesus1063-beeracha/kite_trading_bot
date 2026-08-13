@@ -18,6 +18,7 @@ import pandas as pd
 import config as cfg
 import strategy
 from candle_eligibility import evaluate_candle_eligibility
+from price_action import evaluate_price_action
 
 logger = logging.getLogger("paper_contrarian_launcher")
 EMA_FAST = 9
@@ -313,18 +314,19 @@ def install_two_indicator_patch():
     cfg.PAPER_ADX_MIN_STRENGTH = float(getattr(cfg, "PAPER_ADX_MIN_STRENGTH", 20.0))
     cfg.PAPER_BUY_MIN_ADX = float(getattr(cfg, "PAPER_BUY_MIN_ADX", 25.0))
     cfg.PAPER_SELL_MIN_ADX = float(getattr(cfg, "PAPER_SELL_MIN_ADX", 20.0))
-    cfg.PAPER_CANDLE_MIN_VOLUME_RATIO = float(getattr(cfg, "PAPER_CANDLE_MIN_VOLUME_RATIO", 1.5))
+    cfg.PAPER_CANDLE_MIN_VOLUME_RATIO = 1.2
+    cfg.PAPER_CANDLE_REQUIRED_CONFIRMATIONS = 2
     cfg.PAPER_CANDLE_MAX_FRESH_SECONDS = float(getattr(cfg, "PAPER_CANDLE_MAX_FRESH_SECONDS", 90.0))
     cfg.PAPER_CANDLE_COMPLETION_GRACE_SECONDS = float(getattr(cfg, "PAPER_CANDLE_COMPLETION_GRACE_SECONDS", 5.0))
-    cfg.ENABLE_RVOL_FILTER = True
-    cfg.RVOL_THRESHOLD = max(float(getattr(cfg, "RVOL_THRESHOLD", 1.5)), 1.5)
+    cfg.ENABLE_RVOL_FILTER = False
+    cfg.RVOL_THRESHOLD = 1.2
     cfg.ENABLE_200_EMA_FILTER = True
     cfg.ENABLE_EMA200_WATCHLIST = True
     cfg.ENABLE_ENTRY_TIMING_FILTER = True
     cfg.ENABLE_CONFIRMATION_QUALITY_FILTER = True
     cfg.ENABLE_VOLUME_ACCELERATION_FILTER = True
     cfg.ENABLE_PRICE_ACTION = True
-    cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = False
+    cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
     _config_snapshot()
 
     def evaluate(symbol, df_15m, df_5m, df_index_15m, cfg_obj):
@@ -445,8 +447,20 @@ def install_two_indicator_patch():
             _append(event)
             return None
 
+        price_action_score, price_action_detail = evaluate_price_action(
+            df_5m, final, cfg_obj
+        )
+        event["price_action_confirmation"] = {
+            "score": price_action_score,
+            "detail": price_action_detail,
+            "standalone_hard_gate": False,
+        }
         candle_result = evaluate_candle_eligibility(
-            df_5m, completed_df_15m, final, cfg_obj
+            df_5m,
+            completed_df_15m,
+            final,
+            cfg_obj,
+            price_action_score=price_action_score,
         )
         event["candle_eligibility"] = candle_result.to_dict()
         if not candle_result.accepted:
@@ -489,7 +503,7 @@ def install_two_indicator_patch():
                 "NORMAL_EMA9_EMA21_DIRECTION",
                 "ADX_STRENGTH_PASS",
                 "RSI_OBSERVATIONAL",
-                "TALIB_CANDLE_CONFLUENCE_PASS",
+                "TWO_OF_THREE_CONFIRMATIONS_PASS",
             ],
             "legacy_filters": "ENFORCED",
         })
@@ -502,7 +516,7 @@ def install_two_indicator_patch():
             f"PAPER CLEAN CANDLE | ADX={adx:.2f} strength-only | "
             f"EMA9={e9:.4f} EMA21={e21:.4f} -> {final} | "
             f"RSI({RSI_PERIOD})={'NA' if rsi is None else f'{rsi:.2f}'} observational | "
-            f"TA-Lib pattern + volume + VWAP + EMA200 passed | core gates enforced | audit={ENTRY_AUDIT}"
+            f"2-of-3 pattern/volume/price-action + VWAP + EMA200 passed | core gates enforced | audit={ENTRY_AUDIT}"
         )
         return strategy.Signal(
             symbol=symbol,
@@ -518,7 +532,7 @@ def install_two_indicator_patch():
     strategy.evaluate = evaluate
     logger.warning(
         "PAPER CLEAN ENTRY ACTIVE: normal EMA direction; ADX strength only (minimum %.0f); "
-        "RSI observational; TA-Lib candle confluence fail-closed",
+        "RSI observational; 2-of-3 pattern/volume/price-action confirmation",
         ADX_MIN_STRENGTH,
     )
     logger.warning(
