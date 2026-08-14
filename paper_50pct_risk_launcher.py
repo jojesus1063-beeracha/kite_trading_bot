@@ -8,7 +8,7 @@ Current PAPER policy:
 - risk per trade: 0.20%
 - ADX is strength-only and never reverses EMA9/EMA21 direction
 - ADX <20 or unavailable: BLOCK entry
-- maximum 5 completed entries per day
+- maximum 20 completed entries per day
 - maximum 2 simultaneous positions
 - maximum 2 completed entries per symbol with a 30-minute post-loss cooldown
 - aggregate realized-loss + open-risk + proposed-risk guard remains binding
@@ -36,8 +36,8 @@ import config as cfg
 logger = logging.getLogger("paper_50pct_risk_launcher")
 
 PAPER_RISK_PER_TRADE_PCT = 0.20
-PAPER_MAX_ENTRIES_PER_DAY = 5
-PAPER_CORE_MAX_TRADES_PER_DAY = 5
+PAPER_MAX_ENTRIES_PER_DAY = 20
+PAPER_CORE_MAX_TRADES_PER_DAY = 20
 PAPER_MAX_OPEN_POSITIONS = 2
 PAPER_MAX_DAILY_LOSS_PCT = 5.0
 PAPER_EMERGENCY_STOP_PCT = 0.75
