@@ -64,11 +64,17 @@ def configure_replay() -> None:
     cfg.PAPER_CANDLE_VOLUME_LOOKBACK = 20
     cfg.PAPER_CANDLE_MIN_VOLUME_RATIO = 1.2
     cfg.PAPER_CANDLE_REQUIRED_CONFIRMATIONS = 2
+    cfg.PAPER_REQUIRE_EMA200_ALIGNMENT = False
+    cfg.PAPER_ENABLE_COST_AWARE_GATE = True
+    cfg.PAPER_COST_MOVE_LOOKBACK = 14
+    cfg.PAPER_EXPECTED_MOVE_ATR_MULTIPLIER = 1.0
+    cfg.PAPER_MIN_EXPECTED_GROSS_TO_COST_MULTIPLE = 2.0
     cfg.PAPER_CANDLE_MAX_FRESH_SECONDS = 90.0
     cfg.PAPER_CANDLE_COMPLETION_GRACE_SECONDS = 5.0
     cfg.ENABLE_RVOL_FILTER = False
     cfg.RVOL_THRESHOLD = 1.2
-    cfg.ENABLE_EMA200_WATCHLIST = True
+    cfg.ENABLE_200_EMA_FILTER = False
+    cfg.ENABLE_EMA200_WATCHLIST = False
     cfg.ENABLE_ENTRY_TIMING_FILTER = True
     cfg.ENABLE_CONFIRMATION_QUALITY_FILTER = True
     cfg.ENABLE_VOLUME_ACCELERATION_FILTER = True
@@ -221,7 +227,10 @@ def technical_decision(data, candidate):
 
     eligibility, eligibility_detail = classify_direction_eligibility(trend, cfg)
     detail["ema200_watchlist"] = {"eligibility": eligibility, **eligibility_detail}
-    if eligibility != direction:
+    if (
+        bool(getattr(cfg, "PAPER_REQUIRE_EMA200_ALIGNMENT", True))
+        and eligibility != direction
+    ):
         return False, "EMA200_WATCHLIST_DIRECTION", detail, direction
 
     rvol_ok, rvol_value, rvol_detail = passes_rvol_threshold(entry, cfg)

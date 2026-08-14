@@ -316,12 +316,17 @@ def install_two_indicator_patch():
     cfg.PAPER_SELL_MIN_ADX = float(getattr(cfg, "PAPER_SELL_MIN_ADX", 20.0))
     cfg.PAPER_CANDLE_MIN_VOLUME_RATIO = 1.2
     cfg.PAPER_CANDLE_REQUIRED_CONFIRMATIONS = 2
+    cfg.PAPER_REQUIRE_EMA200_ALIGNMENT = False
+    cfg.PAPER_ENABLE_COST_AWARE_GATE = True
+    cfg.PAPER_COST_MOVE_LOOKBACK = 14
+    cfg.PAPER_EXPECTED_MOVE_ATR_MULTIPLIER = 1.0
+    cfg.PAPER_MIN_EXPECTED_GROSS_TO_COST_MULTIPLE = 2.0
     cfg.PAPER_CANDLE_MAX_FRESH_SECONDS = float(getattr(cfg, "PAPER_CANDLE_MAX_FRESH_SECONDS", 90.0))
     cfg.PAPER_CANDLE_COMPLETION_GRACE_SECONDS = float(getattr(cfg, "PAPER_CANDLE_COMPLETION_GRACE_SECONDS", 5.0))
     cfg.ENABLE_RVOL_FILTER = False
     cfg.RVOL_THRESHOLD = 1.2
-    cfg.ENABLE_200_EMA_FILTER = True
-    cfg.ENABLE_EMA200_WATCHLIST = True
+    cfg.ENABLE_200_EMA_FILTER = False
+    cfg.ENABLE_EMA200_WATCHLIST = False
     cfg.ENABLE_ENTRY_TIMING_FILTER = True
     cfg.ENABLE_CONFIRMATION_QUALITY_FILTER = True
     cfg.ENABLE_VOLUME_ACCELERATION_FILTER = True
@@ -516,7 +521,7 @@ def install_two_indicator_patch():
             f"PAPER CLEAN CANDLE | ADX={adx:.2f} strength-only | "
             f"EMA9={e9:.4f} EMA21={e21:.4f} -> {final} | "
             f"RSI({RSI_PERIOD})={'NA' if rsi is None else f'{rsi:.2f}'} observational | "
-            f"2-of-3 pattern/volume/price-action + VWAP + EMA200 passed | core gates enforced | audit={ENTRY_AUDIT}"
+            f"2-of-3 confirmation + VWAP + cost-aware movement passed; EMA200 observational | core gates enforced | audit={ENTRY_AUDIT}"
         )
         return strategy.Signal(
             symbol=symbol,
@@ -532,7 +537,7 @@ def install_two_indicator_patch():
     strategy.evaluate = evaluate
     logger.warning(
         "PAPER CLEAN ENTRY ACTIVE: normal EMA direction; ADX strength only (minimum %.0f); "
-        "RSI observational; 2-of-3 pattern/volume/price-action confirmation",
+        "RSI/EMA200 observational; 2-of-3 confirmation; cost-aware movement gate",
         ADX_MIN_STRENGTH,
     )
     logger.warning(

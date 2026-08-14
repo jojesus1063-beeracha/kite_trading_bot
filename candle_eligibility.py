@@ -12,6 +12,8 @@ from typing import Any
 
 import pandas as pd
 
+from costs import estimate_trade_cost
+
 
 @dataclass
 class CandleEligibility:
@@ -142,6 +144,94 @@ def _scan_patterns(df: pd.DataFrame, talib_module: Any) -> dict[str, Any]:
     }
 
 
+def _cost_aware_movement(
+    df_entry: pd.DataFrame,
+    direction: str,
+    cfg_obj: Any,
+) -> tuple[bool, dict[str, Any]]:
+    """Check whether one recent true range can cover costs with a buffer."""
+    lookback = int(getattr(cfg_obj, "PAPER_COST_MOVE_LOOKBACK", 14))
+    if len(df_entry) < lookback + 1:
+        return False, {
+            "reason": "insufficient movement history",
+            "rows": len(df_entry),
+            "minimum_rows": lookback + 1,
+        }
+
+    close = pd.to_numeric(df_entry["close"], errors="coerce")
+    high = pd.to_numeric(df_entry["high"], errors="coerce")
+    low = pd.to_numeric(df_entry["low"], errors="coerce")
+    previous_close = close.shift(1)
+    true_range = pd.concat([
+        high - low,
+        (high - previous_close).abs(),
+        (low - previous_close).abs(),
+    ], axis=1).max(axis=1)
+    recent_true_range = _number(true_range.tail(lookback).mean())
+    entry = _number(close.iloc[-1])
+    if entry is None or entry <= 0 or recent_true_range is None or recent_true_range <= 0:
+        return False, {
+            "reason": "invalid entry or true range",
+            "entry": entry,
+            "recent_true_range": recent_true_range,
+        }
+
+    capital = float(getattr(cfg_obj, "CAPITAL", 5000.0) or 5000.0)
+    risk_pct = float(getattr(cfg_obj, "RISK_PER_TRADE_PCT", 0.20))
+    stop_pct = float(getattr(cfg_obj, "STOP_LOSS_PERCENT", 0.45))
+    sizing_risk_per_share = entry * stop_pct / 100.0
+    risk_rupees = capital * risk_pct / 100.0
+    quantity = int(risk_rupees / sizing_risk_per_share) if sizing_risk_per_share > 0 else 0
+    if quantity <= 0:
+        return False, {
+            "reason": "no executable quantity",
+            "entry": entry,
+            "capital": capital,
+            "risk_rupees": risk_rupees,
+            "sizing_risk_per_share": sizing_risk_per_share,
+            "quantity": quantity,
+        }
+
+    atr_multiplier = float(
+        getattr(cfg_obj, "PAPER_EXPECTED_MOVE_ATR_MULTIPLIER", 1.0)
+    )
+    expected_move_per_share = recent_true_range * atr_multiplier
+    expected_exit = (
+        entry + expected_move_per_share
+        if direction == "BUY"
+        else max(0.01, entry - expected_move_per_share)
+    )
+    buy_value = quantity * (entry if direction == "BUY" else expected_exit)
+    sell_value = quantity * (expected_exit if direction == "BUY" else entry)
+    estimated_cost = estimate_trade_cost(buy_value, sell_value)
+    expected_gross = expected_move_per_share * quantity
+    required_multiple = float(
+        getattr(cfg_obj, "PAPER_MIN_EXPECTED_GROSS_TO_COST_MULTIPLE", 2.0)
+    )
+    required_gross = estimated_cost * required_multiple
+    break_even_move_pct = estimated_cost / (quantity * entry) * 100.0
+    expected_move_pct = expected_move_per_share / entry * 100.0
+    accepted = expected_gross >= required_gross
+
+    return accepted, {
+        "entry": entry,
+        "quantity": quantity,
+        "capital": capital,
+        "risk_per_trade_pct": risk_pct,
+        "stop_loss_percent_for_sizing": stop_pct,
+        "recent_true_range": recent_true_range,
+        "atr_multiplier": atr_multiplier,
+        "expected_move_per_share": expected_move_per_share,
+        "expected_move_pct": expected_move_pct,
+        "estimated_round_trip_cost": estimated_cost,
+        "break_even_move_pct": break_even_move_pct,
+        "expected_gross_pnl": expected_gross,
+        "required_gross_to_cost_multiple": required_multiple,
+        "required_gross_pnl": required_gross,
+        "accepted": accepted,
+    }
+
+
 def evaluate_candle_eligibility(
     df_entry: pd.DataFrame,
     df_15m: pd.DataFrame,
@@ -216,19 +306,42 @@ def evaluate_candle_eligibility(
     if vwap is None:
         vwap = _last_value(trend, ("vwap", "VWAP"))
     ema200 = _last_value(trend, ("ema200", "ema_200", "EMA200", "EMA_200"))
-    detail.update({"entry_close": entry_close, "trend_close": trend_close, "vwap": vwap, "ema200": ema200})
+    ema200_aligned = (
+        trend_close is not None
+        and ema200 is not None
+        and (
+            (direction == "BUY" and trend_close > ema200)
+            or (direction == "SELL" and trend_close < ema200)
+        )
+    )
+    require_ema200 = bool(
+        getattr(cfg_obj, "PAPER_REQUIRE_EMA200_ALIGNMENT", True)
+    )
+    detail.update({
+        "entry_close": entry_close,
+        "trend_close": trend_close,
+        "vwap": vwap,
+        "ema200": ema200,
+        "ema200_available": trend_close is not None and ema200 is not None,
+        "ema200_aligned": ema200_aligned,
+        "ema200_alignment_required": require_ema200,
+    })
     if entry_close is None or vwap is None or (
         direction == "BUY" and entry_close <= vwap
     ) or (
         direction == "SELL" and entry_close >= vwap
     ):
         reasons.append("VWAP_DIRECTION_NOT_ACCEPTED_OR_UNAVAILABLE")
-    if trend_close is None or ema200 is None or (
-        direction == "BUY" and trend_close <= ema200
-    ) or (
-        direction == "SELL" and trend_close >= ema200
-    ):
+    if require_ema200 and not ema200_aligned:
         reasons.append("EMA200_DIRECTION_NOT_ACCEPTED_OR_UNAVAILABLE")
+
+    if bool(getattr(cfg_obj, "PAPER_ENABLE_COST_AWARE_GATE", False)):
+        movement_ok, movement_detail = _cost_aware_movement(
+            df_entry, direction, cfg_obj
+        )
+        detail["cost_aware_movement"] = movement_detail
+        if not movement_ok:
+            reasons.append("EXPECTED_MOVE_DOES_NOT_COVER_COSTS")
 
     pattern_confirmed = False
     if talib_module is None:

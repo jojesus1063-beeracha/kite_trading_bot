@@ -31,6 +31,14 @@ def config():
         PAPER_CANDLE_VOLUME_LOOKBACK=20,
         PAPER_CANDLE_MIN_VOLUME_RATIO=1.2,
         PAPER_CANDLE_REQUIRED_CONFIRMATIONS=2,
+        PAPER_REQUIRE_EMA200_ALIGNMENT=False,
+        PAPER_ENABLE_COST_AWARE_GATE=True,
+        PAPER_COST_MOVE_LOOKBACK=14,
+        PAPER_EXPECTED_MOVE_ATR_MULTIPLIER=1.0,
+        PAPER_MIN_EXPECTED_GROSS_TO_COST_MULTIPLE=2.0,
+        CAPITAL=5000.0,
+        RISK_PER_TRADE_PCT=0.20,
+        STOP_LOSS_PERCENT=0.45,
         PAPER_BUY_MIN_ADX=25.0,
         PAPER_SELL_MIN_ADX=20.0,
     )
@@ -143,6 +151,35 @@ class CandleEligibilityTests(unittest.TestCase):
         )
         self.assertFalse(result.accepted)
         self.assertIn("INSUFFICIENT_ENTRY_CONFIRMATIONS", result.reasons)
+
+
+    def test_ema200_misalignment_is_observational(self):
+        trend = pd.DataFrame([{"close": 80.0, "ema200": 90.0, "adx": 30.0}])
+        result = evaluate_candle_eligibility(
+            entry_frame("BUY"), trend, "BUY", config(),
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib({"CDLENGULFING": 100}),
+            price_action_score=0.0,
+        )
+        self.assertTrue(result.accepted, result.to_dict())
+        self.assertFalse(result.detail["ema200_aligned"])
+        self.assertFalse(result.detail["ema200_alignment_required"])
+
+    def test_cost_gate_rejects_tiny_expected_movement(self):
+        frame = entry_frame("BUY")
+        frame["open"] = 100.0
+        frame["high"] = 100.001
+        frame["low"] = 99.999
+        frame["close"] = 100.0
+        frame["vwap"] = 95.0
+        result = evaluate_candle_eligibility(
+            frame, trend_frame("BUY"), "BUY", config(),
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib({"CDLENGULFING": 100}),
+            price_action_score=0.0,
+        )
+        self.assertFalse(result.accepted)
+        self.assertIn("EXPECTED_MOVE_DOES_NOT_COVER_COSTS", result.reasons)
 
 
 if __name__ == "__main__":
