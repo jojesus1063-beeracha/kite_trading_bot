@@ -24,7 +24,7 @@ import replay_clean_candle_all_days as replay
 from auth import get_kite_client
 
 
-def number(value):
+def _number(value):
     try:
         result = float(value)
     except (TypeError, ValueError):
@@ -181,8 +181,8 @@ def main() -> None:
             continue
 
         direction, ema9, ema21 = replay.normal_ema_direction(entry)
-        trend_close = number(trend.iloc[-1].get("close"))
-        ema200 = number(trend.iloc[-1].get("ema200"))
+        trend_close = _number(trend.iloc[-1].get("close"))
+        ema200 = _number(trend.iloc[-1].get("ema200"))
         if direction is None or trend_close is None or ema200 is None:
             unavailable.append({
                 "symbol": candidate.symbol,
