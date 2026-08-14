@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -276,9 +277,11 @@ def main() -> None:
             entry = fetch_frame(
                 kite, token, "3minute", fetch_start.to_pydatetime(), fetch_end.to_pydatetime()
             )
+            time.sleep(0.35)
             trend = fetch_frame(
                 kite, token, "15minute", fetch_start.to_pydatetime(), fetch_end.to_pydatetime()
             )
+            time.sleep(0.35)
             trend, entry = add_indicators(trend, entry, cfg)
             trend["ema200"] = ema(trend, 200)
             frames[(exchange, symbol)] = (entry, trend)
