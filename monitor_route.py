@@ -61,7 +61,7 @@ MONITOR_PAGE = """
             <div class="metric"><div class="label">Margin Utilization</div><div class="value">{{ "%.1f"|format(portfolio.get('margin_utilization_pct', 0) or 0) }}%</div></div>
             <div class="metric"><div class="label">Largest Winner</div><div class="value green">{{ portfolio.get('largest_winning_position') or '-' }}</div></div>
             <div class="metric"><div class="label">Largest Loser</div><div class="value red">{{ portfolio.get('largest_losing_position') or '-' }}</div></div>
-            <div class="metric"><div class="label">Portfolio Reward:Risk</div><div class="value">{{ "%.2f"|format(portfolio.get('portfolio_reward_risk', 0) or 0) }}</div></div>
+            <div class="metric"><div class="label">Portfolio Live Reward:Risk</div><div class="value">{{ "%.2f"|format(portfolio.get('portfolio_reward_risk', 0) or 0) }}</div></div>
         </div>
     </div>
 
@@ -72,8 +72,8 @@ MONITOR_PAGE = """
             <tr>
                 <th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th>
                 <th>Time in Trade</th><th>Gross P&L</th><th>Net P&L</th><th>Profit %</th>
-                <th>MFE %</th><th>MAE %</th><th>Stop</th><th>Target</th>
-                <th>Dist. Stop %</th><th>Dist. Target %</th><th>R:R</th><th>Status</th>
+                <th>MFE %</th><th>MAE %</th><th>Hard Stop</th><th>Strategy Stop</th><th>Active Target</th>
+                <th>Dist. Stop %</th><th>Dist. Target %</th><th>Entry R:R</th><th>Live R:R</th><th>Status</th>
             </tr>
             {% for p in positions %}
             <tr>
@@ -89,10 +89,12 @@ MONITOR_PAGE = """
                 <td class="green">{{ "%.2f"|format(p.get('mfe_pct', 0) or 0) }}%</td>
                 <td class="red">{{ "%.2f"|format(p.get('mae_pct', 0) or 0) }}%</td>
                 <td>{{ "%.2f"|format(p.get('stop_price', 0) or 0) }}</td>
+                <td>{{ "%.2f"|format(p.get('strategy_stop_price', 0) or 0) if p.get('strategy_stop_price') is not none else '-' }}</td>
                 <td>{{ "%.2f"|format(p.get('target_price', 0) or 0) }}</td>
                 <td>{{ "%.2f"|format(p.get('distance_to_stop_pct', 0) or 0) }}%</td>
                 <td>{{ "%.2f"|format(p.get('distance_to_target_pct', 0) or 0) }}%</td>
-                <td>{{ "%.2f"|format(p.get('reward_risk', 0) or 0) if p.get('reward_risk') is not none else '-' }}</td>
+                <td>{{ "%.2f"|format(p.get('entry_reward_risk', 0) or 0) if p.get('entry_reward_risk') is not none else '-' }}</td>
+                <td>{{ "%.2f"|format(p.get('remaining_reward_risk', 0) or 0) if p.get('remaining_reward_risk') is not none else '-' }}</td>
                 <td>
                     {% set st = p.get('status', 'ACTIVE') %}
                     <span class="badge {{ 'badge-stale' if 'STALE' in st else ('badge-hit' if 'HIT' in st else ('badge-near' if 'NEAR' in st else 'badge-active')) }}">{{ st }}</span>

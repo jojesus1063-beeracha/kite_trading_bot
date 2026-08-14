@@ -49,21 +49,42 @@ def compute_distances(direction, current, stop, target):
 
 
 def compute_reward_risk(direction, entry, current, stop, target):
-    """Reward/risk remaining FROM THE CURRENT PRICE (not from entry) --
-    this is 'what's left to gain vs. what's left to lose from here',
-    which is what a live monitor should show, distinct from the
-    original entry-time reward:risk ratio."""
+    """Return both entry-plan and live remaining reward:risk.
+
+    Keeping these values separate prevents the live monitor from presenting a
+    ratio that rises as a losing position approaches its stop as though it were
+    the trade's original reward:risk.
+    """
     if direction == "BUY":
+        entry_reward = target - entry
+        entry_risk = entry - stop
         reward_remaining = target - current
         risk_remaining = current - stop
     else:
+        entry_reward = entry - target
+        entry_risk = stop - entry
         reward_remaining = current - target
         risk_remaining = stop - current
 
-    reward_risk = (reward_remaining / risk_remaining) if risk_remaining > 0 else None
+    entry_reward_risk = (
+        entry_reward / entry_risk
+        if entry_reward >= 0 and entry_risk > 0
+        else None
+    )
+    remaining_reward_risk = (
+        reward_remaining / risk_remaining
+        if reward_remaining >= 0 and risk_remaining > 0
+        else None
+    )
     return {
+        "entry_reward": entry_reward,
+        "entry_risk": entry_risk,
+        "entry_reward_risk": entry_reward_risk,
         "reward_remaining": reward_remaining, "risk_remaining": risk_remaining,
-        "reward_risk": reward_risk,
+        "remaining_reward_risk": remaining_reward_risk,
+        # Backward-compatible alias for downstream consumers that already use
+        # reward_risk as the live remaining ratio.
+        "reward_risk": remaining_reward_risk,
     }
 
 
@@ -82,8 +103,13 @@ def update_mfe_mae(position, current_profit_pct):
     fields, purely informational, never read by any exit-decision
     code. Returns the updated (mfe_pct, mae_pct).
     """
-    mfe = position.get("mfe_pct", current_profit_pct)
-    mae = position.get("mae_pct", current_profit_pct)
+    # Excursion is measured relative to entry.  Before price has moved in a
+    # favourable/adverse direction the corresponding excursion is zero, not a
+    # negative MFE or positive MAE.
+    # Clamp legacy persisted values as well, so a position first observed while
+    # losing is repaired from a negative MFE on the next analytics update.
+    mfe = max(float(position.get("mfe_pct", 0.0) or 0.0), 0.0)
+    mae = min(float(position.get("mae_pct", 0.0) or 0.0), 0.0)
     mfe = max(mfe, current_profit_pct)
     mae = min(mae, current_profit_pct)
     position["mfe_pct"] = mfe
@@ -271,6 +297,13 @@ def build_position_analytics(symbol, position, quotes, previous_status_entry=Non
         "gross_unrealized_pnl": gross_pnl, "net_unrealized_pnl": net_pnl, "profit_pct": profit_pct,
         "entry_time": entry_time_str, "time_in_trade_minutes": time_in_trade_minutes,
         "stop_price": stop, "target_price": target,
+        "strategy_stop_price": position.get("paper_strategy_stop"),
+        "stop_type": (
+            "PAPER_EMERGENCY"
+            if position.get("paper_emergency_stop_active")
+            else "STRATEGY"
+        ),
+        "hybrid_exit_stage": position.get("hybrid_exit_stage"),
         "session_high_since_entry": session_high, "session_low_since_entry": session_low,
         "mfe_pct": mfe_pct, "mae_pct": mae_pct,
         **distances, **rr,

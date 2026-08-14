@@ -19,7 +19,8 @@ SAMPLE_POSITION = {
     'current_price': 1307.8, 'time_in_trade_minutes': 878.3,
     'gross_unrealized_pnl': 65.39, 'net_unrealized_pnl': 58.48, 'profit_pct': 1.01,
     'mfe_pct': 1.01, 'mae_pct': 1.01, 'stop_price': 1268.57, 'target_price': 1347.03,
-    'distance_to_stop_pct': 3.0, 'distance_to_target_pct': 3.0, 'reward_risk': 1.0,
+    'distance_to_stop_pct': 3.0, 'distance_to_target_pct': 3.0,
+    'strategy_stop_price': 1288.89, 'entry_reward_risk': 2.0, 'remaining_reward_risk': 1.0,
     'status': 'ACTIVE',
 }
 SAMPLE_PORTFOLIO = {'total_open_positions': 1, 'buy_positions': 1, 'sell_positions': 0,
@@ -46,6 +47,8 @@ with app.app_context():
     check("Normal render succeeds with no Jinja errors", len(html) > 0)
     check("Renders the real position's symbol", "RELIANCE" in html)
     check("Renders the ACTIVE status badge", "ACTIVE" in html)
+    check("Labels entry and live reward:risk separately", "Entry R:R" in html and "Live R:R" in html)
+    check("Labels the executable and strategy stops separately", "Hard Stop" in html and "Strategy Stop" in html)
 
     # --- Empty portfolio ---
     html_empty = render_template_string(
