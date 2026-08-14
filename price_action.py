@@ -14,6 +14,7 @@ import logging
 import pandas as pd
 
 from indicators import atr as _atr
+from breakout_validator import validate_breakout
 
 logger = logging.getLogger("price_action")
 
@@ -441,11 +442,37 @@ def get_price_action_score(df, direction, cfg):
         detail["sr_blocked"] = blocked_sr
 
     if getattr(cfg, "USE_BREAKOUT_CONFIRMATION", True):
-        level = resistance if direction == "BUY" else support
-        breakout_confirmed, _ = detect_breakout(df, direction, level)
+        breakout_result = validate_breakout(
+            df,
+            direction,
+            lookback=int(getattr(cfg, "BREAKOUT_LOOKBACK", 20)),
+            volume_period=int(getattr(cfg, "BREAKOUT_VOLUME_PERIOD", 20)),
+            minimum_volume_ratio=float(
+                getattr(cfg, "BREAKOUT_MIN_VOLUME_RATIO", 1.5)
+            ),
+            atr_period=int(getattr(cfg, "BREAKOUT_ATR_PERIOD", 14)),
+            minimum_atr_multiplier=float(
+                getattr(cfg, "BREAKOUT_MIN_ATR_MULTIPLIER", 1.2)
+            ),
+            clv_threshold=float(getattr(cfg, "BREAKOUT_CLV_THRESHOLD", 0.60)),
+        )
+        breakout_confirmed = breakout_result.passed
         if breakout_confirmed:
             score += 10
         detail["breakout"] = breakout_confirmed
+        detail["breakout_validation"] = breakout_result.to_dict()
+        logger.info(
+            "BREAKOUT VALIDATION | direction=%s passed=%s "
+            "n_high=%s n_low=%s volume_ratio=%s atr_multiplier=%s clv=%s reasons=%s",
+            direction,
+            breakout_result.passed,
+            breakout_result.metrics.get("n_period_high"),
+            breakout_result.metrics.get("n_period_low"),
+            breakout_result.metrics.get("volume_ratio"),
+            breakout_result.metrics.get("atr_multiplier"),
+            breakout_result.metrics.get("clv"),
+            breakout_result.reasons,
+        )
 
     if getattr(cfg, "USE_PULLBACK_ENTRY", True):
         pullback_confirmed, _ = detect_pullback_entry(df, direction)

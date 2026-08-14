@@ -130,6 +130,12 @@ USE_REJECTION_CANDLES = True
 USE_RANGE_FILTER = True
 USE_BOS = True
 USE_CHOCH = True
+BREAKOUT_LOOKBACK = 20
+BREAKOUT_VOLUME_PERIOD = 20
+BREAKOUT_MIN_VOLUME_RATIO = 1.5
+BREAKOUT_ATR_PERIOD = 14
+BREAKOUT_MIN_ATR_MULTIPLIER = 1.2
+BREAKOUT_CLV_THRESHOLD = 0.60
 SUPPORT_RESISTANCE_LOOKBACK = 30
 MIN_DISTANCE_TO_SR_PERCENT = 0.5
 
@@ -255,6 +261,12 @@ if os.path.exists(_USER_CONFIG_PATH):
     USE_RANGE_FILTER = _overrides.get("use_range_filter", USE_RANGE_FILTER)
     USE_BOS = _overrides.get("use_bos", USE_BOS)
     USE_CHOCH = _overrides.get("use_choch", USE_CHOCH)
+    BREAKOUT_LOOKBACK = int(_overrides.get("breakout_lookback", BREAKOUT_LOOKBACK))
+    BREAKOUT_VOLUME_PERIOD = int(_overrides.get("breakout_volume_period", BREAKOUT_VOLUME_PERIOD))
+    BREAKOUT_MIN_VOLUME_RATIO = float(_overrides.get("breakout_min_volume_ratio", BREAKOUT_MIN_VOLUME_RATIO))
+    BREAKOUT_ATR_PERIOD = int(_overrides.get("breakout_atr_period", BREAKOUT_ATR_PERIOD))
+    BREAKOUT_MIN_ATR_MULTIPLIER = float(_overrides.get("breakout_min_atr_multiplier", BREAKOUT_MIN_ATR_MULTIPLIER))
+    BREAKOUT_CLV_THRESHOLD = float(_overrides.get("breakout_clv_threshold", BREAKOUT_CLV_THRESHOLD))
     SUPPORT_RESISTANCE_LOOKBACK = _overrides.get("support_resistance_lookback", SUPPORT_RESISTANCE_LOOKBACK)
     MIN_DISTANCE_TO_SR_PERCENT = _overrides.get("min_distance_to_sr_percent", MIN_DISTANCE_TO_SR_PERCENT)
     PROFIT_TARGET_PERCENT = _overrides.get("profit_target_percent", PROFIT_TARGET_PERCENT)

@@ -173,6 +173,7 @@ _TRADE_ANALYTICS_FIELDS = (
     "adx_delta",
     "relative_strength_score",
     "relative_strength_detail",
+    "breakout_validation",
     "market_trend_reason",
     "sector_trend",
     "sector_trend_reason",
@@ -1078,6 +1079,9 @@ def run_full_scan(
                 "sector_trend_reason"
             ),
             "exchange": exchange,
+            "breakout_validation": (
+                signal.price_action_detail or {}
+            ).get("breakout_validation"),
         }
 
         entry_context_detail = (
@@ -1107,6 +1111,9 @@ def run_full_scan(
             "relative_strength_detail": candidate.get(
                 "relative_strength_detail"
             ),
+            "breakout_validation": (
+                signal.price_action_detail or {}
+            ).get("breakout_validation"),
             "market_trend_reason": candidate.get(
                 "market_trend_reason"
             ),

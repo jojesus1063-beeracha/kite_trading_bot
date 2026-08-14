@@ -460,6 +460,9 @@ def install_two_indicator_patch():
             "detail": price_action_detail,
             "standalone_hard_gate": False,
         }
+        event["breakout_validation"] = price_action_detail.get(
+            "breakout_validation"
+        )
         candle_result = evaluate_candle_eligibility(
             df_5m,
             completed_df_15m,
