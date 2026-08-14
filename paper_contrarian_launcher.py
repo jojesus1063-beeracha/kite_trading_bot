@@ -469,6 +469,7 @@ def install_two_indicator_patch():
             final,
             cfg_obj,
             price_action_score=price_action_score,
+            breakout_validation=price_action_detail.get("breakout_validation"),
         )
         event["candle_eligibility"] = candle_result.to_dict()
         if not candle_result.accepted:
@@ -524,7 +525,7 @@ def install_two_indicator_patch():
             f"PAPER CLEAN CANDLE | ADX={adx:.2f} strength-only | "
             f"EMA9={e9:.4f} EMA21={e21:.4f} -> {final} | "
             f"RSI({RSI_PERIOD})={'NA' if rsi is None else f'{rsi:.2f}'} observational | "
-            f"2-of-3 confirmation + VWAP + cost-aware movement passed; EMA200 observational | core gates enforced | audit={ENTRY_AUDIT}"
+            f"validated breakout hard gate + 2-of-3 secondary confirmation + VWAP + cost-aware movement passed; EMA200 observational | core gates enforced | audit={ENTRY_AUDIT}"
         )
         return strategy.Signal(
             symbol=symbol,
@@ -540,7 +541,8 @@ def install_two_indicator_patch():
     strategy.evaluate = evaluate
     logger.warning(
         "PAPER CLEAN ENTRY ACTIVE: normal EMA direction; ADX strength only (minimum %.0f); "
-        "RSI/EMA200 observational; 2-of-3 confirmation; cost-aware movement gate",
+        "RSI/EMA200 observational; validated breakout HARD GATE; "
+        "2-of-3 secondary confirmation; cost-aware movement gate",
         ADX_MIN_STRENGTH,
     )
     logger.warning(

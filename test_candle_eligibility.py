@@ -31,6 +31,7 @@ def config():
         PAPER_CANDLE_VOLUME_LOOKBACK=20,
         PAPER_CANDLE_MIN_VOLUME_RATIO=1.2,
         PAPER_CANDLE_REQUIRED_CONFIRMATIONS=2,
+        PAPER_REQUIRE_VALIDATED_BREAKOUT=False,
         PAPER_REQUIRE_EMA200_ALIGNMENT=False,
         PAPER_ENABLE_COST_AWARE_GATE=True,
         PAPER_COST_MOVE_LOOKBACK=14,
@@ -67,6 +68,63 @@ def trend_frame(direction="BUY", adx=30.0):
 
 
 class CandleEligibilityTests(unittest.TestCase):
+    def test_required_breakout_failure_overrides_two_of_three(self):
+        cfg = config()
+        cfg.PAPER_REQUIRE_VALIDATED_BREAKOUT = True
+        result = evaluate_candle_eligibility(
+            entry_frame("BUY"), trend_frame("BUY"), "BUY", cfg,
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib({"CDLENGULFING": 100}),
+            price_action_score=0.0,
+            breakout_validation={
+                "passed": False,
+                "direction": "BUY",
+                "reasons": [
+                    "N_PERIOD_EXTREMUM_NOT_BROKEN",
+                    "CLV_DIRECTION_NOT_CONFIRMED",
+                ],
+                "metrics": {"volume_ratio": 1.98, "atr_multiplier": 1.54},
+            },
+        )
+        self.assertFalse(result.accepted)
+        self.assertIn("BREAKOUT_VALIDATION_FAILED", result.reasons)
+        self.assertEqual(result.detail["confirmation_count"], 2)
+
+    def test_required_breakout_passes_before_secondary_confluence(self):
+        cfg = config()
+        cfg.PAPER_REQUIRE_VALIDATED_BREAKOUT = True
+        result = evaluate_candle_eligibility(
+            entry_frame("BUY"), trend_frame("BUY"), "BUY", cfg,
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib({"CDLENGULFING": 100}),
+            price_action_score=0.0,
+            breakout_validation={
+                "passed": True,
+                "direction": "BUY",
+                "reasons": [],
+                "metrics": {
+                    "structure_confirmed": True,
+                    "volume_confirmed": True,
+                    "volatility_confirmed": True,
+                    "clv_confirmed": True,
+                },
+            },
+        )
+        self.assertTrue(result.accepted, result.to_dict())
+        self.assertTrue(result.detail["validated_breakout_passed"])
+
+    def test_required_breakout_missing_fails_closed(self):
+        cfg = config()
+        cfg.PAPER_REQUIRE_VALIDATED_BREAKOUT = True
+        result = evaluate_candle_eligibility(
+            entry_frame("BUY"), trend_frame("BUY"), "BUY", cfg,
+            now="2026-08-13 10:03:12+05:30",
+            talib_module=FakeTalib({"CDLENGULFING": 100}),
+            price_action_score=0.0,
+        )
+        self.assertFalse(result.accepted)
+        self.assertIn("BREAKOUT_VALIDATION_MISSING", result.reasons)
+
     def test_accepts_confluent_buy(self):
         result = evaluate_candle_eligibility(
             entry_frame("BUY"), trend_frame("BUY"), "BUY", config(),

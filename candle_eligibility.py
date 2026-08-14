@@ -241,6 +241,7 @@ def evaluate_candle_eligibility(
     now: Any = None,
     talib_module: Any = None,
     price_action_score: float | None = None,
+    breakout_validation: dict[str, Any] | None = None,
 ) -> CandleEligibility:
     """Return whether the latest fully completed entry candle is actionable."""
     reasons: list[str] = []
@@ -382,6 +383,26 @@ def evaluate_candle_eligibility(
     price_action_confirmed = (
         price_action_value is not None and price_action_value > 0.0
     )
+
+    require_breakout = bool(
+        getattr(cfg_obj, "PAPER_REQUIRE_VALIDATED_BREAKOUT", False)
+    )
+    breakout_detail = (
+        breakout_validation if isinstance(breakout_validation, dict) else None
+    )
+    breakout_passed = bool(
+        breakout_detail is not None and breakout_detail.get("passed") is True
+    )
+    detail.update({
+        "breakout_validation": breakout_detail,
+        "validated_breakout_required": require_breakout,
+        "validated_breakout_passed": breakout_passed,
+    })
+    if require_breakout and breakout_detail is None:
+        reasons.append("BREAKOUT_VALIDATION_MISSING")
+    elif require_breakout and not breakout_passed:
+        reasons.append("BREAKOUT_VALIDATION_FAILED")
+
     confirmations = {
         "tier1_pattern": pattern_confirmed,
         "volume_above_prior_sma": volume_confirmed,
