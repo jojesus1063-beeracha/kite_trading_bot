@@ -31,25 +31,28 @@ if data.get("paper_trading") is not True:
 print("PASS: PAPER mode confirmed")
 PY
 
-# The systemd unit fires at 09:15:50 and stops the PAPER bot first. Waiting
-# twenty seconds makes the first quote request begin at approximately 09:16:10,
-# after the opening minute has started forming, while preventing the old
-# watchlist from trading during selection.
-echo "Waiting 20 seconds for the 09:16:10 selector boundary..."
-sleep 20
-
-echo "NSE top-10 gainers + top-10 losers PAPER generation started:"
+echo "NSE breakout-ready top-25 gainers + top-15 losers PAPER generation started:"
 TZ=Asia/Kolkata date
 
 "$PYTHON" paper_nse_top_movers_selector.py \
   --write \
-  --winners 10 \
-  --losers 10 \
-  --min-price 20 \
-  --max-price 2200 \
-  --min-turnover 1000000 \
-  --max-spread-pct 0.25 \
+  --winners 25 \
+  --losers 15 \
+  --min-price 50 \
+  --max-price 3000 \
+  --min-turnover 100000000 \
+  --max-spread-pct 0.15 \
   --min-circuit-distance-pct 1.0 \
+  --min-abs-change-pct 1.5 \
+  --max-abs-change-pct 8.0 \
+  --min-day-range-pct 0.75 \
+  --near-breakout-pct 0.50 \
+  --min-rvol 1.20 \
+  --min-atr-pct 0.30 \
+  --max-atr-pct 1.50 \
+  --max-vwap-distance-pct 1.00 \
+  --buy-min-adx 25 \
+  --sell-min-adx 20 \
   --output runtime/auto_watchlist/latest_watchlist.json \
   --report runtime/auto_watchlist/latest_report.json
 
@@ -69,7 +72,7 @@ if config.get("paper_trading") is not True:
     raise SystemExit("FAIL: configuration left PAPER mode")
 if report.get("status") != "success" or report.get("paper_only") is not True:
     raise SystemExit("FAIL: selector report is not successful/PAPER-only")
-if report.get("strategy") != "NSE_TOP10_GAINERS_TOP10_LOSERS":
+if report.get("strategy") != "NSE_BREAKOUT_READY_TOP25_GAINERS_TOP15_LOSERS":
     raise SystemExit("FAIL: unexpected selector strategy")
 if report.get("mode") != "WRITE_CONFIG":
     raise SystemExit("FAIL: selector did not run in WRITE_CONFIG mode")
@@ -81,9 +84,9 @@ if generated.date() != datetime.now(ist).date():
 watchlist = config.get("watchlist") or []
 output_watchlist = payload.get("watchlist") or []
 selected = report.get("selected") or []
-if len(watchlist) != 20 or len(output_watchlist) != 20 or len(selected) != 20:
+if len(watchlist) != 40 or len(output_watchlist) != 40 or len(selected) != 40:
     raise SystemExit(
-        f"FAIL: expected exactly 20 stocks; config={len(watchlist)} "
+        f"FAIL: expected exactly 40 stocks; config={len(watchlist)} "
         f"output={len(output_watchlist)} report={len(selected)}"
     )
 
@@ -100,7 +103,7 @@ if any(item.get("ordinary_equity_clean") is not True for item in selected):
 cleaning = report.get("cleaning") or {}
 clean_total = int(cleaning.get("clean_nse_equities") or 0)
 quotes_received = int(report.get("quotes_received") or 0)
-if clean_total < 20:
+if clean_total < 40:
     raise SystemExit(f"FAIL: cleaned universe too small: {clean_total}")
 minimum_quotes = math.ceil(clean_total * 0.90)
 if quotes_received < minimum_quotes:
@@ -111,9 +114,9 @@ if quotes_received < minimum_quotes:
 
 gainers = report.get("selected_gainers") or []
 losers = report.get("selected_losers") or []
-if len(gainers) != 10 or len(losers) != 10:
+if len(gainers) != 25 or len(losers) != 15:
     raise SystemExit(
-        f"FAIL: expected 10 gainers and 10 losers; got {len(gainers)} and {len(losers)}"
+        f"FAIL: expected 25 gainers and 15 losers; got {len(gainers)} and {len(losers)}"
     )
 if any(float(item.get("change_pct") or 0) <= 0 for item in gainers):
     raise SystemExit("FAIL: non-positive row found in gainers")
@@ -133,5 +136,5 @@ print("Losers:", [(x.get("symbol"), x.get("change_pct")) for x in losers])
 print("Watchlist count:", len(watchlist))
 PY
 
-echo "NSE top-10 gainers + top-10 losers PAPER generation completed:"
+echo "NSE breakout-ready top-25 gainers + top-15 losers PAPER generation completed:"
 TZ=Asia/Kolkata date

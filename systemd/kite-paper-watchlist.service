@@ -1,5 +1,5 @@
 [Unit]
-Description=Build cleaned full-Zerodha top-60 PAPER watchlist and start CP9 PAPER bot
+Description=Build breakout-ready NSE PAPER watchlist and start the PAPER bot
 Wants=network-online.target
 After=network-online.target
 
