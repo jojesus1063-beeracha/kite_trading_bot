@@ -20,6 +20,7 @@ from pathlib import Path
 import pandas as pd
 
 import config as cfg
+from breakout_validator import validate_breakout
 from candle_eligibility import evaluate_candle_eligibility
 from entry_confirmation import assess_entry_context
 from entry_quality import assess_entry_quality
@@ -111,6 +112,32 @@ def technical_decision(data, candidate):
     direction, e9, e21 = normal_ema_direction(entry)
     if direction is None:
         return False, "EMA_DIRECTION_UNAVAILABLE", {}, None
+
+    # The structural breakout is a mandatory hard gate.  Reject it before
+    # running the much more expensive swing-point and TA-Lib confirmation
+    # stack.  This cannot remove an otherwise executable signal because the
+    # full candle gate would reject the exact same breakout result later.
+    breakout_result = validate_breakout(
+        entry,
+        direction,
+        lookback=int(getattr(cfg, "BREAKOUT_LOOKBACK", 20)),
+        volume_period=int(getattr(cfg, "BREAKOUT_VOLUME_PERIOD", 20)),
+        minimum_volume_ratio=float(
+            getattr(cfg, "BREAKOUT_MIN_VOLUME_RATIO", 1.5)
+        ),
+        atr_period=int(getattr(cfg, "BREAKOUT_ATR_PERIOD", 14)),
+        minimum_atr_multiplier=float(
+            getattr(cfg, "BREAKOUT_MIN_ATR_MULTIPLIER", 1.2)
+        ),
+        clv_threshold=float(getattr(cfg, "BREAKOUT_CLV_THRESHOLD", 0.60)),
+    )
+    if not breakout_result.passed:
+        return False, "CANDLE:BREAKOUT_VALIDATION_FAILED", {
+            "ema9": e9,
+            "ema21": e21,
+            "breakout_validation": breakout_result.to_dict(),
+            "fast_rejection": True,
+        }, direction
 
     pa_score, pa_detail = evaluate_price_action(entry, direction, cfg)
     breakout = (pa_detail or {}).get("breakout_validation")
