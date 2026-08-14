@@ -53,6 +53,7 @@ PAPER_ENABLE_COST_AWARE_GATE = True
 PAPER_COST_MOVE_LOOKBACK = 14
 PAPER_EXPECTED_MOVE_ATR_MULTIPLIER = 1.0
 PAPER_MIN_EXPECTED_GROSS_TO_COST_MULTIPLE = 2.0
+PAPER_DELAYED_ENTRY_CONFIRMATION_SECONDS = 30.0
 
 PAPER_MAE_MIN_AGE_MINUTES = 10.0
 PAPER_MAE_THRESHOLD_PCT = -0.30
@@ -94,6 +95,7 @@ def apply_paper_risk_overrides() -> None:
     cfg.PAPER_COST_MOVE_LOOKBACK = PAPER_COST_MOVE_LOOKBACK
     cfg.PAPER_EXPECTED_MOVE_ATR_MULTIPLIER = PAPER_EXPECTED_MOVE_ATR_MULTIPLIER
     cfg.PAPER_MIN_EXPECTED_GROSS_TO_COST_MULTIPLE = PAPER_MIN_EXPECTED_GROSS_TO_COST_MULTIPLE
+    cfg.PAPER_DELAYED_ENTRY_CONFIRMATION_SECONDS = PAPER_DELAYED_ENTRY_CONFIRMATION_SECONDS
     cfg.ENABLE_RVOL_FILTER = False
     cfg.ENABLE_200_EMA_FILTER = False
     cfg.ENABLE_EMA200_WATCHLIST = False
@@ -127,12 +129,14 @@ def apply_paper_risk_overrides() -> None:
     logger.warning(
         "PAPER POLICY ACTIVE: risk/trade=%.2f%% ADX strength-only (<20/unavailable BLOCK), "
         "entry cap=%s, per-symbol completed-entry cap=%s, loss cooldown=%.0f min, "
+        "delayed entry confirmation=%.0f sec, "
         "max distinct open=%s, daily_loss=%.1f%% (Rs %.2f), emergency_stop=%.2f%% | "
         "daily_halt_retained=%s explicit_halt_clear=%s",
         PAPER_RISK_PER_TRADE_PCT,
         PAPER_MAX_ENTRIES_PER_DAY,
         PAPER_MAX_TRADES_PER_SYMBOL,
         PAPER_LOSS_REENTRY_COOLDOWN_MINUTES,
+        PAPER_DELAYED_ENTRY_CONFIRMATION_SECONDS,
         PAPER_MAX_OPEN_POSITIONS,
         PAPER_MAX_DAILY_LOSS_PCT,
         max_loss_amount,

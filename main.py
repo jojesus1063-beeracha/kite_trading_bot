@@ -94,6 +94,7 @@ from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
 from scan_latency import build_entry_timing, select_scan_universe
 from cooperative_position_monitor import CooperativeScanMonitor
+from delayed_entry_confirmation import assess_delayed_entry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("main")
@@ -297,6 +298,34 @@ def _cooperative_position_check_if_due(
     )
 
     return checked_symbols
+
+
+def _wait_for_delayed_entry_confirmation(
+    seconds,
+    kite,
+    tokens,
+    exchange_map,
+    open_positions,
+    risk,
+    monitor,
+):
+    """Wait without suspending the existing open-position exit monitoring."""
+    delay = max(0.0, float(seconds or 0.0))
+    deadline = time.monotonic() + delay
+
+    while True:
+        _cooperative_position_check_if_due(
+            kite,
+            tokens,
+            exchange_map,
+            open_positions,
+            risk,
+            monitor,
+        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return delay
+        time.sleep(min(1.0, remaining))
 
 
 def run_full_scan(
@@ -1182,6 +1211,106 @@ def run_full_scan(
             f"| ranking_score="
             f"{candidate['ranking_score']:.2f}"
         )
+
+        delayed_confirmation_seconds = (
+            float(
+                getattr(
+                    cfg,
+                    "PAPER_DELAYED_ENTRY_CONFIRMATION_SECONDS",
+                    0.0,
+                )
+                or 0.0
+            )
+            if cfg.PAPER_TRADING
+            else 0.0
+        )
+        if delayed_confirmation_seconds > 0:
+            logger.info(
+                f"{symbol}: paper delayed entry confirmation started "
+                f"| direction={signal.direction} "
+                f"| wait_seconds={delayed_confirmation_seconds:.0f}"
+            )
+            _wait_for_delayed_entry_confirmation(
+                delayed_confirmation_seconds,
+                kite,
+                tokens,
+                exchange_map,
+                open_positions,
+                risk,
+                cooperative_monitor,
+            )
+
+            refreshed_prices = fetch_live_prices(kite, [candidate])
+            delayed_decision = assess_delayed_entry(
+                signal.direction,
+                df_5m,
+                refreshed_prices.get(symbol),
+            )
+            delayed_detail = delayed_decision.detail()
+            logger.info(
+                f"{symbol}: paper delayed entry confirmation complete "
+                f"| accepted={delayed_decision.accepted} "
+                f"| trend={delayed_decision.projected_trend} "
+                f"| live={delayed_decision.live_price} "
+                f"| ema9={delayed_decision.ema9} "
+                f"| ema21={delayed_decision.ema21} "
+                f"| reason={delayed_decision.reason}"
+            )
+
+            if not delayed_decision.accepted:
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "skipped after delayed trend recheck: "
+                            + delayed_decision.reason
+                        ),
+                    }
+                )
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **candidate_event_context,
+                        "reason_code": "DELAYED_DIRECTION_REJECTED",
+                        "reason": delayed_decision.reason,
+                        "delayed_confirmation_seconds": (
+                            delayed_confirmation_seconds
+                        ),
+                        "delayed_confirmation": delayed_detail,
+                    },
+                )
+                continue
+
+            if not within_trading_window() or not risk.can_take_new_trade(
+                current_open_count=len(open_positions)
+            ):
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "skipped after delayed confirmation: "
+                            "time window or risk limit changed"
+                        ),
+                    }
+                )
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **candidate_event_context,
+                        "reason_code": "POST_DELAY_SAFETY_REJECTED",
+                        "reason": (
+                            "time window or risk limit changed during delay"
+                        ),
+                        "delayed_confirmation_seconds": (
+                            delayed_confirmation_seconds
+                        ),
+                        "delayed_confirmation": delayed_detail,
+                    },
+                )
+                continue
+
+            batch_live_prices[symbol] = delayed_decision.live_price
+
         planned_stop_price = signal.stop_loss
         if getattr(cfg, "ENABLE_FIXED_TARGET", False):
             planned_stop_price, _ = (
