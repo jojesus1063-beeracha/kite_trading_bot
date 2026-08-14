@@ -7,6 +7,7 @@ P&L) and decides whether a new signal is allowed to be traded.
 
 import json
 import os
+import re
 from datetime import date
 from dataclasses import dataclass, field
 
@@ -64,6 +65,36 @@ class RiskManager:
         self.cfg = cfg
         self.persist = persist
         self.day = _load_day_state() if persist else DayState()
+        self._reconcile_obsolete_trade_cap_halt()
+
+    def _reconcile_obsolete_trade_cap_halt(self) -> None:
+        """Clear only a stale trade-count halt after the configured cap rises.
+
+        A max-trades halt records the threshold in its reason.  If a later
+        PAPER session deliberately raises that threshold, retaining the old
+        halt would incorrectly block every scan.  Daily-loss and all unknown
+        halt reasons remain sticky and are never changed here.
+        """
+        if not self.day.halted:
+            return
+
+        match = re.fullmatch(
+            r"Max trades per day \((\d+)\) reached",
+            str(self.day.halt_reason or "").strip(),
+        )
+        if match is None:
+            return
+
+        previous_limit = int(match.group(1))
+        current_limit = int(self.cfg.MAX_TRADES_PER_DAY)
+        trades_taken = int(self.day.trades_taken)
+        if current_limit <= previous_limit or trades_taken >= current_limit:
+            return
+
+        self.day.halted = False
+        self.day.halt_reason = ""
+        if self.persist:
+            _save_day_state(self.day)
 
     def max_loss_amount(self) -> float:
         return self.cfg.CAPITAL * self.cfg.MAX_DAILY_LOSS_PCT / 100
