@@ -33,6 +33,11 @@ def configure_hybrid_exit(position: dict, cfg) -> dict:
 
     position["hybrid_exit_enabled"] = False
 
+    # Confirmed triple-pattern trades use the separately validated fixed
+    # target (1% top / 2% bottom); the generic 1R/2R hybrid would replace it.
+    if position.get("exit_policy") == "PATTERN_FIXED":
+        return position
+
     if not enabled or not fixed_target or quantity < 2:
         return position
 
