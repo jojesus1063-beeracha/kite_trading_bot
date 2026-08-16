@@ -47,6 +47,7 @@ class CombinedLiveLauncherTests(unittest.TestCase):
             MAX_OPEN_POSITIONS=99,
             MAX_TRADES_PER_DAY=99,
             MAX_DAILY_LOSS_PCT=99.0,
+            MAX_POSITION_SIZE_PCT=99.0,
             CHECK_MARGIN_BEFORE_ENTRY=False,
             ENABLE_FIXED_TARGET=False,
             ENABLE_TRAILING_STOP=True,
@@ -82,6 +83,7 @@ class CombinedLiveLauncherTests(unittest.TestCase):
         self.assertEqual(limits["max_open_positions"], 1)
         self.assertEqual(limits["max_trades_per_day"], 7)
         self.assertEqual(limits["max_daily_loss_pct"], 0.50)
+        self.assertEqual(limits["max_position_size_pct"], 20.0)
         self.assertTrue(config.CHECK_MARGIN_BEFORE_ENTRY)
         self.assertTrue(config.ENABLE_FIXED_TARGET)
         self.assertFalse(config.ENABLE_TRAILING_STOP)
