@@ -359,7 +359,14 @@ def install_two_indicator_patch(*, live_combined=False):
     cfg.PAPER_SELL_MIN_ADX = float(getattr(cfg, "PAPER_SELL_MIN_ADX", 20.0))
     cfg.PAPER_CANDLE_MIN_VOLUME_RATIO = 1.2
     cfg.PAPER_CANDLE_REQUIRED_CONFIRMATIONS = 2
+    cfg.PAPER_REQUIRE_VALIDATED_BREAKOUT = True
     cfg.PAPER_REQUIRE_EMA200_ALIGNMENT = False
+    cfg.PAPER_MAX_TRADES_PER_SYMBOL = int(
+        getattr(cfg, "PAPER_MAX_TRADES_PER_SYMBOL", 2)
+    )
+    cfg.PAPER_LOSS_REENTRY_COOLDOWN_MINUTES = float(
+        getattr(cfg, "PAPER_LOSS_REENTRY_COOLDOWN_MINUTES", 30.0)
+    )
     cfg.PAPER_ENABLE_COST_AWARE_GATE = True
     cfg.PAPER_COST_MOVE_LOOKBACK = 14
     cfg.PAPER_EXPECTED_MOVE_ATR_MULTIPLIER = 1.0
