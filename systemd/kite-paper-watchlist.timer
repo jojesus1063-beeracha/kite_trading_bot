@@ -1,8 +1,10 @@
 [Unit]
-Description=Build breakout-ready NSE PAPER watchlist each weekday after five completed 3-minute candles
+Description=Build frozen full-universe PAPER top-60 each weekday at the 09:27 snapshot
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 09:30:10 Asia/Kolkata
+# Fire 20 seconds before the policy boundary. The runner stops the old PAPER
+# process, waits 20 seconds, then begins quote collection at about 09:27:10 IST.
+OnCalendar=Mon..Fri *-*-* 09:26:50 Asia/Kolkata
 Persistent=false
 AccuracySec=1s
 RandomizedDelaySec=0
