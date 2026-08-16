@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+import importlib
 from types import SimpleNamespace
 
 import pandas as pd
@@ -14,6 +15,7 @@ from triple_pattern_policy import (
     TRIPLE_BOTTOM,
     TRIPLE_TOP,
     evaluate_confirmed_triple_pattern,
+    is_pattern_fixed_exit,
 )
 
 
@@ -123,6 +125,29 @@ class TriplePatternPolicyTests(unittest.TestCase):
 
 
 class PatternExitHandoffTests(unittest.TestCase):
+    def test_pattern_exit_policy_marker(self):
+        self.assertTrue(is_pattern_fixed_exit({"exit_policy": "PATTERN_FIXED"}))
+        self.assertFalse(is_pattern_fixed_exit({"exit_policy": None}))
+
+    def test_outer_paper_launcher_does_not_widen_pattern_stop(self):
+        config_stub = types.ModuleType("config")
+        config_stub.PAPER_TRADING = True
+        sys.modules.setdefault("config", config_stub)
+        launcher = importlib.import_module("paper_50pct_risk_launcher")
+        position = {
+            "direction": "BUY",
+            "entry": 100.0,
+            "stop": 99.55,
+            "exit_policy": "PATTERN_FIXED",
+        }
+        result = launcher._paper_apply_emergency_stop(position)
+        self.assertEqual(result["stop"], 99.55)
+        self.assertFalse(result["paper_emergency_stop_active"])
+        self.assertEqual(
+            result["paper_emergency_stop_bypassed_reason"],
+            "PATTERN_FIXED",
+        )
+
     def test_confirmed_fill_reanchors_fixed_target_and_skips_hybrid(self):
         cfg = SimpleNamespace(
             PAPER_TRADING=True,
