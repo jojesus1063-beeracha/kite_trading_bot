@@ -24,6 +24,7 @@ LIVE_RISK_PER_TRADE_PCT = 0.20
 LIVE_MAX_OPEN_POSITIONS = 1
 LIVE_MAX_TRADES_PER_DAY = 7
 LIVE_MAX_DAILY_LOSS_PCT = 0.50
+LIVE_MAX_POSITION_SIZE_PCT = 20.0
 
 
 def enforce_live_limits() -> dict:
@@ -47,6 +48,10 @@ def enforce_live_limits() -> dict:
     cfg.MAX_OPEN_POSITIONS = LIVE_MAX_OPEN_POSITIONS
     cfg.MAX_TRADES_PER_DAY = LIVE_MAX_TRADES_PER_DAY
     cfg.MAX_DAILY_LOSS_PCT = LIVE_MAX_DAILY_LOSS_PCT
+    cfg.MAX_POSITION_SIZE_PCT = min(
+        float(getattr(cfg, "MAX_POSITION_SIZE_PCT", LIVE_MAX_POSITION_SIZE_PCT)),
+        LIVE_MAX_POSITION_SIZE_PCT,
+    )
     cfg.CHECK_MARGIN_BEFORE_ENTRY = True
     cfg.ENABLE_FIXED_TARGET = True
     cfg.ENABLE_TRAILING_STOP = False
@@ -57,6 +62,7 @@ def enforce_live_limits() -> dict:
         "max_open_positions": cfg.MAX_OPEN_POSITIONS,
         "max_trades_per_day": cfg.MAX_TRADES_PER_DAY,
         "max_daily_loss_pct": cfg.MAX_DAILY_LOSS_PCT,
+        "max_position_size_pct": cfg.MAX_POSITION_SIZE_PCT,
         "check_margin_before_entry": cfg.CHECK_MARGIN_BEFORE_ENTRY,
     }
 
