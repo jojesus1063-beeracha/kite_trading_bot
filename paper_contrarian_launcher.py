@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import runpy
 from datetime import datetime
 from pathlib import Path
@@ -31,9 +32,12 @@ RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
 ADX_MIN_STRENGTH = 20.0
-AUDIT_DIR = Path(__file__).resolve().parent / "runtime" / "paper_audit"
+PROJECT_DIR = Path(__file__).resolve().parent
+AUDIT_DIR = PROJECT_DIR / "runtime" / "paper_audit"
 ENTRY_AUDIT = AUDIT_DIR / "entry_audit.jsonl"
 CONFIG_AUDIT = AUDIT_DIR / "session_config.json"
+LIVE_ACK_ENV = "KITE_LIVE_COMBINED_ACK"
+LIVE_ACK_VALUE = "I_ACCEPT_REAL_ORDERS"
 TRADE_HISTORY_PATH = Path(__file__).resolve().parent / "trade_history.jsonl"
 
 
@@ -104,14 +108,23 @@ def _trade_group_key(record):
     )
 
 
-def _paper_entry_guard(symbol, now=None, log_path=None, max_per_symbol=None):
+def _paper_entry_guard(
+    symbol,
+    now=None,
+    log_path=None,
+    max_per_symbol=None,
+    *,
+    force_active=False,
+    fail_closed=False,
+):
     """Enforce per-symbol daily count and post-loss cooldown in PAPER mode.
 
     Hybrid/partial exit rows belonging to the same signal are aggregated into
     one completed entry, so a scalp + runner does not consume two symbol slots.
     """
 
-    if not bool(getattr(cfg, "PAPER_TRADING", False)):
+    paper_mode = bool(getattr(cfg, "PAPER_TRADING", False))
+    if not paper_mode and not force_active:
         return True, {"paper_only": True, "active": False}
 
     now = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="Asia/Kolkata")
@@ -156,18 +169,18 @@ def _paper_entry_guard(symbol, now=None, log_path=None, max_per_symbol=None):
                         except Exception:
                             pass
         except OSError as exc:
-            # Fail open on an observational persistence read problem. The main
-            # RiskManager/day limit still remains active.
-            return True, {
-                "paper_only": True,
+            # Live mode fails closed because a missing history read could permit
+            # an unintended same-symbol re-entry. Paper behavior is unchanged.
+            return (not fail_closed), {
+                "paper_only": paper_mode,
                 "active": True,
                 "history_read_error": str(exc),
-                "decision": "ALLOW_FAIL_OPEN",
+                "decision": "BLOCK_FAIL_CLOSED" if fail_closed else "ALLOW_FAIL_OPEN",
             }
 
     trade_count = len(groups)
     detail = {
-        "paper_only": True,
+        "paper_only": paper_mode,
         "active": True,
         "symbol_trade_count": trade_count,
         "max_trades_per_symbol": max_per_symbol,
@@ -315,9 +328,31 @@ def _legacy_observations(df15, dfentry, index15):
     return obs
 
 
-def install_two_indicator_patch():
-    if not bool(getattr(cfg, "PAPER_TRADING", False)):
-        raise SystemExit("SAFETY BLOCK: EMA/RSI launcher requires PAPER_TRADING=True")
+def install_two_indicator_patch(*, live_combined=False):
+    global AUDIT_DIR, ENTRY_AUDIT, CONFIG_AUDIT
+
+    paper_mode = bool(getattr(cfg, "PAPER_TRADING", False))
+    if live_combined:
+        if paper_mode:
+            raise SystemExit(
+                "SAFETY BLOCK: live combined launcher requires PAPER_TRADING=False"
+            )
+        if os.environ.get(LIVE_ACK_ENV) != LIVE_ACK_VALUE:
+            raise SystemExit(
+                f"SAFETY BLOCK: set {LIVE_ACK_ENV}={LIVE_ACK_VALUE} for real orders"
+            )
+        mode_label = "LIVE COMBINED"
+        AUDIT_DIR = PROJECT_DIR / "runtime" / "live_combined_audit"
+    else:
+        if not paper_mode:
+            raise SystemExit(
+                "SAFETY BLOCK: EMA/RSI launcher requires PAPER_TRADING=True"
+            )
+        mode_label = "PAPER"
+        AUDIT_DIR = PROJECT_DIR / "runtime" / "paper_audit"
+
+    ENTRY_AUDIT = AUDIT_DIR / "entry_audit.jsonl"
+    CONFIG_AUDIT = AUDIT_DIR / "session_config.json"
 
     cfg.PAPER_ADX_MIN_STRENGTH = float(getattr(cfg, "PAPER_ADX_MIN_STRENGTH", 20.0))
     cfg.PAPER_BUY_MIN_ADX = float(getattr(cfg, "PAPER_BUY_MIN_ADX", 25.0))
@@ -367,7 +402,8 @@ def install_two_indicator_patch():
             "event": "ENTRY_EVALUATION",
             "logged_at": pd.Timestamp.now(tz="Asia/Kolkata").isoformat(),
             "symbol": symbol,
-            "paper_only": True,
+            "paper_only": not live_combined,
+            "execution_mode": mode_label,
             "directional_policy": {
                 "adx_unavailable_or_lt_20": "BLOCK_ENTRY",
                 "adx_gte_20": "STRENGTH_ONLY",
@@ -400,18 +436,22 @@ def install_two_indicator_patch():
             _append(event)
             return None
 
-        triple = evaluate_confirmed_triple_pattern(df_5m, cfg_obj)
+        triple = evaluate_confirmed_triple_pattern(
+            df_5m, cfg_obj, allow_live=live_combined
+        )
         event["triple_pattern_policy"] = triple.to_dict()
         if triple.accepted:
             guard_ok, guard_detail = _paper_entry_guard(
                 symbol,
                 max_per_symbol=1,
+                force_active=live_combined,
+                fail_closed=live_combined,
             )
             event["paper_entry_guard"] = guard_detail
             if not guard_ok:
                 event.update({
                     "decision": "REJECT",
-                    "stage": "PAPER_TRIPLE_PATTERN_SYMBOL_GUARD",
+                    "stage": "TRIPLE_PATTERN_SYMBOL_GUARD",
                     "reasons": [guard_detail.get("reason", "PAPER_SYMBOL_RISK_GUARD")],
                 })
                 _append(event)
@@ -448,8 +488,9 @@ def install_two_indicator_patch():
             })
             _append(event)
             logger.info(
-                "PAPER TRIPLE PATTERN SIGNAL | %s | pattern=%s direction=%s "
+                "%s TRIPLE PATTERN SIGNAL | %s | pattern=%s direction=%s "
                 "volume_ratio=%.3f target=%.2f%% stop=%.2f%%",
+                mode_label,
                 symbol,
                 triple.pattern,
                 triple.direction,
@@ -465,7 +506,7 @@ def install_two_indicator_patch():
                 target=target,
                 timestamp=cur["date"],
                 reason=(
-                    f"PAPER CONFIRMED {triple.pattern} | fresh neckline cross | "
+                    f"{mode_label} CONFIRMED {triple.pattern} | fresh neckline cross | "
                     f"VWAP aligned | volume_ratio={triple.volume_ratio:.3f} | "
                     f"fixed target={triple.profit_target_percent:.2f}%"
                 ),
@@ -518,12 +559,16 @@ def install_two_indicator_patch():
             )
             return None
 
-        guard_ok, guard_detail = _paper_entry_guard(symbol)
+        guard_ok, guard_detail = _paper_entry_guard(
+            symbol,
+            force_active=live_combined,
+            fail_closed=live_combined,
+        )
         event["paper_entry_guard"] = guard_detail
         if not guard_ok:
             event.update({
                 "decision": "REJECT",
-                "stage": "PAPER_SYMBOL_RISK_GUARD",
+                "stage": "SYMBOL_RISK_GUARD",
                 "reasons": [guard_detail.get("reason", "PAPER_SYMBOL_RISK_GUARD")],
             })
             _append(event)
@@ -618,11 +663,12 @@ def install_two_indicator_patch():
         })
         _append(event)
         logger.info(
-            "PAPER CLEAN SIGNAL | %s | ADX=%s | EMA9=%s EMA21=%s direction=%s RSI(obs)=%s",
+            "%s CLEAN SIGNAL | %s | ADX=%s | EMA9=%s EMA21=%s direction=%s RSI(obs)=%s",
+            mode_label,
             symbol, adx, e9, e21, final, rsi,
         )
         reason = (
-            f"PAPER CLEAN CANDLE | ADX={adx:.2f} strength-only | "
+            f"{mode_label} CLEAN CANDLE | ADX={adx:.2f} strength-only | "
             f"EMA9={e9:.4f} EMA21={e21:.4f} -> {final} | "
             f"RSI({RSI_PERIOD})={'NA' if rsi is None else f'{rsi:.2f}'} observational | "
             f"validated breakout hard gate + 2-of-3 secondary confirmation + VWAP + cost-aware movement passed; EMA200 observational | core gates enforced | audit={ENTRY_AUDIT}"
@@ -640,18 +686,21 @@ def install_two_indicator_patch():
 
     strategy.evaluate = evaluate
     logger.warning(
-        "PAPER CLEAN ENTRY ACTIVE: normal EMA direction; ADX strength only (minimum %.0f); "
+        "%s CLEAN ENTRY ACTIVE: normal EMA direction; ADX strength only (minimum %.0f); "
         "RSI/EMA200 observational; validated breakout HARD GATE; "
         "2-of-3 secondary confirmation; cost-aware movement gate",
+        mode_label,
         ADX_MIN_STRENGTH,
     )
     logger.warning(
-        "PAPER SYMBOL GUARD ACTIVE: max %s completed entries/symbol/day; %.0f-minute cooldown after losing trade",
+        "%s SYMBOL GUARD ACTIVE: max %s completed entries/symbol/day; %.0f-minute cooldown after losing trade",
+        mode_label,
         int(getattr(cfg, "PAPER_MAX_TRADES_PER_SYMBOL", 2)),
         float(getattr(cfg, "PAPER_LOSS_REENTRY_COOLDOWN_MINUTES", 30.0)),
     )
     logger.warning(
-        "PAPER AUDIT MODE ACTIVE: every entry evaluation and available legacy metric is persisted to %s",
+        "%s AUDIT MODE ACTIVE: every entry evaluation and available legacy metric is persisted to %s",
+        mode_label,
         ENTRY_AUDIT,
     )
 
