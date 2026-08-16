@@ -22,7 +22,7 @@ logger = logging.getLogger("combined_live_launcher")
 
 LIVE_RISK_PER_TRADE_PCT = 0.20
 LIVE_MAX_OPEN_POSITIONS = 1
-LIVE_MAX_TRADES_PER_DAY = 2
+LIVE_MAX_TRADES_PER_DAY = 7
 LIVE_MAX_DAILY_LOSS_PCT = 0.50
 
 
