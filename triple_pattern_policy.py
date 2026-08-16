@@ -18,6 +18,14 @@ TRIPLE_TOP = "TRIPLE_TOP"
 TRIPLE_BOTTOM = "TRIPLE_BOTTOM"
 
 
+def is_pattern_fixed_exit(position: Any) -> bool:
+    """Return whether a position owns the validated triple-pattern exit plan."""
+    return bool(
+        isinstance(position, dict)
+        and position.get("exit_policy") == PATTERN_FIXED_EXIT_POLICY
+    )
+
+
 @dataclass(frozen=True)
 class TriplePatternDecision:
     accepted: bool
