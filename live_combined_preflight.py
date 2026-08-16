@@ -11,7 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from paper_contrarian_launcher import LIVE_ACK_ENV, LIVE_ACK_VALUE
+LIVE_ACK_ENV = "KITE_LIVE_COMBINED_ACK"
+LIVE_ACK_VALUE = "I_ACCEPT_REAL_ORDERS"
 
 IST = ZoneInfo("Asia/Kolkata")
 STRATEGY_NAME = "FULL_ZERODHA_CLEAN_TOP60_MOMENTUM"
