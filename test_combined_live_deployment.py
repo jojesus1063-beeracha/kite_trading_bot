@@ -179,6 +179,10 @@ class DeploymentContractTests(unittest.TestCase):
         unit = (ROOT / "systemd" / "kitebot-stop.service").read_text()
         self.assertIn("kitebot-live-combined.service", unit)
 
+    def test_live_clean_candle_requires_validated_breakout(self):
+        source = (ROOT / "paper_contrarian_launcher.py").read_text()
+        self.assertIn("cfg.PAPER_REQUIRE_VALIDATED_BREAKOUT = True", source)
+
 
 if __name__ == "__main__":
     unittest.main()
