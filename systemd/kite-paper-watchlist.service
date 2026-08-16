@@ -1,5 +1,5 @@
 [Unit]
-Description=Build breakout-ready NSE PAPER watchlist and start the PAPER bot
+Description=Build frozen full-universe top-60 PAPER watchlist and start the paper bot
 Wants=network-online.target
 After=network-online.target
 
@@ -9,9 +9,8 @@ User=ubuntu
 Group=ubuntu
 EnvironmentFile=/etc/kitebot.env
 WorkingDirectory=/home/ubuntu/kite_trading_bot
-# Fail closed: stop the currently-running PAPER bot before rebuilding the
-# morning universe, then start the already-installed PAPER bot unit only after
-# the selector and all validation checks complete successfully.
+# Fail closed: stop the existing PAPER process before selection and start the
+# updated PAPER stack only after selector validation succeeds.
 ExecStartPre=+/usr/bin/systemctl stop kitebot-paper-contrarian.service
 ExecStart=/bin/bash /home/ubuntu/kite_trading_bot/run_paper_watchlist_daily.sh
 ExecStartPost=+/usr/bin/systemctl start kitebot-paper-contrarian.service
