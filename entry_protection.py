@@ -35,6 +35,24 @@ SIGNAL_ANALYTICS_FIELDS = {
     "entry_delay_seconds",
 }
 
+PATTERN_FIXED_EXIT_POLICY = "PATTERN_FIXED"
+
+
+def _signal_trade_policy(signal, cfg):
+    detail = getattr(signal, "price_action_detail", None)
+    policy = detail.get("trade_policy", {}) if isinstance(detail, dict) else {}
+    exit_policy = policy.get("exit_policy")
+    stop_pct = float(
+        policy.get("stop_loss_percent", getattr(cfg, "STOP_LOSS_PERCENT", 0.45))
+    )
+    target_pct = float(
+        policy.get(
+            "profit_target_percent",
+            getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
+        )
+    )
+    return exit_policy, stop_pct, target_pct
+
 
 def _validated_signal_analytics(signal_analytics):
     if not isinstance(signal_analytics, dict):
@@ -56,6 +74,7 @@ def build_entry_plan(
 ):
     """Capture the strategy values needed to reconstruct a fill on restart."""
 
+    exit_policy, stop_pct, target_pct = _signal_trade_policy(signal, cfg)
     plan = {
         "signal_entry_price": float(signal.entry_price),
         "signal_stop_price": float(signal.stop_loss),
@@ -64,12 +83,9 @@ def build_entry_plan(
         "fixed_target_enabled": bool(
             getattr(cfg, "ENABLE_FIXED_TARGET", False)
         ),
-        "stop_loss_percent": float(
-            getattr(cfg, "STOP_LOSS_PERCENT", 0.45)
-        ),
-        "profit_target_percent": float(
-            getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5)
-        ),
+        "exit_policy": exit_policy,
+        "stop_loss_percent": stop_pct,
+        "profit_target_percent": target_pct,
         "tick_size": float(tick_size),
     }
 
@@ -110,6 +126,7 @@ def build_confirmed_position(
 
     stop_price = float(signal.stop_loss)
     target_price = float(signal.target)
+    exit_policy, stop_pct, target_pct = _signal_trade_policy(signal, cfg)
 
     if getattr(cfg, "ENABLE_FIXED_TARGET", False):
         # Option B (deliberate choice over disabling ENABLE_FIXED_TARGET
@@ -127,12 +144,14 @@ def build_confirmed_position(
         # branch), meaning the position would never explicitly exit at
         # target at all, only via trailing-stop/structure-break/
         # trend-reversal/square-off.
-        stop_price, _ = fixed_levels_from_fill(
+        stop_price, fill_target = fixed_levels_from_fill(
             signal.direction,
             confirmed_entry_price,
-            getattr(cfg, "STOP_LOSS_PERCENT", 0.45),
-            getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
+            stop_pct,
+            target_pct,
         )
+        if exit_policy == PATTERN_FIXED_EXIT_POLICY:
+            target_price = fill_target
 
     protection_state = "PAPER" if is_paper else "PENDING"
     missing_live_average = not is_paper and broker_average is None
@@ -143,6 +162,9 @@ def build_confirmed_position(
         "entry": confirmed_entry_price,
         "stop": stop_price,
         "target": target_price,
+        "exit_policy": exit_policy,
+        "stop_loss_percent": stop_pct,
+        "profit_target_percent": target_pct,
         "exchange": exchange,
         "peak_price": confirmed_entry_price,
         "tight_mode": False,
@@ -225,10 +247,16 @@ def build_recovered_position(order_record, execution_result, cfg):
                     getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
                 ),
             )
-            target_price = metadata.get("signal_target_price", fallback_target)
+            exit_policy = metadata.get("exit_policy")
+            target_price = (
+                fallback_target
+                if exit_policy == PATTERN_FIXED_EXIT_POLICY
+                else metadata.get("signal_target_price", fallback_target)
+            )
             manual = False
             protection_state = "PENDING"
         else:
+            exit_policy = metadata.get("exit_policy")
             stop_price = metadata.get("signal_stop_price")
             target_price = metadata.get("signal_target_price")
             manual = stop_price is None or target_price is None
@@ -242,6 +270,9 @@ def build_recovered_position(order_record, execution_result, cfg):
         "entry": entry_price,
         "stop": stop_price,
         "target": target_price,
+        "exit_policy": metadata.get("exit_policy"),
+        "stop_loss_percent": metadata.get("stop_loss_percent"),
+        "profit_target_percent": metadata.get("profit_target_percent"),
         "exchange": order_record["exchange"],
         "peak_price": entry_price,
         "tight_mode": False,

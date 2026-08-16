@@ -31,6 +31,7 @@ import pandas as pd
 
 import config as cfg
 import paper_contrarian_launcher as base
+from triple_pattern_policy import is_pattern_fixed_exit
 
 logger = logging.getLogger("paper_mfe_time_launcher")
 
@@ -142,6 +143,9 @@ def install_mfe_time_exit_patch(trading_main):
             return status
 
         position = open_positions[symbol]
+        if is_pattern_fixed_exit(position):
+            # Pattern trades exit only through native stop/target/EOD handling.
+            return status
         minutes = _minutes_in_trade(position)
         if minutes is None or minutes < MIN_HOLD_MINUTES:
             return status

@@ -32,6 +32,7 @@ import json
 import logging
 
 import config as cfg
+from triple_pattern_policy import is_pattern_fixed_exit
 
 logger = logging.getLogger("paper_50pct_risk_launcher")
 
@@ -150,6 +151,12 @@ def apply_paper_risk_overrides() -> None:
 
 def _paper_apply_emergency_stop(position: dict) -> dict:
     if not isinstance(position, dict):
+        return position
+    if is_pattern_fixed_exit(position):
+        # The holdout policy was validated with its own 0.45% stop.  Do not
+        # replace it with the generic paper experiment's 0.75% emergency stop.
+        position["paper_emergency_stop_active"] = False
+        position["paper_emergency_stop_bypassed_reason"] = "PATTERN_FIXED"
         return position
     if position.get("paper_emergency_stop_active"):
         return position

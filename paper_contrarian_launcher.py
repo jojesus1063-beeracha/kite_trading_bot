@@ -19,6 +19,10 @@ import config as cfg
 import strategy
 from candle_eligibility import evaluate_candle_eligibility
 from price_action import evaluate_price_action
+from triple_pattern_policy import (
+    PATTERN_FIXED_EXIT_POLICY,
+    evaluate_confirmed_triple_pattern,
+)
 
 logger = logging.getLogger("paper_contrarian_launcher")
 EMA_FAST = 9
@@ -100,7 +104,7 @@ def _trade_group_key(record):
     )
 
 
-def _paper_entry_guard(symbol, now=None, log_path=None):
+def _paper_entry_guard(symbol, now=None, log_path=None, max_per_symbol=None):
     """Enforce per-symbol daily count and post-loss cooldown in PAPER mode.
 
     Hybrid/partial exit rows belonging to the same signal are aggregated into
@@ -116,7 +120,11 @@ def _paper_entry_guard(symbol, now=None, log_path=None):
     else:
         now = now.tz_convert("Asia/Kolkata")
 
-    max_per_symbol = int(getattr(cfg, "PAPER_MAX_TRADES_PER_SYMBOL", 2))
+    max_per_symbol = int(
+        max_per_symbol
+        if max_per_symbol is not None
+        else getattr(cfg, "PAPER_MAX_TRADES_PER_SYMBOL", 2)
+    )
     cooldown_minutes = float(
         getattr(cfg, "PAPER_LOSS_REENTRY_COOLDOWN_MINUTES", 30.0)
     )
@@ -332,6 +340,22 @@ def install_two_indicator_patch():
     cfg.ENABLE_VOLUME_ACCELERATION_FILTER = True
     cfg.ENABLE_PRICE_ACTION = True
     cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
+    cfg.PAPER_ENABLE_TRIPLE_PATTERN = bool(
+        getattr(cfg, "PAPER_ENABLE_TRIPLE_PATTERN", True)
+    )
+    cfg.PAPER_TRIPLE_PATTERN_MIN_VOLUME_RATIO = float(
+        getattr(cfg, "PAPER_TRIPLE_PATTERN_MIN_VOLUME_RATIO", 1.5)
+    )
+    cfg.PAPER_TRIPLE_PATTERN_STOP_PERCENT = float(
+        getattr(cfg, "PAPER_TRIPLE_PATTERN_STOP_PERCENT", 0.45)
+    )
+    cfg.PAPER_TRIPLE_TOP_TARGET_PERCENT = float(
+        getattr(cfg, "PAPER_TRIPLE_TOP_TARGET_PERCENT", 1.0)
+    )
+    cfg.PAPER_TRIPLE_BOTTOM_TARGET_PERCENT = float(
+        getattr(cfg, "PAPER_TRIPLE_BOTTOM_TARGET_PERCENT", 2.0)
+    )
+    cfg.MAX_OPEN_POSITIONS = min(int(getattr(cfg, "MAX_OPEN_POSITIONS", 5)), 5)
     _config_snapshot()
 
     def evaluate(symbol, df_15m, df_5m, df_index_15m, cfg_obj):
@@ -375,6 +399,82 @@ def install_two_indicator_patch():
             })
             _append(event)
             return None
+
+        triple = evaluate_confirmed_triple_pattern(df_5m, cfg_obj)
+        event["triple_pattern_policy"] = triple.to_dict()
+        if triple.accepted:
+            guard_ok, guard_detail = _paper_entry_guard(
+                symbol,
+                max_per_symbol=1,
+            )
+            event["paper_entry_guard"] = guard_detail
+            if not guard_ok:
+                event.update({
+                    "decision": "REJECT",
+                    "stage": "PAPER_TRIPLE_PATTERN_SYMBOL_GUARD",
+                    "reasons": [guard_detail.get("reason", "PAPER_SYMBOL_RISK_GUARD")],
+                })
+                _append(event)
+                return None
+
+            entry = float(cur["close"]) if not pd.isna(cur.get("close")) else 0.0
+            if entry <= 0:
+                event.update({
+                    "decision": "REJECT",
+                    "stage": "TRIPLE_PATTERN_ENTRY_PRICE",
+                    "reasons": ["INVALID_ENTRY_PRICE"],
+                })
+                _append(event)
+                return None
+
+            stop_fraction = triple.stop_loss_percent / 100.0
+            target_fraction = triple.profit_target_percent / 100.0
+            sign = 1.0 if triple.direction == "BUY" else -1.0
+            stop = entry * (1.0 - sign * stop_fraction)
+            target = entry * (1.0 + sign * target_fraction)
+            trade_policy = {
+                "exit_policy": PATTERN_FIXED_EXIT_POLICY,
+                "pattern": triple.pattern,
+                "stop_loss_percent": triple.stop_loss_percent,
+                "profit_target_percent": triple.profit_target_percent,
+            }
+            event.update({
+                "decision": "SIGNAL_SELECTED",
+                "stage": "CONFIRMED_TRIPLE_PATTERN_SIGNAL",
+                "entry_price": entry,
+                "stop_loss": stop,
+                "target": target,
+                "trade_policy": trade_policy,
+            })
+            _append(event)
+            logger.info(
+                "PAPER TRIPLE PATTERN SIGNAL | %s | pattern=%s direction=%s "
+                "volume_ratio=%.3f target=%.2f%% stop=%.2f%%",
+                symbol,
+                triple.pattern,
+                triple.direction,
+                triple.volume_ratio,
+                triple.profit_target_percent,
+                triple.stop_loss_percent,
+            )
+            return strategy.Signal(
+                symbol=symbol,
+                direction=triple.direction,
+                entry_price=entry,
+                stop_loss=stop,
+                target=target,
+                timestamp=cur["date"],
+                reason=(
+                    f"PAPER CONFIRMED {triple.pattern} | fresh neckline cross | "
+                    f"VWAP aligned | volume_ratio={triple.volume_ratio:.3f} | "
+                    f"fixed target={triple.profit_target_percent:.2f}%"
+                ),
+                confidence="PATTERN_CONFIRMED",
+                price_action_detail={
+                    "trade_policy": trade_policy,
+                    "triple_pattern": triple.to_dict(),
+                },
+            )
 
         timeframe_text = str(getattr(cfg_obj, "ENTRY_TIMEFRAME", "3minute"))
         timeframe_digits = "".join(ch for ch in timeframe_text if ch.isdigit())
