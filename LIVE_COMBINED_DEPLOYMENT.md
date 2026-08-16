@@ -7,7 +7,7 @@ LIVE stack. Installing these files does **not** enable or start live trading.
 
 - Risk per trade: 0.20% of configured capital
 - Simultaneous positions: 1
-- Entries per day: 2
+- Entries per day: 7
 - Daily loss shutdown: 0.50%
 - Margin check: mandatory
 - Product: MIS only
