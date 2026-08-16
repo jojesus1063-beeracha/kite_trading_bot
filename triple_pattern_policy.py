@@ -1,4 +1,4 @@
-"""Point-in-time triple-top/bottom policy for the PAPER strategy.
+"""Point-in-time triple-top/bottom policy for guarded paper/live strategies.
 
 The detector uses only candles that precede the breakout candle.  A signal is
 accepted only on a fresh neckline cross with VWAP alignment and at least the
@@ -142,9 +142,13 @@ def evaluate_confirmed_triple_pattern(
     cfg_obj,
     *,
     now=None,
+    allow_live: bool = False,
 ) -> TriplePatternDecision:
     """Evaluate the latest completed entry candle without look-ahead."""
-    if not bool(getattr(cfg_obj, "PAPER_TRADING", False)):
+    paper_mode = bool(getattr(cfg_obj, "PAPER_TRADING", False))
+    if allow_live and paper_mode:
+        return TriplePatternDecision(False, reasons=["LIVE_MODE_REQUIRED"])
+    if not paper_mode and not allow_live:
         return TriplePatternDecision(False, reasons=["PAPER_ONLY"])
     if not bool(getattr(cfg_obj, "PAPER_ENABLE_TRIPLE_PATTERN", True)):
         return TriplePatternDecision(False, reasons=["DISABLED"])
