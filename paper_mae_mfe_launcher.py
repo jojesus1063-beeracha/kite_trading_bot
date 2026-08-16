@@ -29,6 +29,7 @@ import pandas as pd
 import config as cfg
 import paper_contrarian_launcher as base
 import paper_mfe_time_launcher as mfe_time
+from triple_pattern_policy import is_pattern_fixed_exit
 
 logger = logging.getLogger("paper_mae_mfe_launcher")
 
@@ -162,6 +163,9 @@ def install_mae_adverse_exit_patch(trading_main):
             return status
 
         position = open_positions[symbol]
+        if is_pattern_fixed_exit(position):
+            # Preserve the exact stop/target policy evaluated out of sample.
+            return status
         minutes = _minutes_in_trade(position)
         if minutes is None or minutes <= MAE_MIN_AGE_MINUTES:
             return status
