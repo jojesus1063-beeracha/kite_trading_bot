@@ -30,6 +30,7 @@ logger = logging.getLogger("fno.opening_scalper")
 
 def build_snapshot(
     tick_store: TickStore,
+    underlying_token: int,
     ce_token: int,
     pe_token: int,
     underlying_prev_close: Optional[float],
@@ -37,18 +38,20 @@ def build_snapshot(
     pe_history: tuple = (),
 ) -> Optional[MarketSnapshot]:
     """
-    Reads the latest CE/PE ticks from the store and assembles a
-    MarketSnapshot. Returns None (never a partially-filled/garbage
-    snapshot) if either leg has no tick yet -- callers must treat
-    "no snapshot" as "cannot evaluate signals yet", not "assume zero".
+    Reads the latest underlying/CE/PE ticks from the store and
+    assembles a MarketSnapshot. Returns None (never a partially-filled/
+    garbage snapshot) if ANY of the three legs has no tick yet --
+    callers must treat "no snapshot" as "cannot evaluate signals yet",
+    not "assume zero" for the missing piece.
     """
+    underlying_tick = tick_store.latest(underlying_token)
     ce_tick = tick_store.latest(ce_token)
     pe_tick = tick_store.latest(pe_token)
-    if ce_tick is None or pe_tick is None:
+    if underlying_tick is None or ce_tick is None or pe_tick is None:
         return None
 
     return MarketSnapshot(
-        underlying_price=None,  # filled in by caller from the underlying token's tick -- see evaluate_signals
+        underlying_price=underlying_tick.last_price,
         underlying_prev_close=underlying_prev_close,
         ce_price=ce_tick.last_price,
         pe_price=pe_tick.last_price,
