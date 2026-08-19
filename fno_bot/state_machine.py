@@ -111,6 +111,14 @@ def transition(ctx: SessionContext, event: str, **data) -> SessionContext:
     if s == State.FIRST_TICK_CAPTURE:
         if event == "FIRST_TICKS_CAPTURED":
             ctx.state = State.VALIDATE_MARKET
+        elif event == "MARKET_INVALID":
+            # No first tick arrived at all within the entry window --
+            # same terminal-for-this-attempt outcome as failing
+            # validation after a tick DID arrive (VALIDATE_MARKET's own
+            # MARKET_INVALID branch below), just detected one step
+            # earlier in the sequence.
+            ctx.abort_reason = data.get("reason", "no first tick within entry window")
+            ctx.state = State.ABORTED
         return ctx
 
     if s == State.VALIDATE_MARKET:
