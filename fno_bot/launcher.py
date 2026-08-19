@@ -191,6 +191,44 @@ def _fetch_prev_close(kite, underlying_cfg) -> Optional[float]:
         return None
 
 
+def _today_at(hhmmss: str) -> datetime:
+    h, m, s = (int(x) for x in hhmmss.split(":"))
+    now = datetime.now(IST)
+    return now.replace(hour=h, minute=m, second=s, microsecond=0)
+
+
+def wait_for_market_open(ctx, clock_fn=None, sleep_fn=None, poll_seconds: float = 1.0):
+    """WAIT_MARKET -> FIRST_TICK_CAPTURE (spec's own state diagram).
+
+    This is the step that was silently MISSING from the first working
+    version of this file: run_strike_and_signal() was being called
+    directly after PREPARE, so the state machine never actually left
+    WAIT_MARKET -- every later transition() call inside
+    run_strike_and_signal (and, transitively, ENTRY_PENDING/etc. in
+    main()) was a no-op against a state that didn't recognize the
+    event, even though the underlying broker calls (subscribing,
+    evaluating signals) still ran. Caught by actually running this
+    file for the first time tonight (see PROGRESS notes) -- exactly
+    the risk flagged in this file's own docstring about orchestration
+    never having been exercised live.
+
+    clock_fn/sleep_fn are injectable (default real time.sleep /
+    datetime.now) purely so this is unit-testable without an actual
+    wait -- same pattern as the rest of this package.
+    """
+    clock_fn = clock_fn or (lambda: datetime.now(IST))
+    sleep_fn = sleep_fn or time.sleep
+    market_open_at = _today_at(cfg.ENTRY_START_TIME)
+
+    now = clock_fn()
+    if now < market_open_at:
+        logger.info(f"Waiting for market open at {market_open_at.isoformat()} (now {now.isoformat()})...")
+    while clock_fn() < market_open_at:
+        sleep_fn(poll_seconds)
+
+    return transition(ctx, "MARKET_OPEN_REACHED")
+
+
 def run_strike_and_signal(ctx, kite, tick_store, ticker, prepare_data):
     """FIRST_TICK_CAPTURE -> VALIDATE_MARKET -> SELECT_STRIKE -> GENERATE_SIGNAL.
     Returns (ctx, selection, snapshot, authorized_result)."""
@@ -413,6 +451,20 @@ def main():
         sys.exit(1)
 
     broker = get_broker(kite, tick_store) if cfg.MODE in ("PAPER", "LIVE") else None
+
+    ctx = wait_for_market_open(ctx)
+    if ctx.state != State.FIRST_TICK_CAPTURE:
+        # Should not happen -- wait_for_market_open only returns after
+        # market-open time, and WAIT_MARKET only reacts to
+        # MARKET_OPEN_REACHED (or a disconnect, handled elsewhere) --
+        # but refuse to proceed blind rather than silently running
+        # run_strike_and_signal() against a state it doesn't expect.
+        logger.error(f"Unexpected state after wait_for_market_open: {ctx.state.value}")
+        log_event("ERROR", reason=f"unexpected state after market-open wait: {ctx.state.value}")
+        save_bot_status(state=ctx.state.value, mode=cfg.MODE, underlying=cfg.UNDERLYING, session_summary=None)
+        if ticker is not None:
+            ticker.close()
+        sys.exit(1)
 
     ctx, selection, snapshot, authorized = run_strike_and_signal(ctx, kite, tick_store, ticker, prepare_data)
 
