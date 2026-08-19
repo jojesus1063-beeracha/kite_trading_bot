@@ -1,0 +1,220 @@
+"""
+Modular, independently shadow-testable CE/PE direction-selection
+candidates (spec #6). NONE of these is assumed correct -- the one
+observed trade (CE=307.30, PE=196.80, diff=110.50 -> bought PE) is one
+data point and proves nothing about which of these, if any, is a real
+edge. Every candidate here runs on every session in SHADOW mode; only
+cfg.AUTHORIZED_SIGNAL (default: None, meaning "no candidate is
+authorized yet") is ever allowed to produce a live/paper order --
+see opening_scalper.py.
+
+Each candidate takes a MarketSnapshot and returns a DirectionSignal.
+`direction` is "CE", "PE", or None (no opinion / insufficient data).
+Never raises for missing/insufficient data -- returns a None-direction
+signal with a reason instead, so one candidate's data gap never breaks
+the others or the shadow-logging pass.
+"""
+from dataclasses import dataclass, field
+from typing import Optional, Callable
+
+
+@dataclass(frozen=True)
+class TickPoint:
+    """One historical (price, monotonic_time) sample, used by candidates
+    that need a short recent window rather than just the latest tick."""
+    price: float
+    at_monotonic: float
+
+
+@dataclass(frozen=True)
+class MarketSnapshot:
+    underlying_price: float
+    underlying_prev_close: Optional[float]
+    ce_price: float
+    pe_price: float
+    ce_best_bid: Optional[float]
+    ce_best_ask: Optional[float]
+    ce_best_bid_qty: Optional[int]
+    ce_best_ask_qty: Optional[int]
+    pe_best_bid: Optional[float]
+    pe_best_ask: Optional[float]
+    pe_best_bid_qty: Optional[int]
+    pe_best_ask_qty: Optional[int]
+    ce_history: tuple = field(default_factory=tuple)   # recent TickPoints, oldest first
+    pe_history: tuple = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class DirectionSignal:
+    candidate: str
+    direction: Optional[str]   # "CE" | "PE" | None
+    confidence: Optional[float]  # 0-100, candidate-defined scale, None if no opinion
+    reason: str
+    raw_metrics: dict
+
+
+def premium_imbalance(snapshot: MarketSnapshot) -> DirectionSignal:
+    """
+    The candidate closest to what the observed trade superficially
+    looked like: CE and PE premiums differ, and the HIGHER-premium
+    side is read as "more bought up" (more expensive) -- so this
+    candidate selects the CHEAPER side, matching the one observed
+    example (CE 307.30 > PE 196.80 -> selected PE). This is exactly
+    the naive rule spec #6 warns against trusting; it exists here
+    ONLY as one shadow-tested candidate among several, never as a
+    default live rule.
+    """
+    diff = abs(snapshot.ce_price - snapshot.pe_price)
+    if snapshot.ce_price <= 0 or snapshot.pe_price <= 0:
+        return DirectionSignal("premium_imbalance", None, None, "non-positive premium", {})
+    diff_pct = diff / min(snapshot.ce_price, snapshot.pe_price) * 100
+    direction = "PE" if snapshot.ce_price > snapshot.pe_price else "CE"
+    confidence = min(diff_pct, 100.0)
+    return DirectionSignal(
+        "premium_imbalance", direction, confidence,
+        f"selected cheaper leg; ce={snapshot.ce_price:.2f} pe={snapshot.pe_price:.2f} diff_pct={diff_pct:.2f}",
+        {"ce_price": snapshot.ce_price, "pe_price": snapshot.pe_price, "diff": diff, "diff_pct": diff_pct},
+    )
+
+
+def premium_rate_of_change(snapshot: MarketSnapshot, min_points: int = 2) -> DirectionSignal:
+    """
+    Compares how fast CE vs PE premium has been RISING over the recent
+    history window, rather than absolute levels -- the side rising
+    faster is read as the side with real opening momentum behind it.
+    """
+    if len(snapshot.ce_history) < min_points or len(snapshot.pe_history) < min_points:
+        return DirectionSignal("premium_rate_of_change", None, None,
+                                "insufficient tick history for rate-of-change", {})
+    ce_roc = snapshot.ce_history[-1].price - snapshot.ce_history[0].price
+    pe_roc = snapshot.pe_history[-1].price - snapshot.pe_history[0].price
+    if ce_roc == pe_roc:
+        return DirectionSignal("premium_rate_of_change", None, 0.0, "no differential momentum",
+                                {"ce_roc": ce_roc, "pe_roc": pe_roc})
+    direction = "CE" if ce_roc > pe_roc else "PE"
+    confidence = min(abs(ce_roc - pe_roc) / max(abs(ce_roc), abs(pe_roc), 0.01) * 100, 100.0)
+    return DirectionSignal(
+        "premium_rate_of_change", direction, confidence,
+        f"faster-rising leg selected; ce_roc={ce_roc:.2f} pe_roc={pe_roc:.2f}",
+        {"ce_roc": ce_roc, "pe_roc": pe_roc},
+    )
+
+
+def underlying_open_vs_prev_close(snapshot: MarketSnapshot) -> DirectionSignal:
+    """
+    Simple gap-direction read: underlying opened above previous close
+    -> bullish gap -> CE; below -> PE. The crudest, most classically
+    "momentum" candidate, included because it's the most-cited naive
+    opening strategy and worth having as a baseline comparison point.
+    """
+    if snapshot.underlying_prev_close is None or snapshot.underlying_prev_close <= 0:
+        return DirectionSignal("underlying_open_vs_prev_close", None, None, "previous close unavailable", {})
+    gap = snapshot.underlying_price - snapshot.underlying_prev_close
+    gap_pct = gap / snapshot.underlying_prev_close * 100
+    if gap == 0:
+        return DirectionSignal("underlying_open_vs_prev_close", None, 0.0, "flat open, no gap", {"gap_pct": 0.0})
+    direction = "CE" if gap > 0 else "PE"
+    confidence = min(abs(gap_pct) * 20, 100.0)  # a 5% gap maxes out confidence; tune only after shadow evidence
+    return DirectionSignal(
+        "underlying_open_vs_prev_close", direction, confidence,
+        f"gap={gap:.2f} ({gap_pct:+.3f}%) vs prev close {snapshot.underlying_prev_close:.2f}",
+        {"gap": gap, "gap_pct": gap_pct},
+    )
+
+
+def bid_ask_imbalance(snapshot: MarketSnapshot) -> DirectionSignal:
+    """
+    Compares best-level bid/ask size on CE vs PE: heavier bid-side
+    interest on one leg relative to its own ask is read as buying
+    pressure on that leg. This only uses best-of-book (level 1) size,
+    a real limitation flagged in raw_metrics -- true depth imbalance
+    would need multiple levels, which the ticker's normalized tick
+    currently only exposes as best bid/ask (see tick_store.py).
+    """
+    def leg_pressure(bid_qty, ask_qty):
+        if not bid_qty and not ask_qty:
+            return None
+        total = (bid_qty or 0) + (ask_qty or 0)
+        if total == 0:
+            return None
+        return ((bid_qty or 0) - (ask_qty or 0)) / total  # -1..+1, +ve = bid-heavy
+
+    ce_pressure = leg_pressure(snapshot.ce_best_bid_qty, snapshot.ce_best_ask_qty)
+    pe_pressure = leg_pressure(snapshot.pe_best_bid_qty, snapshot.pe_best_ask_qty)
+
+    if ce_pressure is None or pe_pressure is None:
+        return DirectionSignal("bid_ask_imbalance", None, None, "missing depth on one or both legs",
+                                {"note": "level-1 depth only, not full market depth"})
+
+    if ce_pressure == pe_pressure:
+        return DirectionSignal("bid_ask_imbalance", None, 0.0, "equal bid/ask pressure on both legs",
+                                {"ce_pressure": ce_pressure, "pe_pressure": pe_pressure})
+
+    direction = "CE" if ce_pressure > pe_pressure else "PE"
+    confidence = min(abs(ce_pressure - pe_pressure) * 100, 100.0)
+    return DirectionSignal(
+        "bid_ask_imbalance", direction, confidence,
+        f"stronger bid-side pressure; ce_pressure={ce_pressure:+.2f} pe_pressure={pe_pressure:+.2f} "
+        f"(level-1 depth only)",
+        {"ce_pressure": ce_pressure, "pe_pressure": pe_pressure, "note": "level-1 depth only"},
+    )
+
+
+def depth_imbalance(snapshot: MarketSnapshot) -> DirectionSignal:
+    """
+    Distinct from bid_ask_imbalance: compares TOTAL visible liquidity
+    (bid_qty + ask_qty) on CE vs PE, as a proxy for which leg the
+    market is more actively quoting/interested in right now, rather
+    than directional pressure within one leg's book.
+    """
+    ce_total = (snapshot.ce_best_bid_qty or 0) + (snapshot.ce_best_ask_qty or 0)
+    pe_total = (snapshot.pe_best_bid_qty or 0) + (snapshot.pe_best_ask_qty or 0)
+
+    if ce_total == 0 and pe_total == 0:
+        return DirectionSignal("depth_imbalance", None, None, "no depth data on either leg", {})
+
+    if ce_total == pe_total:
+        return DirectionSignal("depth_imbalance", None, 0.0, "equal visible liquidity",
+                                {"ce_total": ce_total, "pe_total": pe_total})
+
+    # Interpretation is deliberately left as an open question for shadow
+    # analysis: does more liquidity on a leg predict it's the one about
+    # to move, or just the one everyone's already positioned in? Direction
+    # here follows the MORE-liquid leg; this is a hypothesis to test, not
+    # a conclusion.
+    direction = "CE" if ce_total > pe_total else "PE"
+    confidence = min(abs(ce_total - pe_total) / max(ce_total, pe_total) * 100, 100.0)
+    return DirectionSignal(
+        "depth_imbalance", direction, confidence,
+        f"more-liquid leg selected (hypothesis, unvalidated); ce_total={ce_total} pe_total={pe_total}",
+        {"ce_total": ce_total, "pe_total": pe_total},
+    )
+
+
+CANDIDATE_REGISTRY: dict[str, Callable[[MarketSnapshot], DirectionSignal]] = {
+    "premium_imbalance": premium_imbalance,
+    "premium_rate_of_change": premium_rate_of_change,
+    "underlying_open_vs_prev_close": underlying_open_vs_prev_close,
+    "bid_ask_imbalance": bid_ask_imbalance,
+    "depth_imbalance": depth_imbalance,
+}
+
+
+def evaluate_all_candidates(snapshot: MarketSnapshot, candidate_names: list[str] = None) -> list[DirectionSignal]:
+    """Runs every requested candidate (default: everything in the
+    registry) against one snapshot. A single candidate raising is
+    caught and converted into a None-direction signal with the
+    exception as its reason -- one bad candidate must never prevent
+    the others (or the authorized one) from being evaluated and logged."""
+    names = candidate_names if candidate_names is not None else list(CANDIDATE_REGISTRY.keys())
+    results = []
+    for name in names:
+        fn = CANDIDATE_REGISTRY.get(name)
+        if fn is None:
+            results.append(DirectionSignal(name, None, None, f"unknown candidate {name!r}", {}))
+            continue
+        try:
+            results.append(fn(snapshot))
+        except Exception as e:
+            results.append(DirectionSignal(name, None, None, f"candidate raised: {e}", {}))
+    return results
