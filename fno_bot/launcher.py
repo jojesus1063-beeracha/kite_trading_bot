@@ -231,17 +231,30 @@ def wait_for_market_open(ctx, clock_fn=None, sleep_fn=None, poll_seconds: float 
 
 def run_strike_and_signal(ctx, kite, tick_store, ticker, prepare_data):
     """FIRST_TICK_CAPTURE -> VALIDATE_MARKET -> SELECT_STRIKE -> GENERATE_SIGNAL.
-    Returns (ctx, selection, snapshot, authorized_result)."""
+
+    Stops at GENERATE_SIGNAL -- strike picked, CE/PE first ticks in --
+    and hands off to the caller for signal evaluation. Originally this
+    function ALSO evaluated the signal once, right here, off the very
+    first CE/PE tick. Split out after the first real PAPER session
+    (2026-08-20) showed that single-tick decision is fragile: a noisy
+    opening print can burn the day's only opportunity even when the
+    authorized signal is objectively firing. See run_entry_window()
+    for the PAPER/LIVE opening-range polling replacement; SHADOW mode
+    still evaluates once, directly in main(), since it never places an
+    order regardless of how many times it looks.
+
+    Returns (ctx, selection, prev_close).
+    """
     underlying_token = prepare_data["underlying_token"]
     underlying_cfg = prepare_data["underlying_cfg"]
 
     if not _wait_for_ticks(tick_store, [underlying_token], cfg.MAX_ENTRY_WINDOW_SECONDS):
-        return transition(ctx, "MARKET_INVALID", reason="no underlying tick within entry window"), None, None, None
+        return transition(ctx, "MARKET_INVALID", reason="no underlying tick within entry window"), None, None
     log_event("FIRST_UNDERLYING_TICK", price=tick_store.latest(underlying_token).last_price)
     ctx = transition(ctx, "FIRST_TICKS_CAPTURED")
 
     if not tick_store.is_fresh(underlying_token, cfg.MAX_TICK_AGE_MS):
-        return transition(ctx, "MARKET_INVALID", reason="underlying tick already stale"), None, None, None
+        return transition(ctx, "MARKET_INVALID", reason="underlying tick already stale"), None, None
     ctx = transition(ctx, "MARKET_VALID")
 
     underlying_tick = tick_store.latest(underlying_token)
@@ -250,7 +263,7 @@ def run_strike_and_signal(ctx, kite, tick_store, ticker, prepare_data):
         expiry=prepare_data["expiry"], strike_interval=underlying_cfg["strike_interval"],
     )
     if selection is None:
-        return transition(ctx, "STRIKE_SELECTION_FAILED", reason="ATM CE/PE not both available"), None, None, None
+        return transition(ctx, "STRIKE_SELECTION_FAILED", reason="ATM CE/PE not both available"), None, None
     log_event("STRIKE_SELECTED", strike=selection.atm_strike, expiry=str(selection.expiry))
     ctx = transition(ctx, "STRIKE_SELECTED", selection=selection)
 
@@ -258,25 +271,77 @@ def run_strike_and_signal(ctx, kite, tick_store, ticker, prepare_data):
     pe_token = selection.pe_contract.instrument_token
     ticker.subscribe([ce_token, pe_token], mode="full")
     if not _wait_for_ticks(tick_store, [ce_token, pe_token], timeout_seconds=30):
-        return transition(ctx, "NO_TRADABLE_SIGNAL", reason="CE/PE ticks did not arrive within 30s"), selection, None, None
+        return transition(ctx, "NO_TRADABLE_SIGNAL", reason="CE/PE ticks did not arrive within 30s"), selection, None
     log_event("FIRST_CE_TICK", price=tick_store.latest(ce_token).last_price)
     log_event("FIRST_PE_TICK", price=tick_store.latest(pe_token).last_price)
 
     prev_close = _fetch_prev_close(kite, underlying_cfg)
-    snapshot = build_snapshot(tick_store, underlying_token, ce_token, pe_token, prev_close)
-    if snapshot is None:
-        return transition(ctx, "NO_TRADABLE_SIGNAL", reason="snapshot unavailable after ticks arrived"), selection, None, None
+    return ctx, selection, prev_close
 
-    all_results, authorized = evaluate_signals(snapshot, cfg.AUTHORIZED_SIGNAL)
-    log_event("SIGNAL_EVALUATED", results=[
-        {"candidate": r.candidate, "direction": r.direction, "confidence": r.confidence} for r in all_results
-    ])
 
-    if authorized is None:
-        log_event("SIGNAL_REJECTED", reason="no authorized candidate produced a direction this tick")
-        return transition(ctx, "NO_TRADABLE_SIGNAL", reason="no authorized signal"), selection, snapshot, None
+def run_entry_window(ctx, broker, tick_store, selection, underlying_token, prev_close,
+                      clock_fn=None, sleep_fn=None, poll_seconds: float = 1.0):
+    """GENERATE_SIGNAL -> ENTRY_PENDING -> (POSITION_OPEN | ABORTED).
 
-    return transition(ctx, "SIGNAL_AUTHORIZED", signal=authorized), selection, snapshot, authorized
+    Opening-range entry protocol (added 2026-08-20, replacing the
+    original single-first-tick decision -- see run_strike_and_signal's
+    docstring for why): re-evaluates every signal candidate and
+    re-attempts entry against FRESH ticks on every poll cycle, for the
+    whole cfg.ENTRY_START_TIME..cfg.ENTRY_END_TIME window, instead of
+    deciding once off the very first tick. Stops the instant ONE
+    attempt actually fills or partially fills -- still exactly one
+    trade per day; run_entry()'s own kill-switch check and
+    MAX_TRADES_PER_DAY guard the day-level rule, this loop's only job
+    is giving that first trade more chances to find a clean entry.
+
+    Each round calls run_entry(), which itself reads the CURRENT best
+    ask/CE-or-PE price fresh at call time as the slippage-check anchor
+    -- so a genuinely-moved market gets a fresh, fair chance each
+    round, rather than perpetually failing against the very first
+    tick's now-stale price the way a single anchor for the whole
+    window would.
+
+    clock_fn/sleep_fn injectable (default datetime.now(IST)/time.sleep)
+    for testability, same DI pattern as wait_for_market_open().
+    Returns (ctx, position_or_None, kill_switch_or_None, last_snapshot_or_None).
+    """
+    clock_fn = clock_fn or (lambda: datetime.now(IST))
+    sleep_fn = sleep_fn or time.sleep
+    window_end = _today_at(cfg.ENTRY_END_TIME)
+    ce_token = selection.ce_contract.instrument_token
+    pe_token = selection.pe_contract.instrument_token
+    last_snapshot = None
+
+    while clock_fn() < window_end:
+        snapshot = build_snapshot(tick_store, underlying_token, ce_token, pe_token, prev_close)
+        if snapshot is not None:
+            last_snapshot = snapshot
+            all_results, authorized = evaluate_signals(snapshot, cfg.AUTHORIZED_SIGNAL)
+            log_event("SIGNAL_EVALUATED", results=[
+                {"candidate": r.candidate, "direction": r.direction, "confidence": r.confidence} for r in all_results
+            ])
+
+            if authorized is not None:
+                position, kill_switch, err = run_entry(broker, cfg, tick_store, selection, authorized, ticker=None)
+                if position is not None:
+                    ctx = transition(ctx, "SIGNAL_AUTHORIZED", signal=authorized)
+                    ctx = transition(ctx, "ENTRY_FILLED", result=position)
+                    return ctx, position, kill_switch, last_snapshot
+                if err and "kill switch halted" in str(err):
+                    # Day-level halt -- won't clear mid-window, stop polling now
+                    # rather than keep re-checking a state that can't improve.
+                    ctx = transition(ctx, "SIGNAL_AUTHORIZED", signal=authorized)
+                    ctx = transition(ctx, "ENTRY_ABORTED", reason=err)
+                    return ctx, None, kill_switch, last_snapshot
+                # This round's attempt didn't fill (spread/slippage/stale-tick
+                # -- already audit-logged inside execute_entry). Keep polling;
+                # a later tick within the window may clear the same checks.
+
+        sleep_fn(poll_seconds)
+
+    log_event("WINDOW_EXPIRED_NO_TRADE", window_end=window_end.isoformat())
+    ctx = transition(ctx, "NO_TRADABLE_SIGNAL", reason="WINDOW_EXPIRED_NO_TRADE: no fill within entry window")
+    return ctx, None, None, last_snapshot
 
 
 def run_shadow_observation(tick_store, underlying_token, ce_token, pe_token, snapshot, max_seconds, sleep_fn=None):
@@ -466,28 +531,57 @@ def main():
             ticker.close()
         sys.exit(1)
 
-    ctx, selection, snapshot, authorized = run_strike_and_signal(ctx, kite, tick_store, ticker, prepare_data)
-
-    if ctx.state == State.ABORTED and snapshot is not None:
-        run_shadow_observation(
-            tick_store, prepare_data["underlying_token"], selection.ce_contract.instrument_token,
-            selection.pe_contract.instrument_token, snapshot, max(cfg.COUNTERFACTUAL_HORIZONS_SECONDS),
-        )
+    ctx, selection, prev_close = run_strike_and_signal(ctx, kite, tick_store, ticker, prepare_data)
+    underlying_token = prepare_data["underlying_token"]
 
     trade_summary = None
-    if ctx.state == State.ENTRY_PENDING and cfg.MODE in ("PAPER", "LIVE"):
-        position, kill_switch, err = run_entry(broker, cfg, tick_store, selection, authorized, ticker)
-        if position is None:
-            ctx = transition(ctx, "ENTRY_ABORTED", reason=err or "entry not filled")
-        else:
-            ctx = transition(ctx, "ENTRY_FILLED", result=position)
-            ctx = transition(ctx, "MONITORING_STARTED")
-            exit_result, exit_reason = run_monitor_and_exit(broker, ticker, tick_store, position, kill_switch, cfg)
-            ctx = transition(ctx, "EXIT_CONDITION_FIRED")
-            ctx = transition(ctx, "EXIT_FILLED", result=exit_result)
-            ctx = transition(ctx, "REPORTED")
-            trade_summary = {"exit_reason": exit_reason, "filled_quantity": exit_result.filled_quantity,
-                              "average_price": exit_result.average_price}
+    last_snapshot = None
+    position = None
+    kill_switch = None
+
+    if ctx.state == State.GENERATE_SIGNAL and cfg.MODE in ("PAPER", "LIVE"):
+        # Opening-range entry protocol: keep evaluating fresh ticks and
+        # attempting entry for the whole ENTRY_START_TIME..ENTRY_END_TIME
+        # window, instead of deciding once off the very first tick alone
+        # (see run_entry_window()'s docstring for why -- added after the
+        # first real PAPER session showed the single-shot version can
+        # burn the day's only opportunity on one noisy opening print).
+        ctx, position, kill_switch, last_snapshot = run_entry_window(
+            ctx, broker, tick_store, selection, underlying_token, prev_close,
+        )
+    elif ctx.state == State.GENERATE_SIGNAL:
+        # SHADOW mode: never places an order regardless of how many
+        # times it looks, so a single evaluation (for logging/shadow
+        # evidence) is enough -- unchanged from the original behavior.
+        last_snapshot = build_snapshot(
+            tick_store, underlying_token, selection.ce_contract.instrument_token,
+            selection.pe_contract.instrument_token, prev_close,
+        )
+        if last_snapshot is not None:
+            all_results, authorized = evaluate_signals(last_snapshot, cfg.AUTHORIZED_SIGNAL)
+            log_event("SIGNAL_EVALUATED", results=[
+                {"candidate": r.candidate, "direction": r.direction, "confidence": r.confidence} for r in all_results
+            ])
+            if authorized is not None:
+                ctx = transition(ctx, "SIGNAL_AUTHORIZED", signal=authorized)
+            else:
+                log_event("SIGNAL_REJECTED", reason="no authorized candidate produced a direction this tick")
+                ctx = transition(ctx, "NO_TRADABLE_SIGNAL", reason="no authorized signal")
+
+    if ctx.state == State.ABORTED and last_snapshot is not None:
+        run_shadow_observation(
+            tick_store, underlying_token, selection.ce_contract.instrument_token,
+            selection.pe_contract.instrument_token, last_snapshot, max(cfg.COUNTERFACTUAL_HORIZONS_SECONDS),
+        )
+
+    if ctx.state == State.POSITION_OPEN and position is not None:
+        ctx = transition(ctx, "MONITORING_STARTED")
+        exit_result, exit_reason = run_monitor_and_exit(broker, ticker, tick_store, position, kill_switch, cfg)
+        ctx = transition(ctx, "EXIT_CONDITION_FIRED")
+        ctx = transition(ctx, "EXIT_FILLED", result=exit_result)
+        ctx = transition(ctx, "REPORTED")
+        trade_summary = {"exit_reason": exit_reason, "filled_quantity": exit_result.filled_quantity,
+                          "average_price": exit_result.average_price}
 
     save_bot_status(state=ctx.state.value, mode=cfg.MODE, underlying=cfg.UNDERLYING, session_summary=trade_summary)
     logger.info(f"Session ended in state={ctx.state.value} abort_reason={ctx.abort_reason} summary={trade_summary}")

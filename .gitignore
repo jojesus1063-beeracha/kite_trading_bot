@@ -28,3 +28,16 @@ bot.log
 watchlist_daily_range.json
 pending_orders.json
 pending_orders.json.lock
+
+# fno_bot runtime state (production data, not code) -- distinct filenames
+# from the equity bot's own by design (isolation), so needs its own entries
+fno_bot/audit_logs/
+fno_bot/shadow_logs/
+fno_bot/instruments_cache*.json
+fno_open_positions.json
+fno_open_positions.json.lock
+fno_trade_history.jsonl
+fno_bot_status.json
+shared_capital_ledger.json
+shared_capital_ledger.json.lock
+fno_bot/user_config_fno.json
