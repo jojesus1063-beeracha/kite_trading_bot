@@ -1,23 +1,18 @@
 """Apply the stewardship-risk wiring to the current main.py in-place.
 
-Why this exists:
-The live VM has orchestration files that are newer than GitHub main.
-This patch therefore performs narrow, assertion-backed replacements
-instead of replacing the whole file and accidentally deleting VM-only
-hardening. It is safe to run once after syncing the branch to the VM.
+The live VM contains orchestration changes newer than GitHub main. This
+script therefore performs narrow, assertion-backed replacements instead
+of replacing the entire file and risking deletion of VM-only hardening.
 
 Usage:
     python3 apply_stewardship_main_patch.py --check
     python3 apply_stewardship_main_patch.py
-
---check validates every expected anchor without writing anything.
 """
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-
 
 PATH = Path(__file__).resolve().with_name("main.py")
 
@@ -34,15 +29,18 @@ def build_patched(text: str) -> str:
         "from scheduler import candle_interval_minutes, last_completed_candle_close, "
         "next_scan_time, ScanGuard\n"
     )
-    import_new = import_anchor + (
-        "from stewardship_policy import (\n"
-        "    entry_quality_score,\n"
-        "    preserve_minimum_rr_target,\n"
-        "    two_candle_adverse_confirmation,\n"
-        ")\n"
-    )
     if "from stewardship_policy import (" not in text:
-        text = replace_once(text, import_anchor, import_new, "policy import")
+        text = replace_once(
+            text,
+            import_anchor,
+            import_anchor
+            + "from stewardship_policy import (\n"
+              "    entry_quality_score,\n"
+              "    preserve_minimum_rr_target,\n"
+              "    two_candle_adverse_confirmation,\n"
+              ")\n",
+            "policy import",
+        )
 
     qty_anchor = """
 
@@ -140,10 +138,40 @@ def build_patched(text: str) -> str:
     if "preserve_minimum_rr_target(" not in text[text.find("confirmed_entry_price"):]:
         text = replace_once(text, target_anchor, target_new, "minimum R:R target")
 
-    pos_anchor = '                    "entry_status_message": result.get("reason"),\n'
-    pos_new = pos_anchor + '                    "entry_quality_score": quality_score,\n'
-    if '"entry_quality_score": quality_score' not in text:
+    # Persist the exact quality score attached to the accepted entry.
+    pos_anchor = (
+        '                    "entry_status_message": result.get("reason"),\n'
+        '                }\n'
+    )
+    pos_new = (
+        '                    "entry_status_message": result.get("reason"),\n'
+        '                    "entry_quality_score": quality_score,\n'
+        '                }\n'
+    )
+    if pos_anchor in text:
         text = replace_once(text, pos_anchor, pos_new, "persist quality score")
+
+    # The audit log must report the target that will actually be managed.
+    if 'f"target={signal.target:.2f}' in text:
+        text = replace_once(
+            text,
+            'f"target={signal.target:.2f} | {signal.reason} "',
+            'f"target={target_price:.2f} | {signal.reason} "',
+            "actual target log",
+        )
+
+    # Remove an existing duplicate confidence key in status output.
+    duplicate_confidence = (
+        '                    "confidence": signal.confidence,\n'
+        '                    "confidence": signal.confidence,\n'
+    )
+    if duplicate_confidence in text:
+        text = replace_once(
+            text,
+            duplicate_confidence,
+            '                    "confidence": signal.confidence,\n',
+            "duplicate confidence key",
+        )
 
     flags_anchor = """    hit_trailing_stop = False
     structure_broken = False
@@ -174,6 +202,20 @@ def build_patched(text: str) -> str:
 """
     if "adverse_confirmed = two_candle_adverse_confirmation" not in text:
         text = replace_once(text, flags_anchor, flags_new, "two-candle adverse confirmation")
+
+    old_fixed_comment = """        # Pure Fixed Target Mode: ONLY hard stop-loss + fixed target are
+        # checked. ATR trailing stop, market structure break, and 15m
+        # trend reversal are intentionally bypassed entirely -- by
+        # explicit design choice, temporary pullbacks and higher-
+        # timeframe trend changes must NOT close the trade early.
+"""
+    new_fixed_comment = """        # Fixed-target mode keeps the hard stop and protected fixed target.
+        # ATR trailing, structure-break and 15m reversal remain bypassed,
+        # but the stewardship two-completed-candle adverse confirmation
+        # is intentionally still allowed to close a deteriorating trade.
+"""
+    if old_fixed_comment in text:
+        text = replace_once(text, old_fixed_comment, new_fixed_comment, "fixed-target comment")
 
     exit_if_anchor = """    if hit_hard_stop or hit_trailing_stop or structure_broken or trend_reversed or hit_target:
         if hit_hard_stop:
