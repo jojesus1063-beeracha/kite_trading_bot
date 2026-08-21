@@ -287,17 +287,17 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "entry_average_price": result.get("average_price"),
                     "entry_confirmation_pending": result.get("entry_confirmation_pending", False),
                     "entry_status_message": result.get("reason"),
+                    "entry_quality_score": quality_score,
                 }
                 save_positions(open_positions)
                 logger.info(f"ENTRY {signal.direction} {exchange}:{symbol} qty={confirmed_qty} "
                             f"entry={confirmed_entry_price:.2f} stop={signal.stop_loss:.2f} "
-                            f"target={signal.target:.2f} | {signal.reason} "
+                            f"target={target_price:.2f} | {signal.reason} "
                             f"[market_alignment: {signal.market_alignment}] "
                             f"[fill_status: {result.get('status')}]")
                 status_this_cycle.append({
                     "symbol": symbol,
                     "status": f"ENTRY {signal.direction} @ {confirmed_entry_price:.2f}",
-                    "confidence": signal.confidence,
                     "confidence": signal.confidence,
                     "market_alignment": signal.market_alignment,
                 })
@@ -435,11 +435,10 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         adverse_confirmed = False
 
     if getattr(cfg, "ENABLE_FIXED_TARGET", False):
-        # Pure Fixed Target Mode: ONLY hard stop-loss + fixed target are
-        # checked. ATR trailing stop, market structure break, and 15m
-        # trend reversal are intentionally bypassed entirely -- by
-        # explicit design choice, temporary pullbacks and higher-
-        # timeframe trend changes must NOT close the trade early.
+        # Fixed-target mode keeps the hard stop and protected fixed target.
+        # ATR trailing, structure-break and 15m reversal remain bypassed,
+        # but the stewardship two-completed-candle adverse confirmation
+        # is intentionally still allowed to close a deteriorating trade.
         target_price = pos.get("target")
         try:
             if target_price is not None:
