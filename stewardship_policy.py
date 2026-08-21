@@ -56,9 +56,17 @@ def entry_quality_score(
     market_alignment: Optional[str] = None,
     news_adjusted_score: Optional[float] = None,
 ) -> float:
-    """Return one bounded 0-100 score from evidence the bot already computes."""
+    """Return one bounded 0-100 score from evidence the bot already computes.
+
+    Missing/unrecognised technical confidence deliberately starts at 40,
+    not 70. The August 20/21 trial logs showed live candidates with
+    technical_confidence=None; treating that as already-good confidence
+    made the gate artificially permissive. Unknown evidence must earn its
+    way above the configured threshold through real supporting evidence.
+    """
     if news_adjusted_score is None:
-        score = _CONFIDENCE_SCORE.get(confidence, 70) + float(price_action_score or 0.0)
+        base_score = _CONFIDENCE_SCORE.get(confidence, 40)
+        score = base_score + float(price_action_score or 0.0)
     else:
         score = float(news_adjusted_score)
 
