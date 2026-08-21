@@ -2,7 +2,8 @@
 Central configuration for the intraday candle+MA trading bot.
 
 Fill in your own values below. NEVER commit real API keys/secrets to a
-public repo — use environment variables in production.
+public repo — use environment variables in production (see the
+os.environ examples, commented out).
 """
 
 import os
@@ -10,13 +11,21 @@ import os
 # ---------------------------------------------------------------------
 # Kite Connect credentials
 # ---------------------------------------------------------------------
+# Get these from https://developers.kite.trade after subscribing to
+# Kite Connect (paid, separate from your regular trading plan).
 API_KEY = os.environ.get("KITE_API_KEY", "your_api_key_here")
 API_SECRET = os.environ.get("KITE_API_SECRET", "your_api_secret_here")
+
+# Kite access tokens expire daily. request_token is generated fresh each
+# morning via the login flow in auth.py — see README for the manual
+# step required (Kite Connect has no fully headless login).
 ACCESS_TOKEN_FILE = "access_token.txt"
 
 # ---------------------------------------------------------------------
 # Instruments to trade (cash intraday / MIS)
 # ---------------------------------------------------------------------
+# Each entry has its own exchange, so you can mix NSE and BSE stocks
+# in the same watchlist.
 WATCHLIST = [
     {"symbol": "RELIANCE", "exchange": "NSE"},
     {"symbol": "TCS", "exchange": "NSE"},
@@ -27,50 +36,74 @@ WATCHLIST = [
 # ---------------------------------------------------------------------
 # Strategy timeframes
 # ---------------------------------------------------------------------
-TREND_TIMEFRAME = "15minute"
+TREND_TIMEFRAME = "15minute"   # Kite historical API interval string
 ENTRY_TIMEFRAME = "5minute"
 
 # ---------------------------------------------------------------------
 # Indicator settings
 # ---------------------------------------------------------------------
-TREND_EMA_FAST = 20
-TREND_EMA_SLOW = 50
-ENTRY_EMA = 20
-VOLUME_LOOKBACK = 20
-VOLUME_MULTIPLIER = 1.2
+TREND_EMA_FAST = 20     # on 15-min chart
+TREND_EMA_SLOW = 50     # on 15-min chart
+ENTRY_EMA = 20          # on 5-min chart
+VOLUME_LOOKBACK = 20    # bars, for average-volume comparison on 5-min chart
+VOLUME_MULTIPLIER = 1.2  # entry candle volume must exceed avg volume * this
 
+# ADX (Average Directional Index) — measures trend STRENGTH (0-100),
+# used as an optional filter on top of the existing EMA/VWAP trend
+# check. When enabled, a 15-min candle only counts as trending if ADX
+# is above the threshold — filters out choppy periods where price
+# happens to sit above/below the EMAs without a real trend behind it.
+# Toggle this to False to compare strategy performance with/without.
 USE_ADX_FILTER = False
 ADX_PERIOD = 14
-ADX_THRESHOLD = 25
+ADX_THRESHOLD = 25  # Wilder's original suggested threshold for "trending"
+
+# Additive, opt-in alternative to the binary USE_ADX_FILTER above.
+# "" (empty/unset) -> mirrors USE_ADX_FILTER exactly (off or binary).
+# "off"     -> no ADX gating at all, regardless of USE_ADX_FILTER
+# "binary"  -> same pass/fail behavior as USE_ADX_FILTER=True
+# "dynamic" -> tiered confidence (REJECTED/MEDIUM/HIGH/VERY_STRONG),
+#              all tiers except REJECTED allow the trade
+# Does NOT change position sizing or existing BUY/SELL logic either way.
 ADX_MODE = ""
-ADX_DYNAMIC_MIN = 20
-ADX_DYNAMIC_STRONG = 35
+ADX_DYNAMIC_MIN = 20     # below this -> REJECTED
+# ADX_THRESHOLD above doubles as the MEDIUM/HIGH boundary in dynamic mode
+ADX_DYNAMIC_STRONG = 35  # at/above this -> VERY_STRONG
 
 # ---------------------------------------------------------------------
-# Risk management -- stewardship defaults
+# Risk management
 # ---------------------------------------------------------------------
-# Preserve capital first. A normal trade risks 0.20% of configured
-# capital and the entire day is capped at 0.50%. The prospective risk
-# budget in risk_manager.py also includes open stop risk before a new
-# order may be submitted.
-RISK_REWARD_MIN = 2.0
-RISK_PER_TRADE_PCT = 0.20
+RISK_REWARD_MIN = 2.0          # minimum reward:risk ratio (1:2)
+RISK_PER_TRADE_PCT = 0.20      # conservative stewardship default: 0.20% of capital risked per trade
 MAX_TRADES_PER_DAY = 5
-MAX_OPEN_POSITIONS = 1
-MAX_POSITION_SIZE_PCT = 50.0
-CHECK_MARGIN_BEFORE_ENTRY = True
-MAX_DAILY_LOSS_PCT = 0.50
-CAPITAL = float(os.environ.get("TRADING_CAPITAL", "100000"))
+MAX_OPEN_POSITIONS = 1          # cap on simultaneous different-symbol positions
+MAX_POSITION_SIZE_PCT = 50.0    # cap broker margin allocation; leave headroom for slippage/operational risk
+CHECK_MARGIN_BEFORE_ENTRY = True # verify real Zerodha margin via order_margins() before placing a live entry order
+MAX_DAILY_LOSS_PCT = 0.50       # hard daily budget; prospective open/proposed risk is also checked in risk_manager.py
+CAPITAL = float(os.environ.get("TRADING_CAPITAL", "100000"))  # your intraday capital, INR
 
-SL_BUFFER_PCT = 0.05
-SL_BUFFER_PCT_SELL = None
+# Stop-loss is placed at the low (long) / high (short) of the signal
+# candle, minus/plus a small buffer to avoid getting stopped out by
+# noise.
+SL_BUFFER_PCT = 0.05  # 0.05% buffer beyond the signal candle's extreme
+SL_BUFFER_PCT_SELL = None  # if set, overrides SL_BUFFER_PCT for SELL trades only.
+                            # None (default) = use SL_BUFFER_PCT for both directions,
+                            # fully backward compatible. Set wider for SELL to account
+                            # for sharper short-squeeze risk vs typical long drawdowns.
 
-CIRCUIT_PROXIMITY_PCT = 2.0
+CIRCUIT_PROXIMITY_PCT = 2.0  # block entries within this % of the relevant
+                              # circuit limit (upper for BUY, lower for SELL) --
+                              # avoids trades that could get trapped by a
+                              # locked circuit with no exit liquidity
 
-ENABLE_MARKET_ALIGNMENT_FILTER = False
+ENABLE_MARKET_ALIGNMENT_FILTER = False  # block entries whose market_alignment is
+                                          # MISALIGNED or STRONG_MISALIGNMENT.
+                                          # Default off -- enable explicitly once ready.
 
-MARKETAUX_API_KEY = os.environ.get("MARKETAUX_API_KEY", "")
-ENABLE_NEWS_FILTER = False
+MARKETAUX_API_KEY = os.environ.get("MARKETAUX_API_KEY", "")  # required for the news filter
+ENABLE_NEWS_FILTER = False  # additional risk layer, purely additive -- never generates
+                             # BUY/SELL signals, only evaluates whether an existing
+                             # technical signal should proceed (see news_filter.py)
 NEWS_LOOKBACK_HOURS = 24
 NEWS_CACHE_MINUTES = 5
 NEWS_TIMEOUT_SECONDS = 2
@@ -78,7 +111,8 @@ NEGATIVE_NEWS_BLOCK = True
 POSITIVE_NEWS_CONFIDENCE_BONUS = 5
 NEGATIVE_NEWS_CONFIDENCE_PENALTY = 25
 
-ENABLE_PRICE_ACTION = False
+ENABLE_PRICE_ACTION = False  # additional confirmation layer, pure confidence
+                              # modifier -- never independently rejects a trade
 USE_MARKET_STRUCTURE = True
 USE_SUPPORT_RESISTANCE = True
 USE_BREAKOUT_CONFIRMATION = True
@@ -90,53 +124,77 @@ USE_CHOCH = True
 SUPPORT_RESISTANCE_LOOKBACK = 30
 MIN_DISTANCE_TO_SR_PERCENT = 0.5
 
-# Fixed percentage targets are disabled by default because they can
-# silently reduce a strategy-approved 2R setup below 2R. The strategy
-# target therefore remains authoritative unless a caller explicitly
-# enables a fixed target and also preserves the minimum R:R.
-PROFIT_TARGET_PERCENT = 1.50
-ENABLE_FIXED_TARGET = False
-ENABLE_TRAILING_STOP = True
+PROFIT_TARGET_PERCENT = 1.50  # retained for optional fixed-target use; main wiring must preserve minimum R:R
+ENABLE_FIXED_TARGET = False   # strategy-computed minimum-R:R target is authoritative by default
+ENABLE_TRAILING_STOP = True   # enabled with the non-fixed exit stack
 EXIT_IMMEDIATELY_AT_TARGET = True
 
-# Two completed adverse candles are required for the new confirmation
-# exit path when the live orchestrator enables it.
-ADVERSE_EXIT_CONFIRM_CANDLES = 2
-
-# Optional consolidated quality gate. The live orchestrator may add
-# market alignment / price-action / news evidence to the technical
-# confidence score and reject below this threshold.
-ENABLE_ENTRY_QUALITY_GATE = True
+# Stewardship policy controls.
+ADVERSE_EXIT_CONFIRM_CANDLES = 2  # require two completed adverse candles before the loss-trend exit
+ENABLE_ENTRY_QUALITY_GATE = True  # consolidate existing confidence/evidence into one entry quality score
 MIN_ENTRY_QUALITY_SCORE = 70
 
 # ---------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------
-PRODUCT = "MIS"
+PRODUCT = "MIS"          # intraday margin product
 ORDER_TYPE_ENTRY = "MARKET"
 VARIETY = "regular"
+
+# SEBI/NSE's Apr-2026 rules require every MARKET (and SL-M) order placed via
+# the API to include market_protection, or it gets rejected outright.
+# -1 = automatic protection applied by the exchange; or set 1-100 for a
+# specific percentage band. Requires kiteconnect Python SDK >= 5.2.0.
 MARKET_PROTECTION = -1
+
+# Square-off: MIS positions must be closed before this time regardless
+# of strategy signals (broker auto-square-off is usually ~15:15-15:20;
+# closing a bit earlier avoids slippage/rejections near the deadline).
 FORCE_SQUARE_OFF_TIME = "15:10"
+
+# Trading window — don't take new entries in the first/last few minutes
+# of the session (high volatility / low liquidity for stops).
 NO_ENTRY_BEFORE = "09:25"
 NO_ENTRY_AFTER = "15:00"
+
+# Live vs paper mode. ALWAYS start with PAPER_TRADING = True.
 PAPER_TRADING = True
 
 # ---------------------------------------------------------------------
-# Candle-aligned scheduler
+# Candle-aligned scheduler (opt-in infrastructure change)
 # ---------------------------------------------------------------------
+# When False (default): main.py runs its original loop exactly as
+# before -- full watchlist scan + position checks together, every
+# POLL_SECONDS. Nothing about this section has any effect.
+#
+# When True: main.py uses scheduler.py instead. Full scans (fetch +
+# indicators + signal evaluation, unchanged) only run once per newly
+# completed ENTRY_TIMEFRAME candle. Between scans, only open positions
+# are checked (stop-loss/target), on a much shorter interval, without
+# fetching/evaluating the rest of the watchlist. Trading logic itself
+# is byte-for-byte identical either way.
 ENABLE_CANDLE_ALIGNED_POLLING = False
-POSITION_CHECK_SECONDS = 25
-SCAN_BUFFER_SECONDS = 8
-SCHEDULER_WARNING_SCAN_SECONDS = 90
-SCHEDULER_CRITICAL_SCAN_SECONDS = 120
-POSITION_CHECK_WARNING_SECONDS = 40
-POSITION_CHECK_CRITICAL_SECONDS = 60
-SCAN_DELAY_WARNING_SECONDS = 30
-SCAN_DELAY_CRITICAL_SECONDS = 60
+POSITION_CHECK_SECONDS = 25   # how often to check open positions between scans
+SCAN_BUFFER_SECONDS = 8       # wait this long after a candle closes before scanning
+
+# Sanity-check thresholds -- purely observational, log-only. Never skip
+# or alter any trading action based on these; they just surface timing
+# problems (slow network, API degradation, an overloaded watchlist)
+# early via WARNING/CRITICAL log lines instead of requiring someone to
+# notice by eye. Only meaningful when ENABLE_CANDLE_ALIGNED_POLLING=True.
+SCHEDULER_WARNING_SCAN_SECONDS = 90     # full scan taking longer than this -> WARNING
+SCHEDULER_CRITICAL_SCAN_SECONDS = 120   # full scan taking longer than this -> CRITICAL
+POSITION_CHECK_WARNING_SECONDS = 40     # one position-check pass taking longer than this -> WARNING
+POSITION_CHECK_CRITICAL_SECONDS = 60    # one position-check pass taking longer than this -> CRITICAL
+SCAN_DELAY_WARNING_SECONDS = 30         # scan starting this late vs its target time -> WARNING
+SCAN_DELAY_CRITICAL_SECONDS = 60        # scan starting this late vs its target time -> CRITICAL
 
 # ---------------------------------------------------------------------
 # Overrides from the web configuration UI (configure_app.py)
 # ---------------------------------------------------------------------
+# Settings changed via the browser form are saved to user_config.json
+# and applied here, on top of the defaults above. Delete that file to
+# fall back to the hardcoded defaults.
 import json
 
 _USER_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_config.json")
@@ -147,6 +205,8 @@ if os.path.exists(_USER_CONFIG_PATH):
 
     _saved_watchlist = _overrides.get("watchlist")
     if _saved_watchlist is not None:
+        # Support both the old format (plain symbol strings, all NSE)
+        # and the new format (dicts with an exchange per symbol).
         WATCHLIST = [
             {"symbol": w, "exchange": "NSE"} if isinstance(w, str) else w
             for w in _saved_watchlist
