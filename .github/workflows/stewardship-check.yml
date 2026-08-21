@@ -29,4 +29,4 @@ jobs:
       - name: Validate main patch anchors
         run: python apply_stewardship_main_patch.py --check
       - name: Run stewardship policy tests
-        run: pytest -q test_stewardship_policy.py
+        run: pytest -q test_stewardship_policy.py test_strategy_engulfing_gate.py
