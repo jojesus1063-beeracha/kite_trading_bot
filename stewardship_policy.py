@@ -36,12 +36,7 @@ def preserve_minimum_rr_target(
     signal_target: float,
     fixed_target_pct: float,
 ) -> float:
-    """Apply a fixed-percent target without ever weakening signal R:R.
-
-    `signal_target` is assumed to be the strategy-approved minimum-R:R
-    target. A fixed target may extend the reward, but may never pull the
-    target closer and silently turn (for example) a 2R trade into 0.9R.
-    """
+    """Apply a fixed-percent target without ever weakening signal R:R."""
     entry = float(signal_entry)
     rr_target = float(signal_target)
     pct = max(0.0, float(fixed_target_pct)) / 100.0
@@ -61,16 +56,10 @@ def entry_quality_score(
     market_alignment: Optional[str] = None,
     news_adjusted_score: Optional[float] = None,
 ) -> float:
-    """Return one bounded 0-100 quality score from existing evidence.
-
-    This deliberately does not invent new indicators. It consolidates
-    evidence already computed by the bot: ADX confidence, price-action
-    score, optional news-adjusted score, and market/sector alignment.
-    """
+    """Return one bounded 0-100 score from evidence the bot already computes."""
     if news_adjusted_score is None:
         score = _CONFIDENCE_SCORE.get(confidence, 70) + float(price_action_score or 0.0)
     else:
-        # main.py's news score is already based on technical + price action.
         score = float(news_adjusted_score)
 
     score += _ALIGNMENT_ADJUSTMENT.get(market_alignment, 0)
@@ -84,36 +73,40 @@ def two_candle_adverse_confirmation(
     entry_time=None,
     confirm_candles: int = 2,
     last_row_is_forming: bool = True,
+    ema_period: int = 20,
 ) -> bool:
     """Confirm a losing trend only after N completed adverse candles.
 
-    For BUY: each confirming candle must close below both the entry price
-    and its EMA entry line, and closes must not improve across the sequence.
-    SELL is the mirror image. This avoids exiting on one noisy red/green bar.
-
-    `last_row_is_forming=True` is the safe default for the real-time
-    position monitor, which requests trim_incomplete=False.
+    BUY requires every confirming close to be below entry and EMA, with
+    closes non-improving through the sequence. SELL is the mirror image.
+    The real-time monitor includes a forming candle, so it is ignored by
+    default. If an EMA column is not already present, it is calculated
+    from close prices locally; this keeps the helper usable on raw
+    fetch_candles() output without a second broker/data request.
     """
-    if confirm_candles <= 0:
+    if confirm_candles <= 0 or ema_period <= 0:
         return False
-    if df_5m is None or df_5m.empty:
+    if df_5m is None or df_5m.empty or "close" not in df_5m.columns:
         return False
 
     completed = df_5m.iloc[:-1].copy() if last_row_is_forming else df_5m.copy()
-    if completed.empty or "ema_entry" not in completed.columns:
+    if completed.empty:
         return False
+
+    if "ema_entry" not in completed.columns:
+        completed["ema_entry"] = completed["close"].ewm(span=ema_period, adjust=False).mean()
 
     if entry_time is not None and "date" in completed.columns:
         try:
             ts = pd.Timestamp(entry_time)
             dates = pd.to_datetime(completed["date"])
-            if getattr(dates.dt, "tz", None) is not None and ts.tzinfo is None:
-                ts = ts.tz_localize(dates.dt.tz)
-            elif getattr(dates.dt, "tz", None) is None and ts.tzinfo is not None:
+            date_tz = getattr(dates.dt, "tz", None)
+            if date_tz is not None and ts.tzinfo is None:
+                ts = ts.tz_localize(date_tz)
+            elif date_tz is None and ts.tzinfo is not None:
                 ts = ts.tz_localize(None)
             completed = completed[dates > ts]
         except Exception:
-            # Time parsing failure must not create a false exit signal.
             return False
 
     if len(completed) < confirm_candles:
