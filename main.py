@@ -2108,10 +2108,17 @@ def run():
                       "Refusing to start. Re-run auth.py and restart.")
         return
 
+    effective_position_check_seconds = float(cfg.POSITION_CHECK_SECONDS)
+    if getattr(cfg, "ENABLE_FAST_ADVERSE_EXIT", False):
+        # A stale user_config/launcher override must not silently restore the
+        # old 25s cadence while fast protection is enabled.
+        effective_position_check_seconds = min(effective_position_check_seconds, 5.0)
+
     if cfg.ENABLE_CANDLE_ALIGNED_POLLING:
         logger.info(f"Candle-aligned polling ENABLED | entry timeframe: {cfg.ENTRY_TIMEFRAME} | "
-                    f"position check every {cfg.POSITION_CHECK_SECONDS}s | "
-                    f"scan buffer: {cfg.SCAN_BUFFER_SECONDS}s")
+                    f"position check every {effective_position_check_seconds:g}s | "
+                    f"scan buffer: {cfg.SCAN_BUFFER_SECONDS}s | "
+                    f"fast_adverse={getattr(cfg, 'ENABLE_FAST_ADVERSE_EXIT', False)}")
     scan_guard = ScanGuard()
 
     while True:
