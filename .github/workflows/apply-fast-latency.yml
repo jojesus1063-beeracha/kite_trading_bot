@@ -23,6 +23,8 @@ jobs:
         run: python apply_fast_latency_patch.py --check
       - name: Apply narrow latency patch
         run: python apply_fast_latency_patch.py
+      - name: Cap effective fast-monitor cadence
+        run: python apply_fast_monitor_cap.py
       - name: Commit patched live files when changed
         run: |
           if git diff --quiet -- config.py main.py; then
