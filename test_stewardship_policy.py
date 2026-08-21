@@ -60,6 +60,13 @@ def test_quality_score_consolidates_existing_evidence():
     assert entry_quality_score("MEDIUM", 0, "STRONG_MISALIGNMENT") == 30.0
 
 
+def test_missing_confidence_is_not_treated_as_good_confidence():
+    # Trial logs on Aug 20/21 contained technical_confidence=None.
+    # Unknown evidence starts at 40, so price action must genuinely lift it.
+    assert entry_quality_score(None, 0, "UNKNOWN") == 40.0
+    assert entry_quality_score(None, 25, "UNKNOWN") == 65.0
+
+
 def test_two_completed_adverse_buy_candles_confirm_exit():
     df = pd.DataFrame(
         {
