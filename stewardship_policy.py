@@ -50,6 +50,32 @@ def preserve_minimum_rr_target(
     raise ValueError(f"unsupported direction: {direction}")
 
 
+def adverse_stop_progress(direction: str, entry_price: float, stop_price: float, current_price: float) -> float:
+    """Return how far price has progressed adversely from entry toward stop.
+
+    0.0 means at entry, 0.60 means 60% of the original entry->stop
+    distance has been consumed, and 1.0 means the hard stop itself.
+    Favorable movement returns a negative value. Invalid stop geometry
+    raises ValueError so callers can fail safely instead of assuming
+    missing risk is zero.
+    """
+    entry = float(entry_price)
+    stop = float(stop_price)
+    current = float(current_price)
+
+    if direction == "BUY":
+        risk_distance = entry - stop
+        if risk_distance <= 0:
+            raise ValueError("BUY stop must be below entry")
+        return (entry - current) / risk_distance
+    if direction == "SELL":
+        risk_distance = stop - entry
+        if risk_distance <= 0:
+            raise ValueError("SELL stop must be above entry")
+        return (current - entry) / risk_distance
+    raise ValueError(f"unsupported direction: {direction}")
+
+
 def entry_quality_score(
     confidence: Optional[str],
     price_action_score: float = 0.0,
@@ -58,15 +84,13 @@ def entry_quality_score(
 ) -> float:
     """Return one bounded 0-100 score from evidence the bot already computes.
 
-    Missing/unrecognised technical confidence deliberately starts at 40,
-    not 70. The August 20/21 trial logs showed live candidates with
-    technical_confidence=None; treating that as already-good confidence
-    made the gate artificially permissive. Unknown evidence must earn its
-    way above the configured threshold through real supporting evidence.
+    Missing/unknown confidence is intentionally conservative (40), not
+    implicitly treated as a good setup. A trial on the 2026-08-20/21
+    live candidates exposed that the former optimistic fallback could
+    inflate weak/unknown evidence.
     """
     if news_adjusted_score is None:
-        base_score = _CONFIDENCE_SCORE.get(confidence, 40)
-        score = base_score + float(price_action_score or 0.0)
+        score = _CONFIDENCE_SCORE.get(confidence, 40) + float(price_action_score or 0.0)
     else:
         score = float(news_adjusted_score)
 
