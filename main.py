@@ -35,6 +35,11 @@ from daily_report import load_trades as load_todays_trades
 from costs import net_pnl_for_trade
 from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
+from stewardship_policy import (
+    entry_quality_score,
+    preserve_minimum_rr_target,
+    two_candle_adverse_confirmation,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("main")
@@ -188,9 +193,60 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     continue
 
 
+            quality_score = entry_quality_score(
+                signal.confidence,
+                signal.price_action_score or 0.0,
+                signal.market_alignment,
+                signal.news_confidence_score,
+            )
+            min_quality = float(getattr(cfg, "MIN_ENTRY_QUALITY_SCORE", 70))
+            if getattr(cfg, "ENABLE_ENTRY_QUALITY_GATE", False) and quality_score < min_quality:
+                reason = f"ENTRY_QUALITY_BELOW_MIN ({quality_score:.1f} < {min_quality:.1f})"
+                logger.info(f"{symbol}: skipped -- {reason}")
+                status_this_cycle.append({"symbol": symbol, "status": f"skipped, quality={quality_score:.1f}"})
+                log_signal({
+                    "timestamp": str(signal.timestamp), "symbol": symbol,
+                    "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                    "market_alignment": signal.market_alignment,
+                    "technical_confidence": signal.confidence,
+                    "entry_price": signal.entry_price, "direction": signal.direction,
+                    "executed": False, "rejection_reason": reason,
+                    "price_action_score": signal.price_action_score,
+                    "entry_quality_score": quality_score,
+                })
+                continue
+
             qty = risk.position_size(signal.entry_price, signal.stop_loss)
             if qty > 0 and not cfg.PAPER_TRADING:
                 qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
+
+            proposed_risk = risk.proposed_trade_risk(signal.entry_price, signal.stop_loss, qty)
+            if qty <= 0 or not risk.can_take_new_trade(
+                current_open_count=len(open_positions),
+                open_positions=open_positions,
+                proposed_risk=proposed_risk,
+            ):
+                total_risk = risk.total_risk_if_added(open_positions, proposed_risk)
+                reason = (
+                    f"TOTAL_RISK_BUDGET_REJECT proposed={proposed_risk:.2f} "
+                    f"worst_case={total_risk:.2f} max={risk.max_loss_amount():.2f}"
+                )
+                logger.info(f"{symbol}: skipped -- {reason}")
+                status_this_cycle.append({"symbol": symbol, "status": "skipped, total risk budget"})
+                log_signal({
+                    "timestamp": str(signal.timestamp), "symbol": symbol,
+                    "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                    "market_alignment": signal.market_alignment,
+                    "technical_confidence": signal.confidence,
+                    "entry_price": signal.entry_price, "direction": signal.direction,
+                    "executed": False, "rejection_reason": reason,
+                    "entry_quality_score": quality_score,
+                    "proposed_stop_risk": proposed_risk,
+                    "worst_case_daily_risk": total_risk,
+                    "daily_risk_budget": risk.max_loss_amount(),
+                })
+                continue
+
             result = place_entry_order(kite, symbol, signal.direction, qty, exchange, cfg)
             if result["success"]:
                 confirmed_qty = result["filled_quantity"]
@@ -203,9 +259,12 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 target_price = signal.target
                 if getattr(cfg, "ENABLE_FIXED_TARGET", False):
                     try:
-                        pct = getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5) / 100
-                        target_price = (signal.entry_price * (1 + pct) if signal.direction == "BUY"
-                                        else signal.entry_price * (1 - pct))
+                        target_price = preserve_minimum_rr_target(
+                            signal.direction,
+                            signal.entry_price,
+                            signal.target,
+                            getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
+                        )
                     except Exception as e:
                         logger.warning(f"{symbol}: fixed target calculation failed, "
                                         f"using strategy-computed target instead: {e}")
@@ -359,6 +418,21 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
     structure_broken = False
     trend_reversed = False
     hit_target = False
+    adverse_confirmed = False
+
+    try:
+        adverse_confirmed = two_candle_adverse_confirmation(
+            df_5m,
+            direction,
+            pos["entry"],
+            entry_time=pos.get("entry_time"),
+            confirm_candles=int(getattr(cfg, "ADVERSE_EXIT_CONFIRM_CANDLES", 2)),
+            last_row_is_forming=True,
+            ema_period=int(getattr(cfg, "ENTRY_EMA", 20)),
+        )
+    except Exception as e:
+        logger.warning(f"{symbol}: adverse two-candle confirmation failed: {e}")
+        adverse_confirmed = False
 
     if getattr(cfg, "ENABLE_FIXED_TARGET", False):
         # Pure Fixed Target Mode: ONLY hard stop-loss + fixed target are
@@ -400,9 +474,11 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
                                   and current_adx < getattr(cfg, "ADX_THRESHOLD", 25))
             save_positions(open_positions)
 
-    if hit_hard_stop or hit_trailing_stop or structure_broken or trend_reversed or hit_target:
+    if hit_hard_stop or adverse_confirmed or hit_trailing_stop or structure_broken or trend_reversed or hit_target:
         if hit_hard_stop:
             result = "stop"
+        elif adverse_confirmed:
+            result = "adverse_2candle"
         elif hit_trailing_stop:
             result = "trailing_stop"
         elif structure_broken:
