@@ -25,7 +25,7 @@ jobs:
           pip install pandas pytest
       - name: Compile changed Python modules
         run: |
-          python -m py_compile main.py config.py risk_manager.py strategy.py stewardship_policy.py apply_stewardship_main_patch.py apply_fast_latency_patch.py apply_fast_monitor_cap.py vm_live_hardening.py
+          python -m py_compile main.py config.py risk_manager.py strategy.py stewardship_policy.py apply_stewardship_main_patch.py apply_fast_latency_patch.py apply_fast_monitor_cap.py vm_live_hardening.py fast_adverse_shadow.py vm_fast_adverse_shadow_patch.py
       - name: Validate stewardship patch anchors
         run: python apply_stewardship_main_patch.py --check
       - name: Validate fast-latency patch anchors
@@ -35,5 +35,5 @@ jobs:
           cp main.py /tmp/main.before.py
           python apply_fast_monitor_cap.py
           diff -u /tmp/main.before.py main.py
-      - name: Run stewardship and VM migration tests
-        run: pytest -q test_stewardship_policy.py test_strategy_engulfing_gate.py test_vm_live_hardening.py
+      - name: Run stewardship, VM migration, and shadow telemetry tests
+        run: pytest -q test_stewardship_policy.py test_strategy_engulfing_gate.py test_vm_live_hardening.py test_fast_adverse_shadow.py
