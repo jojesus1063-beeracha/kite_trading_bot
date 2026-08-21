@@ -1,9 +1,11 @@
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from risk_manager import RiskManager
 from stewardship_policy import (
+    adverse_stop_progress,
     entry_quality_score,
     preserve_minimum_rr_target,
     two_candle_adverse_confirmation,
@@ -32,7 +34,6 @@ def test_proposed_trade_rejected_when_total_daily_risk_would_exceed_budget():
     open_positions = {
         "ABC": {"direction": "BUY", "qty": 50, "entry": 100.0, "stop": 98.0}
     }
-    # Used: 250 realized + 100 open stop risk. Proposed 200 => 550 > 500.
     assert risk.total_risk_if_added(open_positions, 200.0) == 550.0
     assert not risk.can_afford_trade(open_positions, 200.0)
 
@@ -46,12 +47,10 @@ def test_unknown_open_stop_fails_safe():
 
 
 def test_fixed_target_can_never_weaken_minimum_rr_buy():
-    # Signal target is 2R at 110. Fixed 1.5% target would be 101.5.
     assert preserve_minimum_rr_target("BUY", 100.0, 110.0, 1.5) == 110.0
 
 
 def test_fixed_target_can_never_weaken_minimum_rr_sell():
-    # Signal target is 2R at 90. Fixed 1.5% target would be 98.5.
     assert preserve_minimum_rr_target("SELL", 100.0, 90.0, 1.5) == 90.0
 
 
@@ -61,10 +60,25 @@ def test_quality_score_consolidates_existing_evidence():
 
 
 def test_missing_confidence_is_not_treated_as_good_confidence():
-    # Trial logs on Aug 20/21 contained technical_confidence=None.
-    # Unknown evidence starts at 40, so price action must genuinely lift it.
     assert entry_quality_score(None, 0, "UNKNOWN") == 40.0
     assert entry_quality_score(None, 25, "UNKNOWN") == 65.0
+
+
+def test_fast_adverse_progress_buy_and_sell():
+    assert adverse_stop_progress("BUY", 100.0, 98.0, 98.8) == pytest.approx(0.60)
+    assert adverse_stop_progress("SELL", 100.0, 102.0, 101.2) == pytest.approx(0.60)
+
+
+def test_fast_adverse_progress_is_negative_when_trade_is_profitable():
+    assert adverse_stop_progress("BUY", 100.0, 98.0, 101.0) == pytest.approx(-0.50)
+    assert adverse_stop_progress("SELL", 100.0, 102.0, 99.0) == pytest.approx(-0.50)
+
+
+def test_fast_adverse_progress_rejects_invalid_stop_geometry():
+    with pytest.raises(ValueError):
+        adverse_stop_progress("BUY", 100.0, 101.0, 99.0)
+    with pytest.raises(ValueError):
+        adverse_stop_progress("SELL", 100.0, 99.0, 101.0)
 
 
 def test_two_completed_adverse_buy_candles_confirm_exit():
@@ -75,8 +89,6 @@ def test_two_completed_adverse_buy_candles_confirm_exit():
             "ema_entry": [100.0, 100.0, 99.8, 99.5],
         }
     )
-    # Last row is forming and ignored. Completed 99.5 -> 98.8 are both
-    # below entry/EMA and non-improving.
     assert two_candle_adverse_confirmation(df, "BUY", 100.0, confirm_candles=2)
 
 
