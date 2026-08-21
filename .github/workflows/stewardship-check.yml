@@ -1,0 +1,32 @@
+name: Stewardship risk checks
+
+on:
+  push:
+    branches:
+      - stewardship-risk-hardening
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  stewardship:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pytest
+      - name: Compile changed Python modules
+        run: |
+          python -m py_compile config.py risk_manager.py strategy.py stewardship_policy.py apply_stewardship_main_patch.py
+      - name: Validate main patch anchors
+        run: python apply_stewardship_main_patch.py --check
+      - name: Run stewardship policy tests
+        run: pytest -q test_stewardship_policy.py
