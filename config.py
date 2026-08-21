@@ -134,6 +134,12 @@ ADVERSE_EXIT_CONFIRM_CANDLES = 2  # require two completed adverse candles before
 ENABLE_ENTRY_QUALITY_GATE = True  # consolidate existing confidence/evidence into one entry quality score
 MIN_ENTRY_QUALITY_SCORE = 70
 
+# Fast adverse protection: do not replace the broker hard SL. This soft
+# exit acts earlier only after persistent adverse progress toward that SL.
+ENABLE_FAST_ADVERSE_EXIT = True
+FAST_ADVERSE_STOP_PROGRESS = 0.60   # 60% of entry->hard-stop distance
+FAST_ADVERSE_CONFIRMATIONS = 2      # consecutive monitor checks required
+
 # ---------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------
@@ -174,8 +180,9 @@ PAPER_TRADING = True
 # fetching/evaluating the rest of the watchlist. Trading logic itself
 # is byte-for-byte identical either way.
 ENABLE_CANDLE_ALIGNED_POLLING = False
-POSITION_CHECK_SECONDS = 25   # how often to check open positions between scans
+POSITION_CHECK_SECONDS = 5    # fast open-position monitoring; one position max by stewardship policy
 SCAN_BUFFER_SECONDS = 8       # wait this long after a candle closes before scanning
+SCAN_SYMBOL_THROTTLE_SECONDS = 0.35  # one throttle after both historical requests per symbol
 
 # Sanity-check thresholds -- purely observational, log-only. Never skip
 # or alter any trading action based on these; they just surface timing
@@ -269,3 +276,7 @@ if os.path.exists(_USER_CONFIG_PATH):
     ADVERSE_EXIT_CONFIRM_CANDLES = _overrides.get("adverse_exit_confirm_candles", ADVERSE_EXIT_CONFIRM_CANDLES)
     ENABLE_ENTRY_QUALITY_GATE = _overrides.get("enable_entry_quality_gate", ENABLE_ENTRY_QUALITY_GATE)
     MIN_ENTRY_QUALITY_SCORE = _overrides.get("min_entry_quality_score", MIN_ENTRY_QUALITY_SCORE)
+    ENABLE_FAST_ADVERSE_EXIT = _overrides.get("enable_fast_adverse_exit", ENABLE_FAST_ADVERSE_EXIT)
+    FAST_ADVERSE_STOP_PROGRESS = _overrides.get("fast_adverse_stop_progress", FAST_ADVERSE_STOP_PROGRESS)
+    FAST_ADVERSE_CONFIRMATIONS = _overrides.get("fast_adverse_confirmations", FAST_ADVERSE_CONFIRMATIONS)
+    SCAN_SYMBOL_THROTTLE_SECONDS = _overrides.get("scan_symbol_throttle_seconds", SCAN_SYMBOL_THROTTLE_SECONDS)

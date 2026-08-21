@@ -36,6 +36,7 @@ from costs import net_pnl_for_trade
 from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
 from stewardship_policy import (
+    adverse_stop_progress,
     entry_quality_score,
     preserve_minimum_rr_target,
     two_candle_adverse_confirmation,
@@ -110,9 +111,10 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
 
         exchange = exchange_map[symbol]
         df_15m = fetch_candles(kite, token, cfg.TREND_TIMEFRAME, lookback_days=5)
-        time.sleep(0.5)
         df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=5)
-        time.sleep(0.5)
+        # Keep aggregate historical API pressure controlled without paying
+        # two fixed half-second sleeps for every symbol.
+        time.sleep(float(getattr(cfg, "SCAN_SYMBOL_THROTTLE_SECONDS", 0.35)))
         if df_15m.empty or df_5m.empty:
             status_this_cycle.append({"symbol": symbol, "status": "no candle data"})
             continue
@@ -414,6 +416,41 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
     direction = pos["direction"]
     hit_hard_stop = (last_price <= pos["stop"]) if direction == "BUY" else (last_price >= pos["stop"])
 
+    # Fast soft exit: react before the hard stop only when adverse movement
+    # is both materially deep into the original stop distance and persistent.
+    # The broker-side hard stop remains authoritative and immediate.
+    fast_adverse_confirmed = False
+    fast_progress = 0.0
+    if getattr(cfg, "ENABLE_FAST_ADVERSE_EXIT", False) and not hit_hard_stop:
+        try:
+            fast_progress = adverse_stop_progress(
+                direction,
+                pos["entry"],
+                pos["stop"],
+                last_price,
+            )
+            threshold = float(getattr(cfg, "FAST_ADVERSE_STOP_PROGRESS", 0.60))
+            required = max(1, int(getattr(cfg, "FAST_ADVERSE_CONFIRMATIONS", 2)))
+            previous = int(pos.get("fast_adverse_count", 0) or 0)
+            if fast_progress >= threshold:
+                pos["fast_adverse_count"] = previous + 1
+            else:
+                pos["fast_adverse_count"] = 0
+            pos["fast_adverse_progress"] = fast_progress
+            fast_adverse_confirmed = pos["fast_adverse_count"] >= required
+            if pos["fast_adverse_count"] != previous or fast_adverse_confirmed:
+                save_positions(open_positions)
+            if fast_adverse_confirmed:
+                logger.warning(
+                    f"{symbol}: FAST ADVERSE EXIT confirmed | "
+                    f"progress={fast_progress:.2f}R toward hard stop | "
+                    f"checks={pos['fast_adverse_count']}/{required} | "
+                    f"last={last_price:.2f} entry={pos['entry']:.2f} stop={pos['stop']:.2f}"
+                )
+        except Exception as e:
+            logger.warning(f"{symbol}: fast adverse check failed safely: {e}")
+            fast_adverse_confirmed = False
+
     hit_trailing_stop = False
     structure_broken = False
     trend_reversed = False
@@ -473,9 +510,11 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
                                   and current_adx < getattr(cfg, "ADX_THRESHOLD", 25))
             save_positions(open_positions)
 
-    if hit_hard_stop or adverse_confirmed or hit_trailing_stop or structure_broken or trend_reversed or hit_target:
+    if hit_hard_stop or fast_adverse_confirmed or adverse_confirmed or hit_trailing_stop or structure_broken or trend_reversed or hit_target:
         if hit_hard_stop:
             result = "stop"
+        elif fast_adverse_confirmed:
+            result = "fast_adverse"
         elif adverse_confirmed:
             result = "adverse_2candle"
         elif hit_trailing_stop:
