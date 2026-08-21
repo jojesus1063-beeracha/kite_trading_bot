@@ -2265,7 +2265,7 @@ def run():
             except Exception as e:
                 logger.warning(f"Analytics snapshot failed this position-monitor cycle: {e}")
 
-            sleep_for = min(cfg.POSITION_CHECK_SECONDS,
+            sleep_for = min(effective_position_check_seconds,
                              max(0, (target_scan_time - datetime.now()).total_seconds()))
             if sleep_for > 0:
                 time.sleep(sleep_for)
