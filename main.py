@@ -35,6 +35,12 @@ from daily_report import load_trades as load_todays_trades
 from costs import net_pnl_for_trade
 from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
+from stewardship_policy import (
+    adverse_stop_progress,
+    entry_quality_score,
+    preserve_minimum_rr_target,
+    two_candle_adverse_confirmation,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("main")
@@ -105,9 +111,10 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
 
         exchange = exchange_map[symbol]
         df_15m = fetch_candles(kite, token, cfg.TREND_TIMEFRAME, lookback_days=5)
-        time.sleep(0.5)
         df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=5)
-        time.sleep(0.5)
+        # Keep aggregate historical API pressure controlled without paying
+        # two fixed half-second sleeps for every symbol.
+        time.sleep(float(getattr(cfg, "SCAN_SYMBOL_THROTTLE_SECONDS", 0.35)))
         if df_15m.empty or df_5m.empty:
             status_this_cycle.append({"symbol": symbol, "status": "no candle data"})
             continue
@@ -188,9 +195,60 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     continue
 
 
+            quality_score = entry_quality_score(
+                signal.confidence,
+                signal.price_action_score or 0.0,
+                signal.market_alignment,
+                signal.news_confidence_score,
+            )
+            min_quality = float(getattr(cfg, "MIN_ENTRY_QUALITY_SCORE", 70))
+            if getattr(cfg, "ENABLE_ENTRY_QUALITY_GATE", False) and quality_score < min_quality:
+                reason = f"ENTRY_QUALITY_BELOW_MIN ({quality_score:.1f} < {min_quality:.1f})"
+                logger.info(f"{symbol}: skipped -- {reason}")
+                status_this_cycle.append({"symbol": symbol, "status": f"skipped, quality={quality_score:.1f}"})
+                log_signal({
+                    "timestamp": str(signal.timestamp), "symbol": symbol,
+                    "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                    "market_alignment": signal.market_alignment,
+                    "technical_confidence": signal.confidence,
+                    "entry_price": signal.entry_price, "direction": signal.direction,
+                    "executed": False, "rejection_reason": reason,
+                    "price_action_score": signal.price_action_score,
+                    "entry_quality_score": quality_score,
+                })
+                continue
+
             qty = risk.position_size(signal.entry_price, signal.stop_loss)
             if qty > 0 and not cfg.PAPER_TRADING:
                 qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
+
+            proposed_risk = risk.proposed_trade_risk(signal.entry_price, signal.stop_loss, qty)
+            if qty <= 0 or not risk.can_take_new_trade(
+                current_open_count=len(open_positions),
+                open_positions=open_positions,
+                proposed_risk=proposed_risk,
+            ):
+                total_risk = risk.total_risk_if_added(open_positions, proposed_risk)
+                reason = (
+                    f"TOTAL_RISK_BUDGET_REJECT proposed={proposed_risk:.2f} "
+                    f"worst_case={total_risk:.2f} max={risk.max_loss_amount():.2f}"
+                )
+                logger.info(f"{symbol}: skipped -- {reason}")
+                status_this_cycle.append({"symbol": symbol, "status": "skipped, total risk budget"})
+                log_signal({
+                    "timestamp": str(signal.timestamp), "symbol": symbol,
+                    "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                    "market_alignment": signal.market_alignment,
+                    "technical_confidence": signal.confidence,
+                    "entry_price": signal.entry_price, "direction": signal.direction,
+                    "executed": False, "rejection_reason": reason,
+                    "entry_quality_score": quality_score,
+                    "proposed_stop_risk": proposed_risk,
+                    "worst_case_daily_risk": total_risk,
+                    "daily_risk_budget": risk.max_loss_amount(),
+                })
+                continue
+
             result = place_entry_order(kite, symbol, signal.direction, qty, exchange, cfg)
             if result["success"]:
                 confirmed_qty = result["filled_quantity"]
@@ -203,9 +261,12 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 target_price = signal.target
                 if getattr(cfg, "ENABLE_FIXED_TARGET", False):
                     try:
-                        pct = getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5) / 100
-                        target_price = (signal.entry_price * (1 + pct) if signal.direction == "BUY"
-                                        else signal.entry_price * (1 - pct))
+                        target_price = preserve_minimum_rr_target(
+                            signal.direction,
+                            signal.entry_price,
+                            signal.target,
+                            getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
+                        )
                     except Exception as e:
                         logger.warning(f"{symbol}: fixed target calculation failed, "
                                         f"using strategy-computed target instead: {e}")
@@ -228,17 +289,17 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "entry_average_price": result.get("average_price"),
                     "entry_confirmation_pending": result.get("entry_confirmation_pending", False),
                     "entry_status_message": result.get("reason"),
+                    "entry_quality_score": quality_score,
                 }
                 save_positions(open_positions)
                 logger.info(f"ENTRY {signal.direction} {exchange}:{symbol} qty={confirmed_qty} "
                             f"entry={confirmed_entry_price:.2f} stop={signal.stop_loss:.2f} "
-                            f"target={signal.target:.2f} | {signal.reason} "
+                            f"target={target_price:.2f} | {signal.reason} "
                             f"[market_alignment: {signal.market_alignment}] "
                             f"[fill_status: {result.get('status')}]")
                 status_this_cycle.append({
                     "symbol": symbol,
                     "status": f"ENTRY {signal.direction} @ {confirmed_entry_price:.2f}",
-                    "confidence": signal.confidence,
                     "confidence": signal.confidence,
                     "market_alignment": signal.market_alignment,
                 })
@@ -355,17 +416,66 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
     direction = pos["direction"]
     hit_hard_stop = (last_price <= pos["stop"]) if direction == "BUY" else (last_price >= pos["stop"])
 
+    # Fast soft exit: react before the hard stop only when adverse movement
+    # is both materially deep into the original stop distance and persistent.
+    # The broker-side hard stop remains authoritative and immediate.
+    fast_adverse_confirmed = False
+    fast_progress = 0.0
+    if getattr(cfg, "ENABLE_FAST_ADVERSE_EXIT", False) and not hit_hard_stop:
+        try:
+            fast_progress = adverse_stop_progress(
+                direction,
+                pos["entry"],
+                pos["stop"],
+                last_price,
+            )
+            threshold = float(getattr(cfg, "FAST_ADVERSE_STOP_PROGRESS", 0.60))
+            required = max(1, int(getattr(cfg, "FAST_ADVERSE_CONFIRMATIONS", 2)))
+            previous = int(pos.get("fast_adverse_count", 0) or 0)
+            if fast_progress >= threshold:
+                pos["fast_adverse_count"] = previous + 1
+            else:
+                pos["fast_adverse_count"] = 0
+            pos["fast_adverse_progress"] = fast_progress
+            fast_adverse_confirmed = pos["fast_adverse_count"] >= required
+            if pos["fast_adverse_count"] != previous or fast_adverse_confirmed:
+                save_positions(open_positions)
+            if fast_adverse_confirmed:
+                logger.warning(
+                    f"{symbol}: FAST ADVERSE EXIT confirmed | "
+                    f"progress={fast_progress:.2f}R toward hard stop | "
+                    f"checks={pos['fast_adverse_count']}/{required} | "
+                    f"last={last_price:.2f} entry={pos['entry']:.2f} stop={pos['stop']:.2f}"
+                )
+        except Exception as e:
+            logger.warning(f"{symbol}: fast adverse check failed safely: {e}")
+            fast_adverse_confirmed = False
+
     hit_trailing_stop = False
     structure_broken = False
     trend_reversed = False
     hit_target = False
+    adverse_confirmed = False
+
+    try:
+        adverse_confirmed = two_candle_adverse_confirmation(
+            df_5m,
+            direction,
+            pos["entry"],
+            entry_time=pos.get("entry_time"),
+            confirm_candles=int(getattr(cfg, "ADVERSE_EXIT_CONFIRM_CANDLES", 2)),
+            last_row_is_forming=True,
+            ema_period=int(getattr(cfg, "ENTRY_EMA", 20)),
+        )
+    except Exception as e:
+        logger.warning(f"{symbol}: adverse two-candle confirmation failed: {e}")
+        adverse_confirmed = False
 
     if getattr(cfg, "ENABLE_FIXED_TARGET", False):
-        # Pure Fixed Target Mode: ONLY hard stop-loss + fixed target are
-        # checked. ATR trailing stop, market structure break, and 15m
-        # trend reversal are intentionally bypassed entirely -- by
-        # explicit design choice, temporary pullbacks and higher-
-        # timeframe trend changes must NOT close the trade early.
+        # Fixed-target mode keeps the hard stop and protected fixed target.
+        # ATR trailing, structure-break and 15m reversal remain bypassed,
+        # but the stewardship two-completed-candle adverse confirmation
+        # is intentionally still allowed to close a deteriorating trade.
         target_price = pos.get("target")
         try:
             if target_price is not None:
@@ -400,9 +510,13 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
                                   and current_adx < getattr(cfg, "ADX_THRESHOLD", 25))
             save_positions(open_positions)
 
-    if hit_hard_stop or hit_trailing_stop or structure_broken or trend_reversed or hit_target:
+    if hit_hard_stop or fast_adverse_confirmed or adverse_confirmed or hit_trailing_stop or structure_broken or trend_reversed or hit_target:
         if hit_hard_stop:
             result = "stop"
+        elif fast_adverse_confirmed:
+            result = "fast_adverse"
+        elif adverse_confirmed:
+            result = "adverse_2candle"
         elif hit_trailing_stop:
             result = "trailing_stop"
         elif structure_broken:
@@ -1994,10 +2108,17 @@ def run():
                       "Refusing to start. Re-run auth.py and restart.")
         return
 
+    effective_position_check_seconds = float(cfg.POSITION_CHECK_SECONDS)
+    if getattr(cfg, "ENABLE_FAST_ADVERSE_EXIT", False):
+        # A stale user_config/launcher override must not silently restore the
+        # old 25s cadence while fast protection is enabled.
+        effective_position_check_seconds = min(effective_position_check_seconds, 5.0)
+
     if cfg.ENABLE_CANDLE_ALIGNED_POLLING:
         logger.info(f"Candle-aligned polling ENABLED | entry timeframe: {cfg.ENTRY_TIMEFRAME} | "
-                    f"position check every {cfg.POSITION_CHECK_SECONDS}s | "
-                    f"scan buffer: {cfg.SCAN_BUFFER_SECONDS}s")
+                    f"position check every {effective_position_check_seconds:g}s | "
+                    f"scan buffer: {cfg.SCAN_BUFFER_SECONDS}s | "
+                    f"fast_adverse={getattr(cfg, 'ENABLE_FAST_ADVERSE_EXIT', False)}")
     scan_guard = ScanGuard()
 
     while True:
@@ -2144,7 +2265,7 @@ def run():
             except Exception as e:
                 logger.warning(f"Analytics snapshot failed this position-monitor cycle: {e}")
 
-            sleep_for = min(cfg.POSITION_CHECK_SECONDS,
+            sleep_for = min(effective_position_check_seconds,
                              max(0, (target_scan_time - datetime.now()).total_seconds()))
             if sleep_for > 0:
                 time.sleep(sleep_for)

@@ -145,8 +145,10 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         return None
 
     volume_ok = curr["volume"] > curr["avg_volume"] * cfg.VOLUME_MULTIPLIER
+    bullish_pattern = bool(curr.get("bullish_engulfing", False))
+    bearish_pattern = bool(curr.get("bearish_engulfing", False))
 
-    if trend == "UP" and curr["close"] > curr["ema_entry"] and volume_ok:
+    if trend == "UP" and bullish_pattern and curr["close"] > curr["ema_entry"] and volume_ok:
         entry = curr["close"]
         stop = curr["low"] * (1 - cfg.SL_BUFFER_PCT / 100)
         risk = entry - stop
@@ -160,7 +162,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
             reason += f" [ADX confidence: {confidence}]"
         return Signal(symbol, "BUY", entry, stop, target, curr["date"], reason, confidence=confidence)
 
-    if trend == "DOWN" and curr["close"] < curr["ema_entry"] and volume_ok:
+    if trend == "DOWN" and bearish_pattern and curr["close"] < curr["ema_entry"] and volume_ok:
         entry = curr["close"]
         sell_buffer = getattr(cfg, "SL_BUFFER_PCT_SELL", None) or cfg.SL_BUFFER_PCT
         stop = curr["high"] * (1 + sell_buffer / 100)

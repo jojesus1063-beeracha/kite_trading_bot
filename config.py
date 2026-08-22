@@ -74,12 +74,12 @@ ADX_DYNAMIC_STRONG = 35  # at/above this -> VERY_STRONG
 # Risk management
 # ---------------------------------------------------------------------
 RISK_REWARD_MIN = 2.0          # minimum reward:risk ratio (1:2)
-RISK_PER_TRADE_PCT = 1.0       # % of capital risked per trade
-MAX_TRADES_PER_DAY = 4
-MAX_OPEN_POSITIONS = 5          # cap on simultaneous different-symbol positions
-MAX_POSITION_SIZE_PCT = 20.0     # no single position's notional value (qty * entry) exceeds this % of CAPITAL
+RISK_PER_TRADE_PCT = 0.20      # conservative stewardship default: 0.20% of capital risked per trade
+MAX_TRADES_PER_DAY = 5
+MAX_OPEN_POSITIONS = 1          # cap on simultaneous different-symbol positions
+MAX_POSITION_SIZE_PCT = 50.0    # cap broker margin allocation; leave headroom for slippage/operational risk
 CHECK_MARGIN_BEFORE_ENTRY = True # verify real Zerodha margin via order_margins() before placing a live entry order
-MAX_DAILY_LOSS_PCT = 3.0       # kill-switch: stop trading if daily loss exceeds this %
+MAX_DAILY_LOSS_PCT = 0.50       # hard daily budget; prospective open/proposed risk is also checked in risk_manager.py
 CAPITAL = float(os.environ.get("TRADING_CAPITAL", "100000"))  # your intraday capital, INR
 
 # Stop-loss is placed at the low (long) / high (short) of the signal
@@ -124,13 +124,21 @@ USE_CHOCH = True
 SUPPORT_RESISTANCE_LOOKBACK = 30
 MIN_DISTANCE_TO_SR_PERCENT = 0.5
 
-PROFIT_TARGET_PERCENT = 1.50  # fixed profit target, replaces trailing-stop-based
-                                # exits entirely when ENABLE_FIXED_TARGET is True
-ENABLE_FIXED_TARGET = True
-ENABLE_TRAILING_STOP = False  # disabled when fixed-target mode is on -- the whole
-                                # point is booking quick, consistent profits rather
-                                # than letting winners run
+PROFIT_TARGET_PERCENT = 1.50  # retained for optional fixed-target use; main wiring must preserve minimum R:R
+ENABLE_FIXED_TARGET = False   # strategy-computed minimum-R:R target is authoritative by default
+ENABLE_TRAILING_STOP = True   # enabled with the non-fixed exit stack
 EXIT_IMMEDIATELY_AT_TARGET = True
+
+# Stewardship policy controls.
+ADVERSE_EXIT_CONFIRM_CANDLES = 2  # require two completed adverse candles before the loss-trend exit
+ENABLE_ENTRY_QUALITY_GATE = True  # consolidate existing confidence/evidence into one entry quality score
+MIN_ENTRY_QUALITY_SCORE = 70
+
+# Fast adverse protection: do not replace the broker hard SL. This soft
+# exit acts earlier only after persistent adverse progress toward that SL.
+ENABLE_FAST_ADVERSE_EXIT = True
+FAST_ADVERSE_STOP_PROGRESS = 0.60   # 60% of entry->hard-stop distance
+FAST_ADVERSE_CONFIRMATIONS = 2      # consecutive monitor checks required
 
 # ---------------------------------------------------------------------
 # Execution
@@ -172,8 +180,9 @@ PAPER_TRADING = True
 # fetching/evaluating the rest of the watchlist. Trading logic itself
 # is byte-for-byte identical either way.
 ENABLE_CANDLE_ALIGNED_POLLING = False
-POSITION_CHECK_SECONDS = 25   # how often to check open positions between scans
+POSITION_CHECK_SECONDS = 5    # fast open-position monitoring; one position max by stewardship policy
 SCAN_BUFFER_SECONDS = 8       # wait this long after a candle closes before scanning
+SCAN_SYMBOL_THROTTLE_SECONDS = 0.35  # one throttle after both historical requests per symbol
 
 # Sanity-check thresholds -- purely observational, log-only. Never skip
 # or alter any trading action based on these; they just surface timing
@@ -264,3 +273,10 @@ if os.path.exists(_USER_CONFIG_PATH):
     POSITION_CHECK_CRITICAL_SECONDS = _overrides.get("position_check_critical_seconds", POSITION_CHECK_CRITICAL_SECONDS)
     SCAN_DELAY_WARNING_SECONDS = _overrides.get("scan_delay_warning_seconds", SCAN_DELAY_WARNING_SECONDS)
     SCAN_DELAY_CRITICAL_SECONDS = _overrides.get("scan_delay_critical_seconds", SCAN_DELAY_CRITICAL_SECONDS)
+    ADVERSE_EXIT_CONFIRM_CANDLES = _overrides.get("adverse_exit_confirm_candles", ADVERSE_EXIT_CONFIRM_CANDLES)
+    ENABLE_ENTRY_QUALITY_GATE = _overrides.get("enable_entry_quality_gate", ENABLE_ENTRY_QUALITY_GATE)
+    MIN_ENTRY_QUALITY_SCORE = _overrides.get("min_entry_quality_score", MIN_ENTRY_QUALITY_SCORE)
+    ENABLE_FAST_ADVERSE_EXIT = _overrides.get("enable_fast_adverse_exit", ENABLE_FAST_ADVERSE_EXIT)
+    FAST_ADVERSE_STOP_PROGRESS = _overrides.get("fast_adverse_stop_progress", FAST_ADVERSE_STOP_PROGRESS)
+    FAST_ADVERSE_CONFIRMATIONS = _overrides.get("fast_adverse_confirmations", FAST_ADVERSE_CONFIRMATIONS)
+    SCAN_SYMBOL_THROTTLE_SECONDS = _overrides.get("scan_symbol_throttle_seconds", SCAN_SYMBOL_THROTTLE_SECONDS)
