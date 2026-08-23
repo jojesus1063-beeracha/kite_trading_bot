@@ -44,8 +44,9 @@ PIPELINE_MONITOR_SECTION = r"""
             <tr><th>Rank</th><th>Symbol</th><th>Score</th><th>Momentum</th><th>RVOL</th><th>Sweet Distance</th></tr>
             {% for row in pipeline.selector.top %}
             <tr><td>{{ loop.index }}</td><td>{{ row.symbol }}</td><td>{{ row.score }}</td>
-                <td>{{ "%.3f"|format(row.momentum_pct) }}%</td><td>{{ "%.3f"|format(row.relative_volume) }}</td>
-                <td>{{ "%.3f"|format(row.sweet_spot_distance) }}</td></tr>
+                <td>{{ ("%.3f"|format(row.momentum_pct)) ~ '%' if row.momentum_pct is not none else '-' }}</td>
+                <td>{{ "%.3f"|format(row.relative_volume) if row.relative_volume is not none else '-' }}</td>
+                <td>{{ "%.3f"|format(row.sweet_spot_distance) if row.sweet_spot_distance is not none else '-' }}</td></tr>
             {% endfor %}
         </table></div>
         {% endif %}

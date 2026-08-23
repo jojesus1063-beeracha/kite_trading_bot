@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 from collections import Counter, deque
@@ -85,9 +86,34 @@ def _numeric_score_sort(item: tuple[str, int]) -> tuple[int, float, str]:
         return (1, 0.0, label)
 
 
+def _finite_number(value):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _dashboard_top_rows(selected: list[dict], limit: int = 10) -> list[dict]:
+    """Normalize optional selector telemetry before it reaches Jinja formatting."""
+    rows = []
+    for raw in selected[:limit]:
+        if not isinstance(raw, dict):
+            continue
+        rows.append({
+            "symbol": str(raw.get("symbol") or "-"),
+            "score": raw.get("score", "-"),
+            "momentum_pct": _finite_number(raw.get("momentum_pct")),
+            "relative_volume": _finite_number(raw.get("relative_volume")),
+            "sweet_spot_distance": _finite_number(raw.get("sweet_spot_distance")),
+        })
+    return rows
+
+
 def load_pipeline_dashboard() -> dict:
     selector = _load_json(SELECTOR_REPORT)
-    selected = selector.get("selected", []) if selector else []
+    selected_value = selector.get("selected", []) if selector else []
+    selected = [row for row in selected_value if isinstance(row, dict)] if isinstance(selected_value, list) else []
     scores = Counter(str(row.get("score")) for row in selected if row.get("score") is not None)
     generated_at = selector.get("generated_at") if selector else None
     selector_fresh = False
@@ -107,7 +133,7 @@ def load_pipeline_dashboard() -> dict:
             "selected_count": len(selected),
             "eligible_count": selector.get("eligible_count") if selector else None,
             "score_counts": dict(sorted(scores.items(), key=_numeric_score_sort)),
-            "top": selected[:10],
+            "top": _dashboard_top_rows(selected),
         },
         "strategy": {
             "raw_signal": "3-minute EMA9/EMA21 only",

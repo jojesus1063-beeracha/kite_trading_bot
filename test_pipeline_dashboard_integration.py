@@ -33,6 +33,8 @@ class PipelineDashboardIntegrationTests(unittest.TestCase):
                 }, {
                     "symbol": "CCC", "score": "unavailable", "momentum_pct": 0.9,
                     "relative_volume": 1.2, "sweet_spot_distance": 0.2,
+                }, {
+                    "symbol": "PARTIAL", "score": 80,
                 }],
             }), encoding="utf-8")
             events.write_text(json.dumps({
@@ -45,9 +47,10 @@ class PipelineDashboardIntegrationTests(unittest.TestCase):
                  patch.object(dashboard, "PIPELINE_EVENTS", events), \
                  patch.object(dashboard.subprocess, "run", return_value=fake):
                 result = dashboard.load_pipeline_dashboard()
-            self.assertEqual(result["selector"]["selected_count"], 3)
+            self.assertEqual(result["selector"]["selected_count"], 4)
             self.assertEqual(result["selector"]["top"][0]["score"], 100)
-            self.assertEqual(list(result["selector"]["score_counts"]), ["100", "95.426513", "unavailable"])
+            self.assertEqual(list(result["selector"]["score_counts"]), ["100", "95.426513", "80", "unavailable"])
+            self.assertIsNone(result["selector"]["top"][3]["momentum_pct"])
             self.assertEqual(result["recent_decisions"][0]["final_direction"], "BUY")
             self.assertEqual(result["services"]["watchlist_timer"], "active")
             self.assertEqual(result["limits"]["force_square_off"], "15:08 IST")
@@ -89,6 +92,22 @@ class PipelineDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('id="live-positions"', MONITOR_PAGE)
         self.assertIn('class="table-wrap"', MONITOR_PAGE)
         self.assertIn('content-visibility:auto', MONITOR_PAGE)
+
+    def test_monitor_renders_partial_selector_telemetry(self):
+        app = Flask(__name__)
+        pipeline = dashboard.load_pipeline_dashboard()
+        pipeline["selector"]["top"] = [{
+            "symbol": "PARTIAL", "score": 95.426513, "momentum_pct": None,
+            "relative_volume": None, "sweet_spot_distance": None,
+        }]
+        with app.app_context():
+            html = render_template_string(
+                MONITOR_PAGE, updated="now", positions=[], portfolio={}, session={}, health={},
+                profit_factor_display="N/A", watchlist_snapshot=None,
+                freshness={"status":"NO_REPORT_AVAILABLE"}, summary_cards={},
+                watchlist_symbols_json="[]", pipeline=pipeline,
+            )
+        self.assertIn("PARTIAL", html)
 
 
 if __name__ == "__main__":
