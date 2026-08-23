@@ -76,6 +76,13 @@ class PipelineDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('@app.route("/monitor")', source)
         self.assertIn('@app.route("/Monitor")', source)
 
+    def test_monitor_has_responsive_navigation_and_safe_wide_tables(self):
+        self.assertIn('name="viewport"', MONITOR_PAGE)
+        self.assertIn('class="quick-nav"', MONITOR_PAGE)
+        self.assertIn('id="live-positions"', MONITOR_PAGE)
+        self.assertIn('class="table-wrap"', MONITOR_PAGE)
+        self.assertIn('content-visibility:auto', MONITOR_PAGE)
+
 
 if __name__ == "__main__":
     unittest.main()

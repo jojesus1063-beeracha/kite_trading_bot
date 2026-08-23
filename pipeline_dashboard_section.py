@@ -25,7 +25,7 @@ PIPELINE_MONITOR_SECTION = r"""
         <h2 style="margin-top:18px;">Recent Direction Decisions</h2>
         <div id="pipeline-decisions">
         {% if pipeline.recent_decisions %}
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Time</th><th>Symbol</th><th>Market</th><th>Raw</th><th>Policy</th><th>Final</th><th>Status</th></tr>
             {% for row in pipeline.recent_decisions[:10] %}
             <tr>
@@ -35,19 +35,19 @@ PIPELINE_MONITOR_SECTION = r"""
                 <td>{{ row.get('status','-') }}</td>
             </tr>
             {% endfor %}
-        </table>
+        </table></div>
         {% else %}<div class="empty">No direction decisions yet. They will appear after the first live scan.</div>{% endif %}
         </div>
         {% if pipeline.selector.top %}
         <h2 style="margin-top:18px;">Current Top Momentum/RVOL Leaders</h2>
-        <table>
+        <div class="table-wrap"><table>
             <tr><th>Rank</th><th>Symbol</th><th>Score</th><th>Momentum</th><th>RVOL</th><th>Sweet Distance</th></tr>
             {% for row in pipeline.selector.top %}
             <tr><td>{{ loop.index }}</td><td>{{ row.symbol }}</td><td>{{ row.score }}</td>
                 <td>{{ "%.3f"|format(row.momentum_pct) }}%</td><td>{{ "%.3f"|format(row.relative_volume) }}</td>
                 <td>{{ "%.3f"|format(row.sweet_spot_distance) }}</td></tr>
             {% endfor %}
-        </table>
+        </table></div>
         {% endif %}
         <div class="subtitle" id="pipeline-last-refresh" style="margin-top:10px;">Dashboard telemetry is read-only.</div>
     </div>
@@ -75,8 +75,8 @@ PIPELINE_MONITOR_SECTION = r"""
         if (decisions) {
             const rows = (p.recent_decisions || []).slice(0, 10);
             decisions.innerHTML = rows.length ?
-                '<table><tr><th>Time</th><th>Symbol</th><th>Market</th><th>Raw</th><th>Policy</th><th>Final</th><th>Status</th></tr>' +
-                rows.map(r => '<tr><td>' + String(r.recorded_at || '').slice(-14,-6) + '</td><td>' + (r.symbol || '-') + '</td><td>' + (r.market || '-') + '</td><td>' + (r.raw_direction || '-') + '</td><td>' + (r.decision || '-') + '</td><td>' + (r.final_direction || '-') + '</td><td>' + (r.status || '-') + '</td></tr>').join('') + '</table>' :
+                '<div class="table-wrap"><table><tr><th>Time</th><th>Symbol</th><th>Market</th><th>Raw</th><th>Policy</th><th>Final</th><th>Status</th></tr>' +
+                rows.map(r => '<tr><td>' + String(r.recorded_at || '').slice(-14,-6) + '</td><td>' + (r.symbol || '-') + '</td><td>' + (r.market || '-') + '</td><td>' + (r.raw_direction || '-') + '</td><td>' + (r.decision || '-') + '</td><td>' + (r.final_direction || '-') + '</td><td>' + (r.status || '-') + '</td></tr>').join('') + '</table></div>' :
                 '<div class="empty">No direction decisions yet. They will appear after the first live scan.</div>';
         }
         const refreshed = document.getElementById("pipeline-last-refresh");

@@ -158,7 +158,7 @@ BASE_STYLE = """
     box-shadow: 0 0 8px var(--accent);
   }
   .container {
-    max-width: 960px;
+    max-width: 1180px;
     margin: 28px auto;
     padding: 0 16px;
   }
@@ -173,6 +173,7 @@ BASE_STYLE = """
     transition: border-color 0.15s ease;
   }
   .card:hover { border-color: var(--border); }
+  .card { content-visibility: auto; contain-intrinsic-size: auto 320px; }
   @keyframes fadeIn {
     from { opacity: 0; transform: translateY(4px); }
     to { opacity: 1; transform: translateY(0); }
@@ -321,6 +322,14 @@ BASE_STYLE = """
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+  @media (max-width: 700px) {
+    .topbar { padding: 14px 12px; align-items: flex-start !important; flex-direction: column; }
+    .topbar > div { width: 100%; overflow-x: auto; }
+    .container { margin: 16px auto; padding: 0 10px; }
+    .card { padding: 16px 14px; border-radius: 10px; }
+    .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    table { display: block; max-width: 100%; overflow-x: auto; }
+  }
 </style>
 """
 
@@ -368,7 +377,7 @@ FORM_PAGE = BASE_STYLE + """
 <!doctype html>
 <title>Trading Bot Dashboard</title>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <body>
   <div class="topbar" style="display: flex; justify-content: space-between; align-items: center;">
     <span>Trading Bot Dashboard</span>
@@ -801,10 +810,12 @@ FORM_PAGE = BASE_STYLE + """
       btn.textContent = showing ? btn.textContent.replace('Hide', 'Show') : btn.textContent.replace('Show', 'Hide');
     }
     const sparkData = {{ spark_json|safe }};
-    for (const key in sparkData) {
-      const canvas = document.getElementById("chart-" + key);
-      if (!canvas) continue;
-      new Chart(canvas, {
+    function renderSparklines() {
+      if (typeof Chart === "undefined") return;
+      for (const key in sparkData) {
+        const canvas = document.getElementById("chart-" + key);
+        if (!canvas) continue;
+        new Chart(canvas, {
         type: 'line',
         data: {
           labels: sparkData[key].map((_, i) => i),
@@ -821,8 +832,11 @@ FORM_PAGE = BASE_STYLE + """
           plugins: { legend: { display: false } },
           scales: { x: { display: false }, y: { display: false } }
         }
-      });
+        });
+      }
     }
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", renderSparklines);
+    else renderSparklines();
   </script>
 </body>
 """
