@@ -21,7 +21,9 @@ import config as cfg
 from auth import get_kite_client
 from data_feed import get_instrument_token, fetch_candles, get_company_name
 from indicators import add_indicators, atr as atr_indicator
-from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_row
+from strategy import (evaluate, latest_completed_15m_trend,
+                      latest_completed_15m_row, rebuild_signal_for_direction)
+from market_direction_policy import resolve_market_direction
 from patterns import is_bear_trap, is_bull_trap
 from news_filter import evaluate_news, get_news_confidence
 from price_action import evaluate_price_action
@@ -116,6 +118,45 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
         signal = evaluate(symbol, df_15m, df_5m, cfg)
 
         if signal:
+            raw_direction = signal.direction
+            resolution = resolve_market_direction(market_trend, raw_direction)
+            if resolution["decision"] == "SKIP":
+                logger.error(
+                    f"PROPOSED_DIRECTION symbol={symbol} market={market_trend} "
+                    f"raw={raw_direction} decision=SKIP final=None "
+                    f"reason={resolution['reason']} block_layer=UNKNOWN_MARKET_REGIME"
+                )
+                status_this_cycle.append({
+                    "symbol": symbol,
+                    "status": "blocked: unknown market regime",
+                    "block_layer": "UNKNOWN_MARKET_REGIME",
+                })
+                continue
+            signal.raw_direction = raw_direction
+            signal.policy_decision = resolution["decision"]
+            signal.policy_reason = resolution["reason"]
+            signal.market_trend = resolution["market"]
+            try:
+                signal = rebuild_signal_for_direction(
+                    signal, resolution["direction"], df_5m.iloc[-1], cfg
+                )
+            except (ValueError, KeyError, TypeError) as exc:
+                logger.error(
+                    f"PROPOSED_DIRECTION symbol={symbol} market={resolution['market']} "
+                    f"raw={raw_direction} decision={resolution['decision']} final=None "
+                    f"reason=INVALID_FINAL_GEOMETRY block_layer=SAFETY_STOP_GEOMETRY: {exc}"
+                )
+                status_this_cycle.append({
+                    "symbol": symbol,
+                    "status": "blocked: invalid final stop geometry",
+                    "block_layer": "SAFETY_STOP_GEOMETRY",
+                })
+                continue
+            logger.info(
+                f"PROPOSED_DIRECTION symbol={symbol} market={resolution['market']} "
+                f"raw={raw_direction} decision={resolution['decision']} "
+                f"final={signal.direction} reason={resolution['reason']}"
+            )
             _snapshot_row = latest_completed_15m_row(df_15m, signal.timestamp)
             try:
                 sector = sector_for_symbol(symbol)
@@ -133,13 +174,19 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 logger.warning(f"Market alignment computation failed for {symbol}, using UNKNOWN: {e}")
                 signal.market_alignment = "UNKNOWN"
 
-            if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and \
-               signal.market_alignment in ("MISALIGNED", "STRONG_MISALIGNMENT"):
-                logger.info(f"{symbol}: skipped -- market_alignment={signal.market_alignment} "
-                            f"(trading against market/sector trend)")
-                status_this_cycle.append({"symbol": symbol,
-                                          "status": f"skipped, misaligned ({signal.market_alignment})"})
-                continue
+            old_live_decision = (
+                "REJECT"
+                if (getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and
+                    signal.market_alignment in ("MISALIGNED", "STRONG_MISALIGNMENT"))
+                else "ALLOW"
+            )
+
+            if (getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and
+                    signal.market_alignment in ("MISALIGNED", "STRONG_MISALIGNMENT")):
+                logger.info(
+                    f"{symbol}: legacy market_alignment would reject "
+                    f"{signal.market_alignment}; OBSERVATION_ONLY under proposed policy"
+                )
 
             # News filter: additional risk layer only -- never generates
             # BUY/SELL signals, only evaluates whether this existing signal
@@ -212,6 +259,12 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                         target_price = signal.target
                 open_positions[symbol] = {
                     "direction": signal.direction,
+                    "raw_direction": signal.raw_direction,
+                    "final_direction": signal.final_direction,
+                    "market_trend": signal.market_trend,
+                    "policy_decision": signal.policy_decision,
+                    "policy_reason": signal.policy_reason,
+                    "old_live_decision": old_live_decision,
                     "qty": confirmed_qty,
                     "entry": confirmed_entry_price,
                     "stop": signal.stop_loss,
@@ -247,6 +300,11 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "market_trend": market_trend, "sector": sector_for_symbol(symbol),
                     "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
                     "entry_price": signal.entry_price, "direction": signal.direction, "executed": True,
+                    "raw_direction": signal.raw_direction,
+                    "final_direction": signal.final_direction,
+                    "new_policy_decision": signal.policy_decision,
+                    "old_live_decision": old_live_decision,
+                    "policy_reason": signal.policy_reason,
                     "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
                     "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
                     "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
@@ -271,6 +329,11 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                     "market_trend": market_trend, "sector": sector_for_symbol(symbol),
                     "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
                     "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
+                    "raw_direction": signal.raw_direction,
+                    "final_direction": signal.final_direction,
+                    "new_policy_decision": signal.policy_decision,
+                    "old_live_decision": old_live_decision,
+                    "policy_reason": signal.policy_reason,
                     "rejection_reason": result["reason"],
                     "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
                     "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
