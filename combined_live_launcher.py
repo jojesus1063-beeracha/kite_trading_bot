@@ -23,9 +23,9 @@ from paper_contrarian_launcher import (
 
 logger = logging.getLogger("combined_live_launcher")
 
-LIVE_RISK_PER_TRADE_PCT = 0.20
+LIVE_RISK_PER_TRADE_PCT = 2.0
 LIVE_MAX_OPEN_POSITIONS = 1
-LIVE_MAX_TRADES_PER_DAY = 5
+LIVE_MAX_TRADES_PER_DAY = 10
 LIVE_MAX_EMA_DISTANCE_ATR = 2.00
 LIVE_MAX_DAILY_LOSS_PCT = 0.50
 LIVE_MAX_POSITION_SIZE_PCT = 50.0
