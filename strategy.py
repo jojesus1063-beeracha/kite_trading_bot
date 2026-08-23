@@ -44,6 +44,42 @@ class Signal:
     news_confidence_score: Optional[float] = None  # numeric 0-100, technical base + news modifier
     price_action_score: Optional[float] = None
     price_action_detail: Optional[dict] = None
+    raw_direction: Optional[str] = None
+    final_direction: Optional[str] = None
+    policy_decision: Optional[str] = None
+    policy_reason: Optional[str] = None
+    market_trend: Optional[str] = None
+
+
+def rebuild_signal_for_direction(signal: Signal, final_direction: str,
+                                 signal_candle: pd.Series, cfg) -> Signal:
+    """Rebuild every strategy level from the final side.
+
+    This deliberately does not reuse the raw side's stop, target, or risk.
+    Quantity is calculated later from the rebuilt stop.
+    """
+    direction = str(final_direction).upper()
+    entry = float(signal.entry_price)
+    if direction == "BUY":
+        stop = float(signal_candle["low"]) * (1 - cfg.SL_BUFFER_PCT / 100)
+        risk = entry - stop
+        target = entry + risk * cfg.RISK_REWARD_MIN
+    elif direction == "SELL":
+        sell_buffer = getattr(cfg, "SL_BUFFER_PCT_SELL", None) or cfg.SL_BUFFER_PCT
+        stop = float(signal_candle["high"]) * (1 + sell_buffer / 100)
+        risk = stop - entry
+        target = entry - risk * cfg.RISK_REWARD_MIN
+    else:
+        raise ValueError(f"Invalid final direction: {final_direction}")
+    if risk <= 0 or target <= 0:
+        raise ValueError(
+            f"Invalid {direction} geometry entry={entry} stop={stop} target={target}"
+        )
+    signal.direction = direction
+    signal.final_direction = direction
+    signal.stop_loss = stop
+    signal.target = target
+    return signal
 
 
 def get_trend(row_15m: pd.Series, cfg=None, require_vwap: bool = True) -> Optional[str]:
@@ -153,7 +189,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         if risk <= 0:
             return None
         target = entry + risk * cfg.RISK_REWARD_MIN
-        reason = "15m uptrend + 5m bullish engulfing above EMA20 on above-avg volume"
+        reason = "3m EMA9/21 uptrend + raw BUY above EMA9 on above-avg volume"
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
         if confidence:
@@ -168,7 +204,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> Opt
         if risk <= 0:
             return None
         target = entry - risk * cfg.RISK_REWARD_MIN
-        reason = "15m downtrend + 5m bearish engulfing below EMA20 on above-avg volume"
+        reason = "3m EMA9/21 downtrend + raw SELL below EMA9 on above-avg volume"
         if getattr(cfg, "USE_ADX_FILTER", False):
             reason += " (ADX-confirmed trend)"
         if confidence:
