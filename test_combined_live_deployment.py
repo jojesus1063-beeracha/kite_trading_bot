@@ -79,11 +79,11 @@ class CombinedLiveLauncherTests(unittest.TestCase):
             clear=True,
         ):
             limits = module.enforce_live_limits()
-        self.assertEqual(limits["risk_per_trade_pct"], 2.0)
+        self.assertEqual(limits["risk_per_trade_pct"], 0.20)
         self.assertEqual(limits["max_open_positions"], 1)
-        self.assertEqual(limits["max_trades_per_day"], 7)
+        self.assertEqual(limits["max_trades_per_day"], 5)
         self.assertEqual(limits["max_daily_loss_pct"], 0.50)
-        self.assertEqual(limits["max_position_size_pct"], 100.0)
+        self.assertEqual(limits["max_position_size_pct"], 50.0)
         self.assertTrue(config.CHECK_MARGIN_BEFORE_ENTRY)
         self.assertTrue(config.ENABLE_FIXED_TARGET)
         self.assertFalse(config.ENABLE_TRAILING_STOP)
