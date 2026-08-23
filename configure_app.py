@@ -1081,6 +1081,7 @@ def api_monitor_data():
 
 
 @app.route("/monitor")
+@app.route("/Monitor")
 def monitor():
     if not require_login():
         return redirect("/login")

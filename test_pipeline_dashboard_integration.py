@@ -71,6 +71,11 @@ class PipelineDashboardIntegrationTests(unittest.TestCase):
         self.assertIn("Raw", html)
         self.assertIn("Final", html)
 
+    def test_dashboard_supports_lower_and_uppercase_monitor_urls(self):
+        source = Path("configure_app.py").read_text(encoding="utf-8")
+        self.assertIn('@app.route("/monitor")', source)
+        self.assertIn('@app.route("/Monitor")', source)
+
 
 if __name__ == "__main__":
     unittest.main()
