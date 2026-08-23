@@ -33,6 +33,11 @@ SIGNAL_ANALYTICS_FIELDS = {
     "scan_started_at",
     "order_submitted_at",
     "entry_delay_seconds",
+    "raw_direction",
+    "final_direction",
+    "policy_decision",
+    "policy_reason",
+    "policy_market_trend",
 }
 
 PATTERN_FIXED_EXIT_POLICY = "PATTERN_FIXED"

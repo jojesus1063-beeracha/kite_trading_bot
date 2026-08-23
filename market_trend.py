@@ -131,9 +131,8 @@ def _fetch_classified_context_diagnostic(
     """
     Fetch, enrich and classify one benchmark with a reason code.
 
-    The trend remains fail-safe and backward compatible: every failure
-    still resolves to ``Sideways`` with empty candles.  The third return
-    value only explains why that fallback was used.
+    Missing or failed data resolves to ``UNKNOWN`` so it can never be
+    mistaken for a genuine SIDEWAYS market by the direction policy.
     """
 
     from data_feed import fetch_candles
@@ -146,10 +145,10 @@ def _fetch_classified_context_diagnostic(
             lookback_days=5,
         )
     except Exception:
-        return "Sideways", pd.DataFrame(), "FETCH_ERROR"
+        return "UNKNOWN", pd.DataFrame(), "FETCH_ERROR"
 
     if not isinstance(df_15m, pd.DataFrame) or df_15m.empty:
-        return "Sideways", pd.DataFrame(), "EMPTY_DATA"
+        return "UNKNOWN", pd.DataFrame(), "EMPTY_DATA"
 
     try:
         df_15m, _ = add_indicators(
@@ -167,7 +166,7 @@ def _fetch_classified_context_diagnostic(
             "OK",
         )
     except Exception:
-        return "Sideways", pd.DataFrame(), "INDICATOR_ERROR"
+        return "UNKNOWN", pd.DataFrame(), "INDICATOR_ERROR"
 
 
 def _fetch_classified_context(

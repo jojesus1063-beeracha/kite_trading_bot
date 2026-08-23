@@ -83,22 +83,22 @@ import market_trend as market_trend_module
 
 mock_kite = MagicMock()
 
-# Case 1: fetch fails entirely -- should fail safe to Sideways, not raise
+# Case 1: fetch fails entirely -- must be UNKNOWN, not a false Sideways
 market_trend_module.fetch_candles = None  # will be patched via data_feed import inside function
 import data_feed
 original_fetch = data_feed.fetch_candles
 data_feed.fetch_candles = lambda *a, **kw: (_ for _ in ()).throw(Exception("API down"))
 try:
     result = market_trend_module.get_market_trend(mock_kite, cfg)
-    check("get_market_trend fails safe to Sideways on fetch error", result == "Sideways")
+    check("get_market_trend fails safe to UNKNOWN on fetch error", result == "UNKNOWN")
 finally:
     data_feed.fetch_candles = original_fetch
 
-# Case 2: empty data returned -- should fail safe to Sideways
+# Case 2: empty data returned -- must be UNKNOWN
 data_feed.fetch_candles = lambda *a, **kw: pd.DataFrame()
 try:
     result = market_trend_module.get_market_trend(mock_kite, cfg)
-    check("get_market_trend fails safe to Sideways on empty data", result == "Sideways")
+    check("get_market_trend fails safe to UNKNOWN on empty data", result == "UNKNOWN")
 finally:
     data_feed.fetch_candles = original_fetch
 
@@ -125,12 +125,12 @@ try:
 finally:
     data_feed.fetch_candles = original_fetch
 
-# Mapped symbol, fetch error -> Sideways
+# Mapped symbol, fetch error -> UNKNOWN
 data_feed.fetch_candles = lambda *a, **kw: (_ for _ in ()).throw(Exception("API down"))
 try:
     result = get_sector_trend(mock_kite, "HDFCBANK", cfg)
-    check("get_sector_trend fails safe to Sideways on fetch error for mapped symbol",
-          result == "Sideways")
+    check("get_sector_trend reports UNKNOWN on fetch error for mapped symbol",
+          result == "UNKNOWN")
 finally:
     data_feed.fetch_candles = original_fetch
 

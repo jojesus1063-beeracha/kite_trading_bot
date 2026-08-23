@@ -102,6 +102,7 @@ def add_indicators(df_15m: pd.DataFrame, df_5m: pd.DataFrame, cfg) -> tuple:
 
     df_5m = df_5m.copy()
     df_5m["ema_entry"] = ema(df_5m, cfg.ENTRY_EMA)
+    df_5m["ema3"] = ema(df_5m, getattr(cfg, "OBSERVATIONAL_EMA", 3))
     df_5m["avg_volume"] = average_volume(df_5m, cfg.VOLUME_LOOKBACK)
 
     return df_15m, df_5m

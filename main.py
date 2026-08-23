@@ -36,7 +36,9 @@ from history_requirements import (
     entry_indicator_lookback_days,
     entry_trend_lookback_days,
 )
-from strategy import evaluate, latest_completed_15m_trend, latest_completed_15m_row
+from strategy import (evaluate, latest_completed_15m_trend,
+                      latest_completed_15m_row, rebuild_signal_for_direction)
+from market_direction_policy import resolve_market_direction
 from patterns import is_bear_trap, is_bull_trap
 from news_filter import evaluate_news, get_news_confidence
 from price_action import evaluate_price_action
@@ -556,11 +558,44 @@ def run_full_scan(
         signal = evaluate(symbol, df_15m, df_5m, market_df_15m, cfg)
 
         if signal:
+            raw_direction = signal.direction
+            resolution = resolve_market_direction(market_trend, raw_direction)
+            if resolution["decision"] == "SKIP":
+                logger.error(
+                    f"PROPOSED_DIRECTION symbol={symbol} market={market_trend} "
+                    f"raw={raw_direction} decision=SKIP final=None "
+                    f"reason={resolution['reason']} block_layer=UNKNOWN_MARKET_REGIME"
+                )
+                status_this_cycle.append({"symbol": symbol,
+                                          "status": "blocked: unknown market regime",
+                                          "block_layer": "UNKNOWN_MARKET_REGIME"})
+                continue
+            signal.raw_direction = raw_direction
+            signal.policy_decision = resolution["decision"]
+            signal.policy_reason = resolution["reason"]
+            signal.market_trend = resolution["market"]
+            try:
+                signal = rebuild_signal_for_direction(
+                    signal, resolution["direction"], df_5m.iloc[-2], cfg
+                )
+            except (ValueError, KeyError, TypeError) as exc:
+                logger.error(
+                    f"PROPOSED_DIRECTION symbol={symbol} market={resolution['market']} "
+                    f"raw={raw_direction} decision={resolution['decision']} final=None "
+                    f"reason=INVALID_FINAL_GEOMETRY block_layer=SAFETY_STOP_GEOMETRY: {exc}"
+                )
+                continue
+            logger.info(
+                f"PROPOSED_DIRECTION symbol={symbol} market={resolution['market']} "
+                f"raw={raw_direction} decision={resolution['decision']} "
+                f"final={signal.direction} reason={resolution['reason']}"
+            )
+
+        if signal:
             eligibility, elig_detail = classify_direction_eligibility(df_15m, cfg)
             if eligibility not in (NOT_ENABLED, signal.direction):
                 logger.info(format_watchlist_log(symbol, eligibility, elig_detail) +
-                            f" | signal direction={signal.direction} REJECTED -- watchlist ineligible for this side")
-                signal = None
+                            f" | final direction={signal.direction} OBSERVATION_ONLY -- watchlist eligibility")
 
         if signal:
             rvol_passes, rvol_value, rvol_detail = passes_rvol_threshold(
@@ -571,9 +606,8 @@ def run_full_scan(
                 logger.info(
                     format_rvol_log(symbol, rvol_value, rvol_detail)
                     + f" | signal direction={signal.direction} REJECTED -- "
-                      "RVOL confirmation failed"
+                      "RVOL confirmation failed; OBSERVATION_ONLY"
                 )
-                signal = None
             elif getattr(cfg, "ENABLE_RVOL_FILTER", False):
                 logger.info(
                     format_rvol_log(symbol, rvol_value, rvol_detail)
@@ -641,8 +675,8 @@ def run_full_scan(
                 sector_trend = "UNKNOWN"
                 sector_trend_reason = "FETCH_ERROR"
 
-            if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and \
-               market_alignment_blocks_entry(signal.market_alignment):
+            if (getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and
+                    market_alignment_blocks_entry(signal.market_alignment)):
                 logger.info(f"{symbol}: skipped -- market_alignment={signal.market_alignment} "
                             f"(trading against market/sector trend)")
                 status_this_cycle.append({"symbol": symbol,
@@ -662,7 +696,7 @@ def run_full_scan(
                     },
                 )
 
-                continue
+                logger.info(f"{symbol}: legacy market alignment rejection is OBSERVATION_ONLY")
 
             # News filter: additional risk layer only -- never generates
             # BUY/SELL signals, only evaluates whether this existing signal
@@ -753,7 +787,7 @@ def run_full_scan(
                     },
                 )
 
-                continue
+                logger.info(f"{symbol}: entry quality rejection is OBSERVATION_ONLY")
 
             entry_context = assess_entry_context(
                 signal,
@@ -798,7 +832,7 @@ def run_full_scan(
                     },
                 )
 
-                continue
+                logger.info(f"{symbol}: opposing CHoCH rejection is OBSERVATION_ONLY")
 
             relative_strength = assess_relative_strength(
                 signal,
@@ -1091,6 +1125,11 @@ def run_full_scan(
         )
         signal_analytics = {
             "signal_id": str(uuid.uuid4()),
+            "raw_direction": signal.raw_direction,
+            "final_direction": signal.final_direction,
+            "policy_decision": signal.policy_decision,
+            "policy_reason": signal.policy_reason,
+            "policy_market_trend": signal.market_trend,
             "candidate_rank": candidate_rank,
             "candidate_count": len(ranked_candidates),
             "ranking_score": candidate.get("ranking_score"),

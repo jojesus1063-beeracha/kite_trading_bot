@@ -36,16 +36,18 @@ WATCHLIST = [
 # ---------------------------------------------------------------------
 # Strategy timeframes
 # ---------------------------------------------------------------------
-TREND_TIMEFRAME = "15minute"   # Kite historical API interval string
+TREND_TIMEFRAME = "3minute"
 ENTRY_TIMEFRAME = "3minute"
 ENTRY_HISTORY_LOOKBACK_DAYS = 5
 
 # ---------------------------------------------------------------------
 # Indicator settings
 # ---------------------------------------------------------------------
-TREND_EMA_FAST = 9      # on 15-min chart
-TREND_EMA_SLOW = 35     # on 15-min chart
-ENTRY_EMA = 20          # on entry-timeframe chart
+TREND_EMA_FAST = 9
+TREND_EMA_SLOW = 21
+ENTRY_EMA = 9
+OBSERVATIONAL_EMA = 3
+ENABLE_PROPOSED_DIRECTION_POLICY = True
 VOLUME_LOOKBACK = 20    # bars, for entry-candle average-volume comparison
 VOLUME_MULTIPLIER = 1.2  # entry candle volume must exceed avg volume * this
 
@@ -388,4 +390,14 @@ MIN_CONFIRMATION_BODY_RATIO = 0.50
 ENABLE_VOLUME_ACCELERATION_FILTER = True
 MIN_CONFIRMATION_VOLUME_ACCELERATION = 1.10
 
+# Frozen proposed architecture: old dashboard values cannot silently restore
+# legacy timeframes, EMAs or ADX rejection during forward testing.
+if ENABLE_PROPOSED_DIRECTION_POLICY:
+    TREND_TIMEFRAME = "3minute"
+    ENTRY_TIMEFRAME = "3minute"
+    TREND_EMA_FAST = 9
+    TREND_EMA_SLOW = 21
+    ENTRY_EMA = 9
+    USE_ADX_FILTER = False
+    ADX_MODE = "off"
 

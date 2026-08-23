@@ -92,6 +92,37 @@ class Signal:
     news_confidence_score: Optional[float] = None
     price_action_score: Optional[float] = None
     price_action_detail: Optional[dict] = None
+    raw_direction: Optional[str] = None
+    final_direction: Optional[str] = None
+    policy_decision: Optional[str] = None
+    policy_reason: Optional[str] = None
+    market_trend: Optional[str] = None
+
+
+def rebuild_signal_for_direction(signal, final_direction, reference_candle, cfg):
+    """Rebuild stop/target from the final side; never reuse raw geometry."""
+    direction = str(final_direction).strip().upper()
+    entry = float(signal.entry_price)
+    if direction == "BUY":
+        stop = float(reference_candle["low"]) * (1 - cfg.SL_BUFFER_PCT / 100)
+        risk = entry - stop
+        target = entry + risk * cfg.RISK_REWARD_MIN
+    elif direction == "SELL":
+        buffer_pct = getattr(cfg, "SL_BUFFER_PCT_SELL", None) or cfg.SL_BUFFER_PCT
+        stop = float(reference_candle["high"]) * (1 + buffer_pct / 100)
+        risk = stop - entry
+        target = entry - risk * cfg.RISK_REWARD_MIN
+    else:
+        raise ValueError(f"invalid final direction: {final_direction}")
+    if risk <= 0 or target <= 0:
+        raise ValueError(
+            f"invalid {direction} geometry entry={entry} stop={stop} target={target}"
+        )
+    signal.direction = direction
+    signal.final_direction = direction
+    signal.stop_loss = stop
+    signal.target = target
+    return signal
 
 
 def get_trend(row_15m: pd.Series, cfg=None, require_vwap: bool = True) -> Optional[str]:
@@ -147,7 +178,15 @@ def completed_15m_rows(
         elif candle_timezone is not None and decision_time.tzinfo is not None:
             decision_time = decision_time.tz_convert(candle_timezone)
 
-        candle_ends = candle_starts + pd.Timedelta(minutes=15)
+        # Infer the actual interval. The public helper name is retained for
+        # compatibility, but the proposed architecture uses 3-minute trend
+        # candles and must not wait an accidental extra 12 minutes.
+        ordered = candle_starts.sort_values()
+        deltas = ordered.diff().dropna().dt.total_seconds().div(60)
+        interval_minutes = float(deltas.median()) if not deltas.empty else 3.0
+        if not 1.0 <= interval_minutes <= 60.0:
+            return pd.DataFrame()
+        candle_ends = candle_starts + pd.Timedelta(minutes=interval_minutes)
         return df_15m.loc[candle_ends <= decision_time]
     except (TypeError, ValueError, AttributeError):
         return pd.DataFrame()
@@ -329,6 +368,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
     """
     trend_gate_mode = _gate_mode(cfg, "TREND_GATE_MODE")
     pullback_gate_mode = _gate_mode(cfg, "PULLBACK_GATE_MODE")
+    proposed_mode = bool(getattr(cfg, "ENABLE_PROPOSED_DIRECTION_POLICY", False))
     experiment_active = "observe" in {trend_gate_mode, pullback_gate_mode}
     if (
         experiment_active
@@ -384,8 +424,8 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         return None
 
     strict_trend = get_trend(completed_stock_row, cfg)
-    trend = strict_trend
-    if strict_trend is None and trend_gate_mode == "enforce":
+    trend = _baseline_trend(completed_stock_row) if proposed_mode else strict_trend
+    if strict_trend is None and trend_gate_mode == "enforce" and not proposed_mode:
         mark_filter_status(
             symbol,
             "TREND_OR_ADX",
@@ -484,11 +524,12 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             cfg,
         )
         mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail=macro_detail)
-        if macro_decision != "ALLOW":
+        if macro_decision != "ALLOW" and not proposed_mode:
             return None
 
 
-        if not _passes_vwap_acceptance(symbol, completed_stock_15m, df_5m, "BUY", cfg):
+        if (not _passes_vwap_acceptance(symbol, completed_stock_15m, df_5m, "BUY", cfg)
+                and not proposed_mode):
             mark_filter_status(
                 symbol,
                 "VWAP_ACCEPTANCE",
@@ -496,7 +537,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             )
             return None
         ema200_status, ema200_detail = evaluate_200ema_filter(completed_stock_15m, "BUY", cfg)
-        if ema200_status == "FAIL":
+        if ema200_status == "FAIL" and not proposed_mode:
             logger.info(format_rejection_log(symbol, ema200_status, ema200_detail))
             mark_filter_status(
                 symbol,
@@ -520,7 +561,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         if timing_class != ENTRY_TIMING_NOT_ENABLED:
             logger.info(format_entry_timing_log(symbol, timing_class, timing_detail))
             mark_filter_status(symbol, "ENTRY_TIMING", detail=timing_detail)
-        if timing_class == ENTRY_TIMING_INVALID:
+        if timing_class == ENTRY_TIMING_INVALID and not proposed_mode:
             return None
         if experiment_active:
             observation_id = _log_experiment_observation(
@@ -600,10 +641,11 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             cfg,
         )
         mark_filter_status(symbol, "MACRO_INDEX_FILTER", detail=macro_detail)
-        if macro_decision != "ALLOW":
+        if macro_decision != "ALLOW" and not proposed_mode:
             return None
 
-        if not _passes_vwap_acceptance(symbol, completed_stock_15m, df_5m, "SELL", cfg):
+        if (not _passes_vwap_acceptance(symbol, completed_stock_15m, df_5m, "SELL", cfg)
+                and not proposed_mode):
             mark_filter_status(
                 symbol,
                 "VWAP_ACCEPTANCE",
@@ -611,7 +653,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
             )
             return None
         ema200_status, ema200_detail = evaluate_200ema_filter(completed_stock_15m, "SELL", cfg)
-        if ema200_status == "FAIL":
+        if ema200_status == "FAIL" and not proposed_mode:
             logger.info(format_rejection_log(symbol, ema200_status, ema200_detail))
             mark_filter_status(
                 symbol,
@@ -636,7 +678,7 @@ def evaluate(symbol: str, df_15m: pd.DataFrame, df_5m: pd.DataFrame, df_index_15
         if timing_class != ENTRY_TIMING_NOT_ENABLED:
             logger.info(format_entry_timing_log(symbol, timing_class, timing_detail))
             mark_filter_status(symbol, "ENTRY_TIMING", detail=timing_detail)
-        if timing_class == ENTRY_TIMING_INVALID:
+        if timing_class == ENTRY_TIMING_INVALID and not proposed_mode:
             return None
         if experiment_active:
             observation_id = _log_experiment_observation(
