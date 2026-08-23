@@ -1,8 +1,9 @@
 """Point-in-time triple-top/bottom policy for guarded paper/live strategies.
 
-The detector uses only candles that precede the breakout candle.  A signal is
-accepted only on a fresh neckline cross with VWAP alignment and at least the
-configured relative volume.  It never calls a broker or places an order.
+The detector uses only completed candles.  Pattern shape determines whether a
+signal is accepted; neckline, VWAP and relative-volume confirmation are kept as
+observations for audit/ranking and never block an otherwise valid pattern.
+It never calls a broker or places an order.
 """
 from __future__ import annotations
 
@@ -37,6 +38,7 @@ class TriplePatternDecision:
     stop_loss_percent: float | None = None
     profit_target_percent: float | None = None
     reasons: list[str] = field(default_factory=list)
+    observations: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -87,29 +89,50 @@ def _fresh_cross(close: float, prior_close: float, neckline: float, direction: s
     )
 
 
-def _candidate(history: pd.DataFrame, breakout: pd.Series):
+def _candidate(history: pd.DataFrame, signal_candle: pd.Series):
     work = history.tail(40).reset_index(drop=True)
     highs = _numbers(work["high"])
     lows = _numbers(work["low"])
     high_pivots = _pivot_indices(highs, "high")
     low_pivots = _pivot_indices(lows, "low")
-    close = float(breakout["close"])
+    close = float(signal_candle["close"])
     prior_close = float(work.iloc[-1]["close"])
+    candidates = []
 
     last_highs = high_pivots[-3:]
     if len(last_highs) == 3 and _separated(last_highs):
         levels = [highs[index] for index in last_highs]
         neckline = float(min(lows[last_highs[0]:last_highs[2] + 1]))
-        if _similar(levels) and _fresh_cross(close, prior_close, neckline, "SELL"):
-            return TRIPLE_TOP, "SELL", neckline
+        if _similar(levels):
+            candidates.append((
+                TRIPLE_TOP,
+                "SELL",
+                neckline,
+                _fresh_cross(close, prior_close, neckline, "SELL"),
+                last_highs[-1],
+            ))
 
     last_lows = low_pivots[-3:]
     if len(last_lows) == 3 and _separated(last_lows):
         levels = [lows[index] for index in last_lows]
         neckline = float(max(highs[last_lows[0]:last_lows[2] + 1]))
-        if _similar(levels) and _fresh_cross(close, prior_close, neckline, "BUY"):
-            return TRIPLE_BOTTOM, "BUY", neckline
-    return None
+        if _similar(levels):
+            candidates.append((
+                TRIPLE_BOTTOM,
+                "BUY",
+                neckline,
+                _fresh_cross(close, prior_close, neckline, "BUY"),
+                last_lows[-1],
+            ))
+    if not candidates:
+        return None
+    # A currently confirmed shape wins; otherwise observe the most recently
+    # completed shape. This keeps confirmation non-blocking without letting an
+    # older opposite formation silently override the latest structure.
+    pattern, direction, neckline, fresh_cross, _ = max(
+        candidates, key=lambda item: (item[3], item[4])
+    )
+    return pattern, direction, neckline, fresh_cross
 
 
 def _fresh_completed(timestamp, cfg_obj, now=None) -> bool:
@@ -153,12 +176,12 @@ def evaluate_confirmed_triple_pattern(
     if not bool(getattr(cfg_obj, "PAPER_ENABLE_TRIPLE_PATTERN", True)):
         return TriplePatternDecision(False, reasons=["DISABLED"])
 
-    required = {"high", "low", "close", "volume", "vwap"}
+    required = {"high", "low", "close"}
     if df_entry is None or len(df_entry) < 25 or not required.issubset(df_entry.columns):
         return TriplePatternDecision(False, reasons=["INSUFFICIENT_OR_MISSING_DATA"])
 
     numeric = df_entry.copy()
-    for column in required:
+    for column in required | ({"volume", "vwap"} & set(numeric.columns)):
         numeric[column] = pd.to_numeric(numeric[column], errors="coerce")
     numeric = numeric.dropna(subset=["high", "low", "close"])
     if len(numeric) < 25:
@@ -168,27 +191,47 @@ def evaluate_confirmed_triple_pattern(
         return TriplePatternDecision(False, reasons=["CANDLE_NOT_COMPLETED_OR_FRESH"])
 
     history = numeric.iloc[:-1]
-    breakout = numeric.iloc[-1]
-    found = _candidate(history, breakout)
+    signal_candle = numeric.iloc[-1]
+    found = _candidate(history, signal_candle)
     if found is None:
-        return TriplePatternDecision(False, reasons=["NO_FRESH_TRIPLE_PATTERN_BREAKOUT"])
+        return TriplePatternDecision(False, reasons=["NO_TRIPLE_PATTERN"])
 
-    pattern, direction, neckline = found
-    prior_volume = pd.to_numeric(history["volume"], errors="coerce").tail(20).mean()
-    volume = float(breakout["volume"]) if pd.notna(breakout["volume"]) else None
+    pattern, direction, neckline, fresh_neckline_cross = found
+    prior_volume = (
+        pd.to_numeric(history["volume"], errors="coerce").tail(20).mean()
+        if "volume" in history.columns
+        else None
+    )
+    volume_value = signal_candle.get("volume")
+    volume = float(volume_value) if pd.notna(volume_value) else None
     volume_ratio = None if not prior_volume or volume is None else volume / float(prior_volume)
     minimum_volume = float(
         getattr(cfg_obj, "PAPER_TRIPLE_PATTERN_MIN_VOLUME_RATIO", 1.5)
     )
-    vwap = float(breakout["vwap"]) if pd.notna(breakout["vwap"]) else None
-    close = float(breakout["close"])
-    reasons = []
-    if volume_ratio is None or volume_ratio < minimum_volume:
-        reasons.append("TRIPLE_PATTERN_VOLUME_BELOW_MINIMUM")
-    if vwap is None or (direction == "BUY" and close <= vwap) or (
-        direction == "SELL" and close >= vwap
-    ):
-        reasons.append("TRIPLE_PATTERN_VWAP_NOT_ALIGNED")
+    vwap_value = signal_candle.get("vwap")
+    vwap = float(vwap_value) if pd.notna(vwap_value) else None
+    close = float(signal_candle["close"])
+    volume_confirmed = volume_ratio is not None and volume_ratio >= minimum_volume
+    vwap_aligned = vwap is not None and (
+        (direction == "BUY" and close > vwap)
+        or (direction == "SELL" and close < vwap)
+    )
+    observations = {
+        "policy": "OBSERVATIONAL_ONLY",
+        "fresh_neckline_cross": fresh_neckline_cross,
+        "vwap_aligned": vwap_aligned,
+        "volume_confirmed": volume_confirmed,
+        "minimum_volume_ratio": minimum_volume,
+        "failed": [
+            name
+            for name, passed in (
+                ("FRESH_NECKLINE_CROSS", fresh_neckline_cross),
+                ("VWAP_ALIGNMENT", vwap_aligned),
+                ("VOLUME_CONFIRMATION", volume_confirmed),
+            )
+            if not passed
+        ],
+    }
 
     stop_pct = float(getattr(cfg_obj, "PAPER_TRIPLE_PATTERN_STOP_PERCENT", 0.45))
     target_name = (
@@ -199,7 +242,7 @@ def evaluate_confirmed_triple_pattern(
     target_default = 1.0 if pattern == TRIPLE_TOP else 2.0
     target_pct = float(getattr(cfg_obj, target_name, target_default))
     return TriplePatternDecision(
-        accepted=not reasons,
+        accepted=True,
         pattern=pattern,
         direction=direction,
         neckline=neckline,
@@ -207,5 +250,5 @@ def evaluate_confirmed_triple_pattern(
         vwap=vwap,
         stop_loss_percent=stop_pct,
         profit_target_percent=target_pct,
-        reasons=reasons,
+        observations=observations,
     )

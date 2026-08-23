@@ -498,7 +498,7 @@ def install_two_indicator_patch(*, live_combined=False):
             }
             event.update({
                 "decision": "SIGNAL_SELECTED",
-                "stage": "CONFIRMED_TRIPLE_PATTERN_SIGNAL",
+                "stage": "TRIPLE_PATTERN_SIGNAL",
                 "entry_price": entry,
                 "stop_loss": stop,
                 "target": target,
@@ -508,12 +508,13 @@ def install_two_indicator_patch(*, live_combined=False):
             _append(event)
             logger.info(
                 "%s TRIPLE PATTERN SIGNAL | %s | pattern=%s direction=%s "
-                "volume_ratio=%.3f target=%.2f%% stop=%.2f%%",
+                "volume_ratio=%s observations=%s target=%.2f%% stop=%.2f%%",
                 mode_label,
                 symbol,
                 triple.pattern,
                 triple.direction,
-                triple.volume_ratio,
+                "NA" if triple.volume_ratio is None else f"{triple.volume_ratio:.3f}",
+                triple.observations,
                 triple.profit_target_percent,
                 triple.stop_loss_percent,
             )
@@ -525,8 +526,8 @@ def install_two_indicator_patch(*, live_combined=False):
                 target=target,
                 timestamp=cur["date"],
                 reason=(
-                    f"{mode_label} CONFIRMED {triple.pattern} | fresh neckline cross | "
-                    f"VWAP aligned | volume_ratio={triple.volume_ratio:.3f} | "
+                    f"{mode_label} DETECTED {triple.pattern} | confirmations observational | "
+                    f"volume_ratio={'NA' if triple.volume_ratio is None else f'{triple.volume_ratio:.3f}'} | "
                     f"fixed target={triple.profit_target_percent:.2f}%"
                 ),
                 confidence="PATTERN_CONFIRMED",

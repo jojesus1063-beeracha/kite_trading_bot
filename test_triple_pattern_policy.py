@@ -94,13 +94,21 @@ class TriplePatternPolicyTests(unittest.TestCase):
         self.assertEqual(result.direction, "BUY")
         self.assertEqual(result.profit_target_percent, 2.0)
 
-    def test_volume_and_vwap_are_mandatory(self):
+    def test_volume_and_vwap_are_observational(self):
         low_volume = self.evaluate(frame_for(TRIPLE_TOP, volume=25.0))
         wrong_vwap = self.evaluate(frame_for(TRIPLE_BOTTOM, aligned=False))
-        self.assertFalse(low_volume.accepted)
-        self.assertIn("TRIPLE_PATTERN_VOLUME_BELOW_MINIMUM", low_volume.reasons)
-        self.assertFalse(wrong_vwap.accepted)
-        self.assertIn("TRIPLE_PATTERN_VWAP_NOT_ALIGNED", wrong_vwap.reasons)
+        self.assertTrue(low_volume.accepted)
+        self.assertIn("VOLUME_CONFIRMATION", low_volume.observations["failed"])
+        self.assertTrue(wrong_vwap.accepted)
+        self.assertIn("VWAP_ALIGNMENT", wrong_vwap.observations["failed"])
+
+    def test_neckline_cross_is_observational(self):
+        frame = frame_for(TRIPLE_TOP)
+        frame.loc[frame.index[-1], "close"] = 95.0
+        frame.loc[frame.index[-1], "low"] = 94.8
+        result = self.evaluate(frame)
+        self.assertTrue(result.accepted)
+        self.assertIn("FRESH_NECKLINE_CROSS", result.observations["failed"])
 
     def test_live_mode_fails_closed(self):
         self.cfg.PAPER_TRADING = False
