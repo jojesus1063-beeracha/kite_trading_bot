@@ -15,7 +15,7 @@ LIVE_ACK_ENV = "KITE_LIVE_COMBINED_ACK"
 LIVE_ACK_VALUE = "I_ACCEPT_REAL_ORDERS"
 
 IST = ZoneInfo("Asia/Kolkata")
-STRATEGY_NAME = "FULL_ZERODHA_CLEAN_TOP120_MOMENTUM"
+STRATEGY_NAME = "NSE_MOMENTUM_RVOL_TOP120"
 EXPECTED_WATCHLIST_SIZE = 120
 TERMINAL_ORDER_STATUSES = {"COMPLETE", "CANCELLED", "REJECTED"}
 
@@ -43,6 +43,8 @@ def validate_live_config(data: dict) -> None:
 
 
 def validate_selector_artifacts(report: dict, payload: dict) -> list[dict]:
+    from live_momentum_rvol_selector import momentum_rvol_score, rank_candidates
+
     if report.get("status") != "success":
         raise RuntimeError("Selector report is not successful")
     if report.get("strategy") != STRATEGY_NAME:
@@ -67,6 +69,20 @@ def validate_selector_artifacts(report: dict, payload: dict) -> list[dict]:
         raise RuntimeError("Selector payload contract mismatch")
     if any(row.get("ordinary_equity_clean") is not True for row in selected):
         raise RuntimeError("Selected row is missing ordinary-equity-clean evidence")
+    for row in selected:
+        try:
+            momentum = float(row["momentum_pct"])
+            rvol = float(row["relative_volume"])
+            score = int(row["score"])
+            float(row["sweet_spot_distance"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("Selected row lacks valid Momentum/RVOL score evidence") from exc
+        if score != momentum_rvol_score(momentum, rvol):
+            raise RuntimeError("Selected row does not match frozen Momentum/RVOL score table")
+    if [row.get("symbol") for row in rank_candidates(selected)] != [
+        row.get("symbol") for row in selected
+    ]:
+        raise RuntimeError("Selected rows are not in frozen score/tie-break order")
 
     normalized = [
         {
@@ -80,8 +96,8 @@ def validate_selector_artifacts(report: dict, payload: dict) -> list[dict]:
         raise RuntimeError("Blank watchlist symbol")
     if len(symbols) != len(set(symbols)):
         raise RuntimeError("Duplicate symbol across NSE/BSE")
-    if any(row["exchange"] not in {"NSE", "BSE"} for row in normalized):
-        raise RuntimeError("Non-NSE/BSE watchlist row")
+    if any(row["exchange"] != "NSE" for row in normalized):
+        raise RuntimeError("Momentum/RVOL live watchlist must contain NSE equities only")
     return normalized
 
 

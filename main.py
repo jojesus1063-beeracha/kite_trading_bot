@@ -675,7 +675,8 @@ def run_full_scan(
                 sector_trend = "UNKNOWN"
                 sector_trend_reason = "FETCH_ERROR"
 
-            if (getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and
+            if (not getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) and
+                    getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and
                     market_alignment_blocks_entry(signal.market_alignment)):
                 logger.info(f"{symbol}: skipped -- market_alignment={signal.market_alignment} "
                             f"(trading against market/sector trend)")
@@ -708,7 +709,10 @@ def run_full_scan(
             signal.price_action_score = pa_score
             signal.price_action_detail = pa_detail
 
-            if price_action_blocks_entry(pa_score):
+            if (
+                not getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+                and price_action_blocks_entry(pa_score)
+            ):
                 logger.info(
                     f"{symbol}: skipped -- Price Action hard gate "
                     f"| score={pa_score} "
@@ -754,7 +758,10 @@ def run_full_scan(
             signal.entry_quality_score = quality.score
             signal.entry_quality_detail = quality.detail
 
-            if not quality.accepted:
+            if (
+                not quality.accepted
+                and not getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+            ):
                 logger.info(
                     f"{symbol}: skipped -- poor entry location "
                     f"| quality_score={quality.score:.2f} "
@@ -801,7 +808,10 @@ def run_full_scan(
                 entry_context.detail
             )
 
-            if not entry_context.accepted:
+            if (
+                not entry_context.accepted
+                and not getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+            ):
                 logger.info(
                     f"{symbol}: skipped -- opposing CHoCH "
                     f"| {entry_context.reason} "
@@ -860,7 +870,10 @@ def run_full_scan(
                 signal.news_sentiment = news_result["sentiment"]
                 signal.news_headline = news_result["headline"]
                 signal.news_confidence_score = news_score
-                if news_decision == "REJECT":
+                if (
+                    news_decision == "REJECT"
+                    and not getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+                ):
                     logger.info(f"{symbol}: skipped -- news={signal.news_sentiment} ({news_reason}) "
                                 f"headline: {signal.news_headline}")
                     status_this_cycle.append({"symbol": symbol,
@@ -907,16 +920,16 @@ def run_full_scan(
                     continue
 
 
-            ranking_score = round(
-                float(_base_score)
-                + float(quality.score)
-                + float(
-                    entry_context.score_adjustment
+            ranking_score = (
+                0.0
+                if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+                else round(
+                    float(_base_score)
+                    + float(quality.score)
+                    + float(entry_context.score_adjustment)
+                    + float(relative_strength.score_adjustment),
+                    2,
                 )
-                + float(
-                    relative_strength.score_adjustment
-                ),
-                2,
             )
 
             entry_candidates.append(
@@ -927,7 +940,11 @@ def run_full_scan(
                     "df_5m": df_5m,
                     "snapshot_row": _snapshot_row,
                     "ranking_score": ranking_score,
-                    "quality_score": quality.score,
+                    "quality_score": (
+                        0.0
+                        if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+                        else quality.score
+                    ),
                     "quality_detail": quality.detail,
                     "entry_context_score": (
                         entry_context.score_adjustment
@@ -997,9 +1014,11 @@ def run_full_scan(
         cooperative_monitor,
     )
 
-    ranked_candidates = rank_entry_candidates(
-        entry_candidates
-    )
+    ranked_candidates = rank_entry_candidates(entry_candidates)
+    if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False):
+        # Preserve the Momentum/RVOL Top-120 order. Legacy analytical scores
+        # must not influence which simultaneous EMA signal executes first.
+        ranked_candidates = list(entry_candidates)
 
     batch_live_prices = fetch_live_prices(
         kite,

@@ -42,16 +42,9 @@ sleep 20
 echo "Read-only full-universe LIVE top-120 selection started:"
 TZ=Asia/Kolkata date
 
-"$PYTHON" paper_full_universe_top60_selector.py \
+"$PYTHON" live_momentum_rvol_selector.py \
   --top 120 \
   --min-selected 120 \
-  --max-price 2200 \
-  --min-turnover 1000000 \
-  --max-spread-pct 0.25 \
-  --min-circuit-distance-pct 1.0 \
-  --min-abs-change-pct 0.30 \
-  --min-day-range-pct 0.40 \
-  --history-candidates 120 \
   --output runtime/live_watchlist/latest_watchlist.json \
   --report runtime/live_watchlist/latest_report.json
 

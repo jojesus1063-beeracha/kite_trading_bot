@@ -389,6 +389,7 @@ def install_two_indicator_patch(*, live_combined=False):
     cfg.ENABLE_VOLUME_ACCELERATION_FILTER = True
     cfg.ENABLE_PRICE_ACTION = True
     cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
+    cfg.PROPOSED_CLEAN_PIPELINE = True
     cfg.PAPER_ENABLE_TRIPLE_PATTERN = bool(
         getattr(cfg, "PAPER_ENABLE_TRIPLE_PATTERN", True)
     )
@@ -451,6 +452,116 @@ def install_two_indicator_patch(*, live_combined=False):
             event = enrich_breakout_diagnostics(event)
             _append(event)
             return None
+
+        # Frozen clean pipeline: EMA9/EMA21 on the completed 3-minute stock
+        # candles is the sole raw-direction generator. Every legacy strategy
+        # metric below is recorded for research but cannot veto, reverse,
+        # prioritize or independently generate a signal.
+        if bool(getattr(cfg_obj, "PROPOSED_CLEAN_PIPELINE", False)):
+            base, e9, e21 = ema_direction(df_5m)
+            close_values = pd.to_numeric(df_5m["close"], errors="coerce")
+            ema3 = (
+                None
+                if close_values.dropna().empty
+                else float(close_values.ewm(span=3, adjust=False).mean().iloc[-1])
+            )
+            triple_observation = evaluate_confirmed_triple_pattern(
+                df_5m, cfg_obj, allow_live=live_combined
+            )
+            timing_class = None
+            timing_detail = {}
+            try:
+                previous = df_5m.iloc[-2] if len(df_5m) >= 2 else None
+                timing_class, timing_detail = entry_timing.evaluate_entry_timing(
+                    symbol, base, df_5m, cur, previous, cfg_obj
+                )
+            except Exception as exc:
+                timing_detail = {"observation_error": str(exc)}
+            price_action_score = None
+            price_action_detail = {}
+            try:
+                if base in {"BUY", "SELL"}:
+                    price_action_score, price_action_detail = evaluate_price_action(
+                        df_5m, base, cfg_obj
+                    )
+            except Exception as exc:
+                price_action_detail = {"observation_error": str(exc)}
+
+            event.update({
+                "pipeline": "MOMENTUM_RVOL_EMA_MARKET_POLICY",
+                "legacy_gates": "OBSERVATIONAL_ONLY",
+                "adx": _latest_adx(df_15m),
+                "adx_blocks_trade": False,
+                "ema3": ema3,
+                "ema3_role": "OBSERVATIONAL_ONLY",
+                "ema9": e9,
+                "ema21": e21,
+                "ema_base_direction": base,
+                "triple_pattern_observation": triple_observation.to_dict(),
+                "entry_timing_observation": {
+                    "classification": timing_class,
+                    "detail": timing_detail,
+                },
+                "price_action_observation": {
+                    "score": price_action_score,
+                    "detail": price_action_detail,
+                },
+            })
+            if base is None:
+                event.update({
+                    "decision": "NO_RAW_SIGNAL",
+                    "stage": "EMA9_EMA21_DIRECTION",
+                    "reasons": ["EMA9_EMA21_UNAVAILABLE_OR_EQUAL"],
+                })
+                _append(enrich_breakout_diagnostics(event))
+                return None
+
+            entry = float(cur["close"]) if not pd.isna(cur.get("close")) else 0.0
+            if entry <= 0:
+                event.update({
+                    "decision": "REJECT",
+                    "stage": "ENTRY_PRICE_SAFETY",
+                    "reasons": ["INVALID_ENTRY_PRICE"],
+                })
+                _append(enrich_breakout_diagnostics(event))
+                return None
+            stop_fraction = float(getattr(cfg_obj, "STOP_LOSS_PERCENT", 0.45)) / 100.0
+            target_fraction = float(getattr(cfg_obj, "PROFIT_TARGET_PERCENT", 0.70)) / 100.0
+            sign = 1.0 if base == "BUY" else -1.0
+            stop = entry * (1.0 - sign * stop_fraction)
+            target = entry * (1.0 + sign * target_fraction)
+            event.update({
+                "decision": "RAW_SIGNAL_SELECTED",
+                "stage": "EMA9_EMA21_RAW_SIGNAL",
+                "raw_direction": base,
+                "entry_price": entry,
+                "stop_loss": stop,
+                "target": target,
+            })
+            _append(enrich_breakout_diagnostics(event))
+            logger.info(
+                "%s EMA RAW SIGNAL | %s | EMA3(obs)=%s EMA9=%s EMA21=%s raw=%s",
+                mode_label, symbol, ema3, e9, e21, base,
+            )
+            return strategy.Signal(
+                symbol=symbol,
+                direction=base,
+                entry_price=entry,
+                stop_loss=stop,
+                target=target,
+                timestamp=cur["date"],
+                reason=(
+                    f"{mode_label} EMA9/EMA21 RAW SIGNAL | EMA3 observational | "
+                    "all legacy strategy confirmations observational"
+                ),
+                confidence="EMA_RAW",
+                price_action_detail={
+                    "observational_only": True,
+                    "triple_pattern": triple_observation.to_dict(),
+                    "entry_timing": timing_detail,
+                    "price_action": price_action_detail,
+                },
+            )
 
         triple = evaluate_confirmed_triple_pattern(
             df_5m, cfg_obj, allow_live=live_combined
@@ -763,17 +874,13 @@ def install_two_indicator_patch(*, live_combined=False):
 
     strategy.evaluate = evaluate
     logger.warning(
-        "%s CLEAN ENTRY ACTIVE: normal EMA direction; ADX strength only (minimum %.0f); "
-        "RSI/EMA200 observational; validated breakout HARD GATE; "
-        "2-of-3 secondary confirmation; independent pattern/pullback/rejection gate; cost-aware movement gate",
+        "%s CLEAN PIPELINE ACTIVE: EMA9/EMA21 is the sole raw signal; "
+        "EMA3/ADX/VWAP/EMA200/patterns/breakout/price action/timing are observational only",
         mode_label,
-        ADX_MIN_STRENGTH,
     )
     logger.warning(
-        "%s SYMBOL GUARD ACTIVE: max %s completed entries/symbol/day; %.0f-minute cooldown after losing trade",
+        "%s LEGACY SYMBOL FREQUENCY METRICS: OBSERVATIONAL_ONLY in the clean pipeline",
         mode_label,
-        int(getattr(cfg, "PAPER_MAX_TRADES_PER_SYMBOL", 2)),
-        float(getattr(cfg, "PAPER_LOSS_REENTRY_COOLDOWN_MINUTES", 30.0)),
     )
     logger.warning(
         "%s AUDIT MODE ACTIVE: every entry evaluation and available legacy metric is persisted to %s",

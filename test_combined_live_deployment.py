@@ -24,9 +24,15 @@ def load_isolated_launcher(config):
     fake_policy.LIVE_ACK_ENV = "KITE_LIVE_COMBINED_ACK"
     fake_policy.LIVE_ACK_VALUE = "I_ACCEPT_REAL_ORDERS"
     fake_policy.install_two_indicator_patch = lambda **kwargs: None
+    fake_breakout = types.ModuleType("directional_breakout_validator")
+    fake_breakout.validate_breakout = lambda *args, **kwargs: None
     with patch.dict(
         sys.modules,
-        {"config": config, "paper_contrarian_launcher": fake_policy},
+        {
+            "config": config,
+            "paper_contrarian_launcher": fake_policy,
+            "directional_breakout_validator": fake_breakout,
+        },
     ):
         spec = importlib.util.spec_from_file_location(
             "isolated_combined_live_launcher", ROOT / "combined_live_launcher.py"
@@ -85,6 +91,7 @@ class CombinedLiveLauncherTests(unittest.TestCase):
         self.assertEqual(limits["max_daily_loss_pct"], 0.50)
         self.assertEqual(limits["max_position_size_pct"], 50.0)
         self.assertTrue(config.CHECK_MARGIN_BEFORE_ENTRY)
+        self.assertEqual(config.ENTRY_SCAN_SHORTLIST_SIZE, 120)
         self.assertTrue(config.ENABLE_FIXED_TARGET)
         self.assertFalse(config.ENABLE_TRAILING_STOP)
 
@@ -110,6 +117,11 @@ class LivePreflightTests(unittest.TestCase):
                 "symbol": f"S{i:02d}",
                 "exchange": "NSE",
                 "ordinary_equity_clean": True,
+                "momentum_pct": 1.25,
+                "relative_volume": 1.75,
+                "score": 100,
+                "sweet_spot_distance": 0.0,
+                "turnover": 120 - i,
             }
             for i in range(preflight.EXPECTED_WATCHLIST_SIZE)
         ]
@@ -177,6 +189,10 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("Persistent=false", timer)
         self.assertIn("kite-live-watchlist.service", timer)
 
+    def test_live_watchlist_allows_full_nse_history_baseline_run(self):
+        unit = (ROOT / "systemd" / "kite-live-watchlist.service").read_text()
+        self.assertIn("TimeoutStartSec=1800", unit)
+
     def test_live_service_uses_only_guarded_launcher(self):
         unit = (ROOT / "systemd" / "kitebot-live-combined.service").read_text()
         self.assertIn("combined_live_launcher.py", unit)
@@ -186,9 +202,11 @@ class DeploymentContractTests(unittest.TestCase):
         unit = (ROOT / "systemd" / "kitebot-stop.service").read_text()
         self.assertIn("kitebot-live-combined.service", unit)
 
-    def test_live_clean_candle_requires_validated_breakout(self):
+    def test_live_clean_pipeline_makes_legacy_strategy_checks_observational(self):
         source = (ROOT / "paper_contrarian_launcher.py").read_text()
-        self.assertIn("cfg.PAPER_REQUIRE_VALIDATED_BREAKOUT = True", source)
+        self.assertIn("EMA9/EMA21 on the completed 3-minute stock", source)
+        self.assertIn('"legacy_gates": "OBSERVATIONAL_ONLY"', source)
+        self.assertIn('confidence="EMA_RAW"', source)
 
 
 if __name__ == "__main__":

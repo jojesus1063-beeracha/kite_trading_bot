@@ -53,6 +53,8 @@ def enforce_live_limits() -> dict:
     cfg.MAX_TRADES_PER_DAY = LIVE_MAX_TRADES_PER_DAY
     cfg.MAX_DAILY_LOSS_PCT = LIVE_MAX_DAILY_LOSS_PCT
     cfg.MAX_POSITION_SIZE_PCT = LIVE_MAX_POSITION_SIZE_PCT
+    cfg.PROPOSED_CLEAN_PIPELINE = True
+    cfg.ENTRY_SCAN_SHORTLIST_SIZE = 120
     cfg.CHECK_MARGIN_BEFORE_ENTRY = True
     entry_quality.MAX_EMA_DISTANCE_ATR = LIVE_MAX_EMA_DISTANCE_ATR
     cfg.MAX_ENTRY_EXTENSION_ATR = 1.55
@@ -77,7 +79,8 @@ def main() -> None:
     install_two_indicator_patch(live_combined=True)
     logger.critical(
         "LIVE COMBINED REAL-ORDER MODE ACTIVE | limits=%s | "
-        "triple patterns use fixed exits; clean-candle trades use the existing hybrid exit",
+        "Momentum/RVOL Top-120; EMA9/EMA21 raw signal; frozen market-direction policy; "
+        "legacy strategy metrics observational only",
         limits,
     )
     runpy.run_module("main", run_name="__main__")
