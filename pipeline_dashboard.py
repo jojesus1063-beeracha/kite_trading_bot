@@ -75,6 +75,16 @@ def _systemctl(*arguments: str) -> str:
         return "unknown"
 
 
+def _numeric_score_sort(item: tuple[str, int]) -> tuple[int, float, str]:
+    """Sort numeric selector score labels descending without trusting report shape."""
+    label = item[0]
+    try:
+        return (0, -float(label), label)
+    except (TypeError, ValueError):
+        # A malformed observational label must not take down the dashboard.
+        return (1, 0.0, label)
+
+
 def load_pipeline_dashboard() -> dict:
     selector = _load_json(SELECTOR_REPORT)
     selected = selector.get("selected", []) if selector else []
@@ -96,7 +106,7 @@ def load_pipeline_dashboard() -> dict:
             "fresh_today": selector_fresh,
             "selected_count": len(selected),
             "eligible_count": selector.get("eligible_count") if selector else None,
-            "score_counts": dict(sorted(scores.items(), key=lambda item: -int(item[0]))),
+            "score_counts": dict(sorted(scores.items(), key=_numeric_score_sort)),
             "top": selected[:10],
         },
         "strategy": {

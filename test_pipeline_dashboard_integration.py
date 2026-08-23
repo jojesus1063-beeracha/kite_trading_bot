@@ -27,6 +27,12 @@ class PipelineDashboardIntegrationTests(unittest.TestCase):
                 "selected": [{
                     "symbol": "AAA", "score": 100, "momentum_pct": 1.25,
                     "relative_volume": 1.75, "sweet_spot_distance": 0.0,
+                }, {
+                    "symbol": "BBB", "score": 95.426513, "momentum_pct": 1.10,
+                    "relative_volume": 1.60, "sweet_spot_distance": 0.1,
+                }, {
+                    "symbol": "CCC", "score": "unavailable", "momentum_pct": 0.9,
+                    "relative_volume": 1.2, "sweet_spot_distance": 0.2,
                 }],
             }), encoding="utf-8")
             events.write_text(json.dumps({
@@ -39,8 +45,9 @@ class PipelineDashboardIntegrationTests(unittest.TestCase):
                  patch.object(dashboard, "PIPELINE_EVENTS", events), \
                  patch.object(dashboard.subprocess, "run", return_value=fake):
                 result = dashboard.load_pipeline_dashboard()
-            self.assertEqual(result["selector"]["selected_count"], 1)
+            self.assertEqual(result["selector"]["selected_count"], 3)
             self.assertEqual(result["selector"]["top"][0]["score"], 100)
+            self.assertEqual(list(result["selector"]["score_counts"]), ["100", "95.426513", "unavailable"])
             self.assertEqual(result["recent_decisions"][0]["final_direction"], "BUY")
             self.assertEqual(result["services"]["watchlist_timer"], "active")
             self.assertEqual(result["limits"]["force_square_off"], "15:08 IST")
