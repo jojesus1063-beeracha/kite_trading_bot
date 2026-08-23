@@ -97,6 +97,7 @@ from scheduler import candle_interval_minutes, last_completed_candle_close, next
 from scan_latency import build_entry_timing, select_scan_universe
 from cooperative_position_monitor import CooperativeScanMonitor
 from delayed_entry_confirmation import assess_delayed_entry
+from pipeline_dashboard import record_pipeline_event
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("main")
@@ -561,6 +562,14 @@ def run_full_scan(
             raw_direction = signal.direction
             resolution = resolve_market_direction(market_trend, raw_direction)
             if resolution["decision"] == "SKIP":
+                record_pipeline_event(
+                    symbol=symbol,
+                    market=market_trend,
+                    raw_direction=raw_direction,
+                    decision="SKIP",
+                    final_direction=None,
+                    status="UNKNOWN_MARKET_REGIME",
+                )
                 logger.error(
                     f"PROPOSED_DIRECTION symbol={symbol} market={market_trend} "
                     f"raw={raw_direction} decision=SKIP final=None "
@@ -579,12 +588,28 @@ def run_full_scan(
                     signal, resolution["direction"], df_5m.iloc[-2], cfg
                 )
             except (ValueError, KeyError, TypeError) as exc:
+                record_pipeline_event(
+                    symbol=symbol,
+                    market=resolution["market"],
+                    raw_direction=raw_direction,
+                    decision=resolution["decision"],
+                    final_direction=None,
+                    status="INVALID_FINAL_GEOMETRY",
+                )
                 logger.error(
                     f"PROPOSED_DIRECTION symbol={symbol} market={resolution['market']} "
                     f"raw={raw_direction} decision={resolution['decision']} final=None "
                     f"reason=INVALID_FINAL_GEOMETRY block_layer=SAFETY_STOP_GEOMETRY: {exc}"
                 )
                 continue
+            record_pipeline_event(
+                symbol=symbol,
+                market=resolution["market"],
+                raw_direction=raw_direction,
+                decision=resolution["decision"],
+                final_direction=signal.direction,
+                status="CANDIDATE",
+            )
             logger.info(
                 f"PROPOSED_DIRECTION symbol={symbol} market={resolution['market']} "
                 f"raw={raw_direction} decision={resolution['decision']} "
@@ -1396,6 +1421,14 @@ def run_full_scan(
         )
 
         if not fresh_validation.accepted:
+            record_pipeline_event(
+                symbol=symbol,
+                market=signal.market_trend,
+                raw_direction=signal.raw_direction,
+                decision=signal.policy_decision,
+                final_direction=signal.direction,
+                status="FRESH_PRICE_REJECTED",
+            )
             logger.info(
                 f"{symbol}: skipped -- stale or "
                 f"adverse entry price | "
@@ -1531,6 +1564,21 @@ def run_full_scan(
                     "| automated actions blocked; manual reconciliation required"
                 )
 
+            record_pipeline_event(
+                symbol=symbol,
+                market=signal.market_trend,
+                raw_direction=signal.raw_direction,
+                decision=signal.policy_decision,
+                final_direction=signal.direction,
+                status=(
+                    "FILLED_PROTECTED"
+                    if position["entry_protected"]
+                    else "FILLED_PROTECTION_ATTENTION"
+                ),
+                quantity=confirmed_qty,
+                entry_price=confirmed_entry_price,
+            )
+
             logger.info(f"ENTRY {signal.direction} {exchange}:{symbol} qty={confirmed_qty} "
                         f"entry={confirmed_entry_price:.2f} stop={stop_price:.2f} "
                         f"target={target_price:.2f} | {signal.reason} "
@@ -1578,6 +1626,14 @@ def run_full_scan(
                 "choch": (signal.price_action_detail or {}).get("choch"),
             })
         else:
+            record_pipeline_event(
+                symbol=symbol,
+                market=signal.market_trend,
+                raw_direction=signal.raw_direction,
+                decision=signal.policy_decision,
+                final_direction=signal.direction,
+                status="ORDER_FAILED",
+            )
             status_this_cycle.append({"symbol": symbol, "status": "signal found, order failed"})
             log_signal({
                 "timestamp": str(signal.timestamp), "symbol": symbol,

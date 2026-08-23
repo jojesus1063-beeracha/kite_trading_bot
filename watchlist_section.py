@@ -276,6 +276,7 @@ WATCHLIST_SECTION = """
                 const resp = await fetch("/api/monitor-data");
                 if (resp.ok === false) throw new Error("HTTP " + resp.status);
                 const fresh = await resp.json();
+                window.dispatchEvent(new CustomEvent("monitorData", {detail: fresh}));
 
                 WATCHLIST_DATA.length = 0;
                 WATCHLIST_DATA.push.apply(WATCHLIST_DATA, fresh.watchlist_symbols || []);

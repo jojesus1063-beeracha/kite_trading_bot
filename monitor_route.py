@@ -1,4 +1,5 @@
 from watchlist_section import WATCHLIST_SECTION
+from pipeline_dashboard_section import PIPELINE_MONITOR_SECTION
 
 MONITOR_PAGE = """
 <!DOCTYPE html>
@@ -65,12 +66,14 @@ MONITOR_PAGE = """
         </div>
     </div>
 
+""" + PIPELINE_MONITOR_SECTION + """
+
     <div class="section">
         <h2>Live Positions</h2>
         {% if positions %}
         <table>
             <tr>
-                <th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th>
+                <th>Symbol</th><th>Raw</th><th>Market</th><th>Policy</th><th>Final</th><th>Qty</th><th>Entry</th><th>Current</th>
                 <th>Time in Trade</th><th>Gross P&L</th><th>Net P&L</th><th>Profit %</th>
                 <th>MFE %</th><th>MAE %</th><th>Hard Stop</th><th>Strategy Stop</th><th>Active Target</th>
                 <th>Dist. Stop %</th><th>Dist. Target %</th><th>Entry R:R</th><th>Live R:R</th><th>Status</th>
@@ -78,7 +81,10 @@ MONITOR_PAGE = """
             {% for p in positions %}
             <tr>
                 <td>{{ p.get('symbol') }}</td>
-                <td>{{ p.get('side') }}</td>
+                <td>{{ p.get('raw_direction') or '-' }}</td>
+                <td>{{ p.get('policy_market_trend') or '-' }}</td>
+                <td>{{ p.get('policy_decision') or '-' }}</td>
+                <td>{{ p.get('final_direction') or p.get('side') }}</td>
                 <td>{{ p.get('quantity') }}</td>
                 <td>{{ "%.2f"|format(p.get('entry_price', 0) or 0) }}</td>
                 <td>{{ "%.2f"|format(p.get('current_price', 0) or 0) if p.get('current_price') is not none else 'N/A' }}</td>

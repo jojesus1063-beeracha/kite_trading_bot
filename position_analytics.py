@@ -310,6 +310,11 @@ def build_position_analytics(symbol, position, quotes, previous_status_entry=Non
         "bid": bid, "ask": ask, **spread_info, "ltq": ltq,
         "price_updated_at": now, "quote_age_seconds": 0,
         "status": status,
+        "raw_direction": position.get("raw_direction"),
+        "final_direction": position.get("final_direction", direction),
+        "policy_decision": position.get("policy_decision"),
+        "policy_reason": position.get("policy_reason"),
+        "policy_market_trend": position.get("policy_market_trend"),
     }
 
 
@@ -472,9 +477,12 @@ def compute_health_check(cfg, kite, open_positions, symbols, start_time):
     """
     health = {
         "trading_mode": "PAPER" if getattr(cfg, "PAPER_TRADING", True) else "LIVE",
-        "market_alignment": "Enabled" if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) else "Disabled",
-        "adx_filter": "Enabled" if getattr(cfg, "USE_ADX_FILTER", False) else "Disabled",
-        "entry_scheduler": "5 Minute Candle" if getattr(cfg, "ENABLE_CANDLE_ALIGNED_POLLING", False) else "Continuous",
+        "market_alignment": "Observational" if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) else ("Enabled" if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) else "Disabled"),
+        "adx_filter": "Observational" if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) else ("Enabled" if getattr(cfg, "USE_ADX_FILTER", False) else "Disabled"),
+        "entry_scheduler": f"{getattr(cfg, 'ENTRY_TIMEFRAME', '3minute')} Candle" if getattr(cfg, "ENABLE_CANDLE_ALIGNED_POLLING", False) else "Continuous",
+        "pipeline": "MOMENTUM_RVOL_EMA_MARKET_POLICY" if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) else "LEGACY",
+        "raw_signal": "EMA9_EMA21_3MIN" if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) else "LEGACY",
+        "legacy_strategy_filters": "OBSERVATIONAL_ONLY" if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) else "CONFIGURED",
         "position_monitor_interval_seconds": getattr(cfg, "POSITION_CHECK_SECONDS", None),
         "watchlist_size": len(getattr(cfg, "WATCHLIST", [])),
         "symbols_loaded": len(symbols),
