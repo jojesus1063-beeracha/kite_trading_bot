@@ -4474,10 +4474,15 @@ def run():
                       "Refusing to start. Re-run auth.py and restart.")
         return
 
+    effective_position_check_seconds = float(cfg.POSITION_CHECK_SECONDS)
+    # Live hardening: cap position reconciliation/exit checks at 5s.
+    effective_position_check_seconds = min(effective_position_check_seconds, 5.0)
+
     if cfg.ENABLE_CANDLE_ALIGNED_POLLING:
         logger.info(f"Candle-aligned polling ENABLED | entry timeframe: {cfg.ENTRY_TIMEFRAME} | "
-                    f"position check every {cfg.POSITION_CHECK_SECONDS}s | "
+                    f"position check every {effective_position_check_seconds:g}s | "
                     f"scan buffer: {cfg.SCAN_BUFFER_SECONDS}s")
+
     scan_guard = ScanGuard()
 
     try:
@@ -4660,7 +4665,7 @@ def run():
                 except Exception as e:
                     logger.warning(f"Analytics snapshot failed this position-monitor cycle: {e}")
 
-                sleep_for = min(cfg.POSITION_CHECK_SECONDS,
+                sleep_for = min(effective_position_check_seconds,
                                  max(0, (target_scan_time - datetime.now()).total_seconds()))
                 if sleep_for > 0:
                     time.sleep(sleep_for)

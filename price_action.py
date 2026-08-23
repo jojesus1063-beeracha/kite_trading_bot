@@ -454,6 +454,9 @@ def get_price_action_score(df, direction, cfg):
             minimum_atr_multiplier=float(
                 getattr(cfg, "BREAKOUT_MIN_ATR_MULTIPLIER", 1.2)
             ),
+            maximum_atr_multiplier=float(
+                getattr(cfg, "BREAKOUT_MAX_ATR_MULTIPLIER", 3.0)
+            ),
             clv_threshold=float(getattr(cfg, "BREAKOUT_CLV_THRESHOLD", 0.60)),
         )
         breakout_confirmed = breakout_result.passed

@@ -25,8 +25,8 @@ def frame(current, *, prior_volume=100.0):
 class BreakoutValidatorTests(unittest.TestCase):
     def test_valid_high_volume_bullish_expansion(self):
         result = validate_breakout(frame({
-            "open": 100.0, "high": 104.0, "low": 99.0,
-            "close": 103.5, "volume": 180.0,
+            "open": 100.0, "high": 102.4, "low": 99.0,
+            "close": 102.1, "volume": 180.0,
         }), "BUY")
         self.assertTrue(result.passed, result.to_dict())
         self.assertGreaterEqual(result.metrics["volume_ratio"], 1.5)
@@ -35,11 +35,26 @@ class BreakoutValidatorTests(unittest.TestCase):
 
     def test_valid_high_volume_bearish_expansion(self):
         result = validate_breakout(frame({
-            "open": 99.0, "high": 101.0, "low": 96.0,
-            "close": 96.5, "volume": 180.0,
+            "open": 99.0, "high": 101.0, "low": 97.6,
+            "close": 97.9, "volume": 180.0,
         }), "SELL")
         self.assertTrue(result.passed, result.to_dict())
         self.assertLessEqual(result.metrics["clv"], -0.60)
+
+    def test_overextended_breakout_is_rejected(self):
+        result = validate_breakout(frame({
+            "open": 100.0, "high": 104.0, "low": 99.0,
+            "close": 103.5, "volume": 180.0,
+        }), "BUY")
+
+        self.assertFalse(result.passed)
+        self.assertIn("BREAKOUT_OVEREXTENDED_ATR", result.reasons)
+        self.assertFalse(result.metrics["not_overextended"])
+        self.assertGreater(
+            result.metrics["atr_multiplier"],
+            result.metrics["maximum_atr_multiplier"],
+        )
+
 
     def test_low_volume_fakeout_is_rejected_with_metrics(self):
         result = validate_breakout(frame({
@@ -109,11 +124,12 @@ class BreakoutValidatorTests(unittest.TestCase):
             BREAKOUT_MIN_VOLUME_RATIO=1.5,
             BREAKOUT_ATR_PERIOD=14,
             BREAKOUT_MIN_ATR_MULTIPLIER=1.2,
+            BREAKOUT_MAX_ATR_MULTIPLIER=3.0,
             BREAKOUT_CLV_THRESHOLD=0.60,
         )
         score, detail = get_price_action_score(frame({
-            "open": 100.0, "high": 104.0, "low": 99.0,
-            "close": 103.5, "volume": 180.0,
+            "open": 100.0, "high": 102.4, "low": 99.0,
+            "close": 102.1, "volume": 180.0,
         }), "BUY", cfg)
         telemetry = detail["breakout_validation"]
         self.assertEqual(score, 10)

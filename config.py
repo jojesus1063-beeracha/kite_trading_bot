@@ -135,6 +135,11 @@ BREAKOUT_VOLUME_PERIOD = 20
 BREAKOUT_MIN_VOLUME_RATIO = 1.5
 BREAKOUT_ATR_PERIOD = 14
 BREAKOUT_MIN_ATR_MULTIPLIER = 1.2
+
+# Reject breakout candles that are already excessively extended.
+# Helps prevent chasing exhaustion candles after an extreme impulse.
+BREAKOUT_MAX_ATR_MULTIPLIER = 3.0
+
 BREAKOUT_CLV_THRESHOLD = 0.60
 SUPPORT_RESISTANCE_LOOKBACK = 30
 MIN_DISTANCE_TO_SR_PERCENT = 0.5
@@ -266,6 +271,7 @@ if os.path.exists(_USER_CONFIG_PATH):
     BREAKOUT_MIN_VOLUME_RATIO = float(_overrides.get("breakout_min_volume_ratio", BREAKOUT_MIN_VOLUME_RATIO))
     BREAKOUT_ATR_PERIOD = int(_overrides.get("breakout_atr_period", BREAKOUT_ATR_PERIOD))
     BREAKOUT_MIN_ATR_MULTIPLIER = float(_overrides.get("breakout_min_atr_multiplier", BREAKOUT_MIN_ATR_MULTIPLIER))
+    BREAKOUT_MAX_ATR_MULTIPLIER = float(_overrides.get("breakout_max_atr_multiplier", BREAKOUT_MAX_ATR_MULTIPLIER))
     BREAKOUT_CLV_THRESHOLD = float(_overrides.get("breakout_clv_threshold", BREAKOUT_CLV_THRESHOLD))
     SUPPORT_RESISTANCE_LOOKBACK = _overrides.get("support_resistance_lookback", SUPPORT_RESISTANCE_LOOKBACK)
     MIN_DISTANCE_TO_SR_PERCENT = _overrides.get("min_distance_to_sr_percent", MIN_DISTANCE_TO_SR_PERCENT)
@@ -381,3 +387,5 @@ ENABLE_CONFIRMATION_QUALITY_FILTER = True
 MIN_CONFIRMATION_BODY_RATIO = 0.50
 ENABLE_VOLUME_ACCELERATION_FILTER = True
 MIN_CONFIRMATION_VOLUME_ACCELERATION = 1.10
+
+

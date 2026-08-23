@@ -12,6 +12,9 @@ import os
 import runpy
 
 import config as cfg
+import entry_quality
+import price_action
+from directional_breakout_validator import validate_breakout as validate_directional_breakout
 from paper_contrarian_launcher import (
     LIVE_ACK_ENV,
     LIVE_ACK_VALUE,
@@ -22,9 +25,10 @@ logger = logging.getLogger("combined_live_launcher")
 
 LIVE_RISK_PER_TRADE_PCT = 0.20
 LIVE_MAX_OPEN_POSITIONS = 1
-LIVE_MAX_TRADES_PER_DAY = 7
+LIVE_MAX_TRADES_PER_DAY = 5
+LIVE_MAX_EMA_DISTANCE_ATR = 2.00
 LIVE_MAX_DAILY_LOSS_PCT = 0.50
-LIVE_MAX_POSITION_SIZE_PCT = 20.0
+LIVE_MAX_POSITION_SIZE_PCT = 50.0
 
 
 def enforce_live_limits() -> dict:
@@ -48,11 +52,11 @@ def enforce_live_limits() -> dict:
     cfg.MAX_OPEN_POSITIONS = LIVE_MAX_OPEN_POSITIONS
     cfg.MAX_TRADES_PER_DAY = LIVE_MAX_TRADES_PER_DAY
     cfg.MAX_DAILY_LOSS_PCT = LIVE_MAX_DAILY_LOSS_PCT
-    cfg.MAX_POSITION_SIZE_PCT = min(
-        float(getattr(cfg, "MAX_POSITION_SIZE_PCT", LIVE_MAX_POSITION_SIZE_PCT)),
-        LIVE_MAX_POSITION_SIZE_PCT,
-    )
+    cfg.MAX_POSITION_SIZE_PCT = LIVE_MAX_POSITION_SIZE_PCT
     cfg.CHECK_MARGIN_BEFORE_ENTRY = True
+    entry_quality.MAX_EMA_DISTANCE_ATR = LIVE_MAX_EMA_DISTANCE_ATR
+    cfg.MAX_ENTRY_EXTENSION_ATR = 1.55
+    price_action.validate_breakout = validate_directional_breakout
     cfg.ENABLE_FIXED_TARGET = True
     cfg.ENABLE_TRAILING_STOP = False
     cfg.EXIT_IMMEDIATELY_AT_TARGET = True
@@ -61,6 +65,7 @@ def enforce_live_limits() -> dict:
         "risk_per_trade_pct": cfg.RISK_PER_TRADE_PCT,
         "max_open_positions": cfg.MAX_OPEN_POSITIONS,
         "max_trades_per_day": cfg.MAX_TRADES_PER_DAY,
+        "max_ema_distance_atr": entry_quality.MAX_EMA_DISTANCE_ATR,
         "max_daily_loss_pct": cfg.MAX_DAILY_LOSS_PCT,
         "max_position_size_pct": cfg.MAX_POSITION_SIZE_PCT,
         "check_margin_before_entry": cfg.CHECK_MARGIN_BEFORE_ENTRY,

@@ -1,5 +1,5 @@
 [Unit]
-Description=Build frozen full-universe top-60 LIVE watchlist and start guarded combined bot
+Description=Build frozen full-universe top-120 LIVE watchlist and start guarded combined bot
 Wants=network-online.target
 After=network-online.target
 Conflicts=kite-paper-watchlist.service

@@ -36,6 +36,7 @@ def validate_breakout(
     minimum_volume_ratio: float = 1.5,
     atr_period: int = 14,
     minimum_atr_multiplier: float = 1.2,
+    maximum_atr_multiplier: float = 3.0,
     clv_threshold: float = 0.60,
 ) -> BreakoutValidation:
     """Validate a directional breakout using structure, volume, ATR and CLV.
@@ -52,6 +53,7 @@ def validate_breakout(
         "minimum_volume_ratio": minimum_volume_ratio,
         "atr_period": atr_period,
         "minimum_atr_multiplier": minimum_atr_multiplier,
+        "maximum_atr_multiplier": maximum_atr_multiplier,
         "clv_threshold": clv_threshold,
         "n_period_high": None,
         "n_period_low": None,
@@ -66,6 +68,7 @@ def validate_breakout(
         "structure_confirmed": False,
         "volume_confirmed": False,
         "volatility_confirmed": False,
+        "not_overextended": False,
         "clv_confirmed": False,
     }
     reasons: list[str] = []
@@ -153,6 +156,10 @@ def validate_breakout(
         atr_multiplier is not None
         and atr_multiplier >= minimum_atr_multiplier
     )
+    not_overextended = bool(
+        atr_multiplier is not None
+        and atr_multiplier <= maximum_atr_multiplier
+    )
     clv_confirmed = bool(
         clv is not None
         and (
@@ -175,6 +182,7 @@ def validate_breakout(
         "structure_confirmed": structure_confirmed,
         "volume_confirmed": volume_confirmed,
         "volatility_confirmed": volatility_confirmed,
+        "not_overextended": not_overextended,
         "clv_confirmed": clv_confirmed,
     })
 
@@ -184,6 +192,8 @@ def validate_breakout(
         reasons.append("VOLUME_RATIO_BELOW_MINIMUM")
     if not volatility_confirmed:
         reasons.append("ATR_EXPANSION_BELOW_MINIMUM")
+    if not not_overextended:
+        reasons.append("BREAKOUT_OVEREXTENDED_ATR")
     if not clv_confirmed:
         reasons.append("CLV_DIRECTION_NOT_CONFIRMED")
 

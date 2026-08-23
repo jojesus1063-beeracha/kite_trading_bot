@@ -79,11 +79,11 @@ class CombinedLiveLauncherTests(unittest.TestCase):
             clear=True,
         ):
             limits = module.enforce_live_limits()
-        self.assertEqual(limits["risk_per_trade_pct"], 0.20)
+        self.assertEqual(limits["risk_per_trade_pct"], 2.0)
         self.assertEqual(limits["max_open_positions"], 1)
         self.assertEqual(limits["max_trades_per_day"], 7)
         self.assertEqual(limits["max_daily_loss_pct"], 0.50)
-        self.assertEqual(limits["max_position_size_pct"], 20.0)
+        self.assertEqual(limits["max_position_size_pct"], 100.0)
         self.assertTrue(config.CHECK_MARGIN_BEFORE_ENTRY)
         self.assertTrue(config.ENABLE_FIXED_TARGET)
         self.assertFalse(config.ENABLE_TRAILING_STOP)
@@ -111,7 +111,7 @@ class LivePreflightTests(unittest.TestCase):
                 "exchange": "NSE",
                 "ordinary_equity_clean": True,
             }
-            for i in range(60)
+            for i in range(preflight.EXPECTED_WATCHLIST_SIZE)
         ]
         report = {
             "status": "success",
@@ -130,9 +130,12 @@ class LivePreflightTests(unittest.TestCase):
         }
         return report, payload
 
-    def test_selector_handoff_requires_exactly_60(self):
+    def test_selector_handoff_requires_exactly_120(self):
         report, payload = self.artifacts()
-        self.assertEqual(len(preflight.validate_selector_artifacts(report, payload)), 60)
+        self.assertEqual(
+            len(preflight.validate_selector_artifacts(report, payload)),
+            preflight.EXPECTED_WATCHLIST_SIZE,
+        )
         payload["watchlist"].pop()
         with self.assertRaises(RuntimeError):
             preflight.validate_selector_artifacts(report, payload)
@@ -150,7 +153,9 @@ class LivePreflightTests(unittest.TestCase):
             backup = preflight.atomic_apply_watchlist(config, watchlist, root / "backups")
             updated = json.loads(config.read_text(encoding="utf-8"))
             self.assertFalse(updated["paper_trading"])
-            self.assertEqual(len(updated["watchlist"]), 60)
+            self.assertEqual(
+                len(updated["watchlist"]), preflight.EXPECTED_WATCHLIST_SIZE
+            )
             self.assertTrue(backup.exists())
 
     def test_broker_flat_check_rejects_mis_exposure(self):

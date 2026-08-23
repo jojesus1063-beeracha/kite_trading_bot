@@ -374,6 +374,7 @@ def main() -> int:
         )
 
     generated_at = datetime.now(IST).isoformat(timespec="seconds")
+    strategy_name = f"FULL_ZERODHA_CLEAN_TOP{args.top}_MOMENTUM"
     selected_exchange_counts = Counter(c["exchange"] for c in selected)
     open_extreme_counts = Counter(c.get("open_extreme_reason", "NONE") for c in selected)
 
@@ -389,7 +390,7 @@ def main() -> int:
     report = {
         "status": "success",
         "paper_only": True,
-        "strategy": STRATEGY_NAME,
+        "strategy": strategy_name,
         "mode": "WRITE_CONFIG" if args.write else "READ_ONLY",
         "generated_at": generated_at,
         "universe_source": "KITE_CLEAN_ORDINARY_NSE_BSE_EQUITIES",
@@ -433,7 +434,7 @@ def main() -> int:
     payload = {
         "status": "success",
         "paper_only": True,
-        "strategy": STRATEGY_NAME,
+        "strategy": strategy_name,
         "generated_at": generated_at,
         "watchlist": [
             {"symbol": c["symbol"], "exchange": c["exchange"]}
@@ -444,7 +445,7 @@ def main() -> int:
     atomic_write_json(args.report, report)
     atomic_write_json(args.output, payload)
 
-    print("\n===== CLEAN FULL-ZERODHA PAPER TOP-60 =====")
+    print(f"\n===== CLEAN FULL-ZERODHA PAPER TOP-{args.top} =====")
     print("Status: success")
     print("Mode:", report["mode"])
     print("Quote batch size:", SELECTOR_QUOTE_BATCH_SIZE)

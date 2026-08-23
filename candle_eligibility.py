@@ -241,6 +241,7 @@ def evaluate_candle_eligibility(
     now: Any = None,
     talib_module: Any = None,
     price_action_score: float | None = None,
+    price_action_detail: dict[str, Any] | None = None,
     breakout_validation: dict[str, Any] | None = None,
 ) -> CandleEligibility:
     """Return whether the latest fully completed entry candle is actionable."""
@@ -403,22 +404,66 @@ def evaluate_candle_eligibility(
     elif require_breakout and not breakout_passed:
         reasons.append("BREAKOUT_VALIDATION_FAILED")
 
+    price_action_detail = (
+        price_action_detail
+        if isinstance(price_action_detail, dict)
+        else {}
+    )
+
+    pullback_confirmed = bool(
+        price_action_detail.get("pullback")
+    )
+    rejection_confirmed = bool(
+        price_action_detail.get("rejection_candle")
+    )
+    independent_price_action = bool(
+        pullback_confirmed or rejection_confirmed
+    )
+    independent_confirmation = bool(
+        pattern_confirmed or independent_price_action
+    )
+
     confirmations = {
         "tier1_pattern": pattern_confirmed,
         "volume_above_prior_sma": volume_confirmed,
         "positive_price_action": price_action_confirmed,
+        "pullback": pullback_confirmed,
+        "rejection_candle": rejection_confirmed,
+        "independent_confirmation": independent_confirmation,
     }
-    confirmation_count = sum(bool(value) for value in confirmations.values())
+    confirmation_count = sum(bool(value) for value in (
+        pattern_confirmed,
+        volume_confirmed,
+        price_action_confirmed,
+    ))
     required_confirmations = int(
         getattr(cfg_obj, "PAPER_CANDLE_REQUIRED_CONFIRMATIONS", 2)
     )
+    require_independent = bool(
+        getattr(
+            cfg_obj,
+            "PAPER_REQUIRE_INDEPENDENT_CONFIRMATION",
+            False,
+        )
+    )
+
     detail.update({
         "price_action_score": price_action_value,
         "confirmations": confirmations,
         "confirmation_count": confirmation_count,
         "required_confirmations": required_confirmations,
+        "independent_confirmation_required":
+            require_independent,
+        "independent_confirmation_passed":
+            independent_confirmation,
     })
+
     if confirmation_count < required_confirmations:
         reasons.append("INSUFFICIENT_ENTRY_CONFIRMATIONS")
+
+    if require_independent and not independent_confirmation:
+        reasons.append(
+            "INDEPENDENT_ENTRY_CONFIRMATION_REQUIRED"
+        )
 
     return CandleEligibility(not reasons, reasons, detail)

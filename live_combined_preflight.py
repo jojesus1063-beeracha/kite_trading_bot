@@ -15,7 +15,8 @@ LIVE_ACK_ENV = "KITE_LIVE_COMBINED_ACK"
 LIVE_ACK_VALUE = "I_ACCEPT_REAL_ORDERS"
 
 IST = ZoneInfo("Asia/Kolkata")
-STRATEGY_NAME = "FULL_ZERODHA_CLEAN_TOP60_MOMENTUM"
+STRATEGY_NAME = "FULL_ZERODHA_CLEAN_TOP120_MOMENTUM"
+EXPECTED_WATCHLIST_SIZE = 120
 TERMINAL_ORDER_STATUSES = {"COMPLETE", "CANCELLED", "REJECTED"}
 
 
@@ -54,9 +55,13 @@ def validate_selector_artifacts(report: dict, payload: dict) -> list[dict]:
 
     selected = report.get("selected") or []
     watchlist = payload.get("watchlist") or []
-    if len(selected) != 60 or len(watchlist) != 60:
+    if (
+        len(selected) != EXPECTED_WATCHLIST_SIZE
+        or len(watchlist) != EXPECTED_WATCHLIST_SIZE
+    ):
         raise RuntimeError(
-            f"Expected exactly 60 symbols; selected={len(selected)} output={len(watchlist)}"
+            f"Expected exactly {EXPECTED_WATCHLIST_SIZE} symbols; "
+            f"selected={len(selected)} output={len(watchlist)}"
         )
     if payload.get("status") != "success" or payload.get("strategy") != STRATEGY_NAME:
         raise RuntimeError("Selector payload contract mismatch")
@@ -141,7 +146,7 @@ def atomic_apply_watchlist(config_path: Path, watchlist: list[dict], backup_dir:
     validate_live_config(data)
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(IST).strftime("%Y%m%d-%H%M%S")
-    backup = backup_dir / f"user_config-before-live-top60-{stamp}.json"
+    backup = backup_dir / f"user_config-before-live-top120-{stamp}.json"
     shutil.copy2(config_path, backup)
 
     updated = dict(data)

@@ -35,16 +35,16 @@ print("PASS: LIVE mode confirmed")
 PY
 
 # Timer fires at 09:26:50. Begin the first quote request at approximately
-# 09:27:10, matching the validated frozen top-60 selection boundary.
+# 09:27:10, matching the validated frozen top-120 selection boundary.
 echo "Waiting 20 seconds for the 09:27:10 selector boundary..."
 sleep 20
 
-echo "Read-only full-universe LIVE top-60 selection started:"
+echo "Read-only full-universe LIVE top-120 selection started:"
 TZ=Asia/Kolkata date
 
 "$PYTHON" paper_full_universe_top60_selector.py \
-  --top 60 \
-  --min-selected 60 \
+  --top 120 \
+  --min-selected 120 \
   --max-price 2200 \
   --min-turnover 1000000 \
   --max-spread-pct 0.25 \
@@ -61,5 +61,5 @@ TZ=Asia/Kolkata date
   --check-broker-flat \
   --apply-watchlist
 
-echo "Combined LIVE top-60 handoff completed:"
+echo "Combined LIVE top-120 handoff completed:"
 TZ=Asia/Kolkata date

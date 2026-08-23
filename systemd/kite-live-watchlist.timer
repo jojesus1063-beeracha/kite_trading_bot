@@ -1,5 +1,5 @@
 [Unit]
-Description=Build frozen full-universe LIVE top-60 each weekday at the 09:27 snapshot
+Description=Build frozen full-universe LIVE top-120 each weekday at the 09:27 snapshot
 
 [Timer]
 OnCalendar=Mon..Fri *-*-* 09:26:50 Asia/Kolkata

@@ -6,6 +6,7 @@ RSI is observational, and a fail-closed TA-Lib/confluence gate must approve the
 latest completed entry candle.  The core technical gates remain enforced.
 """
 from __future__ import annotations
+from breakout_diagnostics import enrich_breakout_diagnostics
 
 import json
 import logging
@@ -18,6 +19,7 @@ import pandas as pd
 
 import config as cfg
 import strategy
+import entry_timing
 from candle_eligibility import evaluate_candle_eligibility
 from price_action import evaluate_price_action
 from triple_pattern_policy import (
@@ -359,6 +361,11 @@ def install_two_indicator_patch(*, live_combined=False):
     cfg.PAPER_SELL_MIN_ADX = float(getattr(cfg, "PAPER_SELL_MIN_ADX", 20.0))
     cfg.PAPER_CANDLE_MIN_VOLUME_RATIO = 1.2
     cfg.PAPER_CANDLE_REQUIRED_CONFIRMATIONS = 2
+    # Live clean-candle entries require evidence independent
+    # of the breakout candle itself.
+    cfg.PAPER_REQUIRE_INDEPENDENT_CONFIRMATION = bool(
+        live_combined
+    )
     cfg.PAPER_REQUIRE_VALIDATED_BREAKOUT = True
     cfg.PAPER_REQUIRE_EMA200_ALIGNMENT = False
     cfg.PAPER_MAX_TRADES_PER_SYMBOL = int(
@@ -370,7 +377,7 @@ def install_two_indicator_patch(*, live_combined=False):
     cfg.PAPER_ENABLE_COST_AWARE_GATE = True
     cfg.PAPER_COST_MOVE_LOOKBACK = 14
     cfg.PAPER_EXPECTED_MOVE_ATR_MULTIPLIER = 1.0
-    cfg.PAPER_MIN_EXPECTED_GROSS_TO_COST_MULTIPLE = 2.0
+    cfg.PAPER_MIN_EXPECTED_GROSS_TO_COST_MULTIPLE = 1.7
     cfg.PAPER_CANDLE_MAX_FRESH_SECONDS = float(getattr(cfg, "PAPER_CANDLE_MAX_FRESH_SECONDS", 90.0))
     cfg.PAPER_CANDLE_COMPLETION_GRACE_SECONDS = float(getattr(cfg, "PAPER_CANDLE_COMPLETION_GRACE_SECONDS", 5.0))
     cfg.ENABLE_RVOL_FILTER = False
@@ -427,6 +434,7 @@ def install_two_indicator_patch(*, live_combined=False):
         }
         if df_5m is None or df_5m.empty:
             event.update({"decision": "REJECT", "stage": "ENTRY_DATA", "reasons": ["NO_ENTRY_CANDLES"]})
+            event = enrich_breakout_diagnostics(event)
             _append(event)
             return None
 
@@ -440,6 +448,7 @@ def install_two_indicator_patch(*, live_combined=False):
                 "no_entry_before": getattr(cfg_obj, "NO_ENTRY_BEFORE", None),
                 "no_entry_after": getattr(cfg_obj, "NO_ENTRY_AFTER", None),
             })
+            event = enrich_breakout_diagnostics(event)
             _append(event)
             return None
 
@@ -461,6 +470,7 @@ def install_two_indicator_patch(*, live_combined=False):
                     "stage": "TRIPLE_PATTERN_SYMBOL_GUARD",
                     "reasons": [guard_detail.get("reason", "PAPER_SYMBOL_RISK_GUARD")],
                 })
+                event = enrich_breakout_diagnostics(event)
                 _append(event)
                 return None
 
@@ -471,6 +481,7 @@ def install_two_indicator_patch(*, live_combined=False):
                     "stage": "TRIPLE_PATTERN_ENTRY_PRICE",
                     "reasons": ["INVALID_ENTRY_PRICE"],
                 })
+                event = enrich_breakout_diagnostics(event)
                 _append(event)
                 return None
 
@@ -493,6 +504,7 @@ def install_two_indicator_patch(*, live_combined=False):
                 "target": target,
                 "trade_policy": trade_policy,
             })
+            event = enrich_breakout_diagnostics(event)
             _append(event)
             logger.info(
                 "%s TRIPLE PATTERN SIGNAL | %s | pattern=%s direction=%s "
@@ -536,6 +548,7 @@ def install_two_indicator_patch(*, live_combined=False):
                 "stage": "COMPLETED_15M_CONTEXT",
                 "reasons": ["NO_COMPLETED_15M_CANDLE"],
             })
+            event = enrich_breakout_diagnostics(event)
             _append(event)
             return None
 
@@ -557,6 +570,7 @@ def install_two_indicator_patch(*, live_combined=False):
                 "reasons": ["ADX_BELOW_MINIMUM_OR_UNAVAILABLE"],
                 "adx_minimum": getattr(cfg, "PAPER_ADX_MIN_STRENGTH", 20.0),
             })
+            event = enrich_breakout_diagnostics(event)
             _append(event)
             logger.info(
                 "PAPER ENTRY BLOCK | %s | ADX=%s below/unavailable minimum %.0f",
@@ -578,6 +592,7 @@ def install_two_indicator_patch(*, live_combined=False):
                 "stage": "SYMBOL_RISK_GUARD",
                 "reasons": [guard_detail.get("reason", "PAPER_SYMBOL_RISK_GUARD")],
             })
+            event = enrich_breakout_diagnostics(event)
             _append(event)
             logger.info(
                 "PAPER ENTRY BLOCK | %s | %s",
@@ -601,7 +616,56 @@ def install_two_indicator_patch(*, live_combined=False):
         })
         if base is None:
             event.update({"decision": "REJECT", "stage": "EMA_DIRECTION", "reasons": ["EMA9_EMA21_UNAVAILABLE_OR_EQUAL"]})
+            event = enrich_breakout_diagnostics(event)
             _append(event)
+            return None
+
+        previous_entry_candle = (
+            df_5m.iloc[-2]
+            if len(df_5m) >= 2
+            else None
+        )
+        timing_class, timing_detail = (
+            entry_timing.evaluate_entry_timing(
+                symbol,
+                final,
+                df_5m,
+                cur,
+                previous_entry_candle,
+                cfg_obj,
+            )
+        )
+        event["entry_timing"] = {
+            "classification": timing_class,
+            "detail": timing_detail,
+        }
+        logger.info(
+            "ENTRY TIMING | %s | direction=%s | "
+            "classification=%s | detail=%s",
+            symbol,
+            final,
+            timing_class,
+            timing_detail,
+        )
+        if timing_class == entry_timing.INVALID:
+            event.update({
+                "decision": "REJECT",
+                "stage": "ENTRY_TIMING",
+                "reasons": (
+                    timing_detail.get("blocking_reasons")
+                    or ["ENTRY_TIMING_INVALID"]
+                ),
+            })
+            event = enrich_breakout_diagnostics(event)
+            _append(event)
+            logger.info(
+                "%s ENTRY TIMING BLOCK | %s | "
+                "direction=%s | reasons=%s",
+                mode_label,
+                symbol,
+                final,
+                event["reasons"],
+            )
             return None
 
         price_action_score, price_action_detail = evaluate_price_action(
@@ -621,6 +685,7 @@ def install_two_indicator_patch(*, live_combined=False):
             final,
             cfg_obj,
             price_action_score=price_action_score,
+            price_action_detail=price_action_detail,
             breakout_validation=price_action_detail.get("breakout_validation"),
         )
         event["candle_eligibility"] = candle_result.to_dict()
@@ -630,6 +695,7 @@ def install_two_indicator_patch(*, live_combined=False):
                 "stage": "CANDLE_ELIGIBILITY",
                 "reasons": candle_result.reasons,
             })
+            event = enrich_breakout_diagnostics(event)
             _append(event)
             logger.info(
                 "PAPER CANDLE BLOCK | %s | direction=%s | reasons=%s",
@@ -640,6 +706,7 @@ def install_two_indicator_patch(*, live_combined=False):
         entry = float(cur["close"]) if not pd.isna(cur.get("close")) else 0.0
         if entry <= 0:
             event.update({"decision": "REJECT", "stage": "ENTRY_PRICE", "reasons": ["INVALID_ENTRY_PRICE"]})
+            event = enrich_breakout_diagnostics(event)
             _append(event)
             return None
 
@@ -665,9 +732,11 @@ def install_two_indicator_patch(*, live_combined=False):
                 "ADX_STRENGTH_PASS",
                 "RSI_OBSERVATIONAL",
                 "TWO_OF_THREE_CONFIRMATIONS_PASS",
+                "INDEPENDENT_CONFIRMATION_PASS",
             ],
             "legacy_filters": "ENFORCED",
         })
+        event = enrich_breakout_diagnostics(event)
         _append(event)
         logger.info(
             "%s CLEAN SIGNAL | %s | ADX=%s | EMA9=%s EMA21=%s direction=%s RSI(obs)=%s",
@@ -695,7 +764,7 @@ def install_two_indicator_patch(*, live_combined=False):
     logger.warning(
         "%s CLEAN ENTRY ACTIVE: normal EMA direction; ADX strength only (minimum %.0f); "
         "RSI/EMA200 observational; validated breakout HARD GATE; "
-        "2-of-3 secondary confirmation; cost-aware movement gate",
+        "2-of-3 secondary confirmation; independent pattern/pullback/rejection gate; cost-aware movement gate",
         mode_label,
         ADX_MIN_STRENGTH,
     )
