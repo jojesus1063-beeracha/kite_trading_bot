@@ -28,6 +28,8 @@ LIVE_MAX_OPEN_POSITIONS = 1
 LIVE_MAX_TRADES_PER_DAY = 10
 LIVE_MAX_EMA_DISTANCE_ATR = 2.00
 LIVE_MAX_DAILY_LOSS_PCT = 0.50
+LIVE_DAILY_LOSS_KILL_SWITCH_ENABLED = False
+LIVE_MAX_CONSECUTIVE_LOSSES = 3
 LIVE_MAX_POSITION_SIZE_PCT = 50.0
 
 
@@ -52,6 +54,8 @@ def enforce_live_limits() -> dict:
     cfg.MAX_OPEN_POSITIONS = LIVE_MAX_OPEN_POSITIONS
     cfg.MAX_TRADES_PER_DAY = LIVE_MAX_TRADES_PER_DAY
     cfg.MAX_DAILY_LOSS_PCT = LIVE_MAX_DAILY_LOSS_PCT
+    cfg.DAILY_LOSS_KILL_SWITCH_ENABLED = LIVE_DAILY_LOSS_KILL_SWITCH_ENABLED
+    cfg.MAX_CONSECUTIVE_LOSSES = LIVE_MAX_CONSECUTIVE_LOSSES
     cfg.MAX_POSITION_SIZE_PCT = LIVE_MAX_POSITION_SIZE_PCT
     cfg.PROPOSED_CLEAN_PIPELINE = True
     cfg.ENTRY_SCAN_SHORTLIST_SIZE = 120
@@ -69,6 +73,8 @@ def enforce_live_limits() -> dict:
         "max_trades_per_day": cfg.MAX_TRADES_PER_DAY,
         "max_ema_distance_atr": entry_quality.MAX_EMA_DISTANCE_ATR,
         "max_daily_loss_pct": cfg.MAX_DAILY_LOSS_PCT,
+        "daily_loss_kill_switch_enabled": cfg.DAILY_LOSS_KILL_SWITCH_ENABLED,
+        "max_consecutive_losses": cfg.MAX_CONSECUTIVE_LOSSES,
         "max_position_size_pct": cfg.MAX_POSITION_SIZE_PCT,
         "check_margin_before_entry": cfg.CHECK_MARGIN_BEFORE_ENTRY,
     }

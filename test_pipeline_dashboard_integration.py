@@ -54,6 +54,8 @@ class PipelineDashboardIntegrationTests(unittest.TestCase):
             self.assertEqual(result["recent_decisions"][0]["final_direction"], "BUY")
             self.assertEqual(result["services"]["watchlist_timer"], "active")
             self.assertEqual(result["limits"]["force_square_off"], "15:08 IST")
+            self.assertFalse(result["limits"]["daily_loss_kill_switch_enabled"])
+            self.assertEqual(result["limits"]["max_consecutive_losses"], 3)
 
     def test_telemetry_write_failure_never_reaches_trading(self):
         with patch.object(dashboard.os, "open", side_effect=OSError("disk unavailable")):

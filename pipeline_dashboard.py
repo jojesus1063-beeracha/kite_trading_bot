@@ -146,6 +146,8 @@ def load_pipeline_dashboard() -> dict:
             "max_trades_per_day": 10,
             "max_open_positions": 1,
             "max_daily_loss_pct": 0.5,
+            "daily_loss_kill_switch_enabled": False,
+            "max_consecutive_losses": 3,
             "max_position_size_pct": 50.0,
             "force_square_off": "15:08 IST",
         },

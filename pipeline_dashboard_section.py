@@ -3,7 +3,7 @@ PIPELINE_MONITOR_SECTION = r"""
         'services': {'live_bot':'unknown','watchlist_timer':'unknown'},
         'selector': {'status':'awaiting','fresh_today':false,'selected_count':0,'top':[]},
         'strategy': {'market_policy':'Bearish→BUY; Bullish→raw; Sideways→SELL; Unknown→skip'},
-        'limits': {'risk_per_trade_pct':2.0,'max_trades_per_day':10,'max_open_positions':1,'max_daily_loss_pct':0.5,'force_square_off':'15:08 IST'},
+        'limits': {'risk_per_trade_pct':2.0,'max_trades_per_day':10,'max_open_positions':1,'max_consecutive_losses':3,'force_square_off':'15:08 IST'},
         'recent_decisions': []
     }, true) %}
     <div class="section" id="pipeline-dashboard">
@@ -17,7 +17,7 @@ PIPELINE_MONITOR_SECTION = r"""
             <div class="metric"><div class="label">Legacy Filters</div><div class="value green" style="font-size:13px;">Observational</div></div>
             <div class="metric"><div class="label">Risk / Trade</div><div class="value">{{ pipeline.limits.risk_per_trade_pct }}%</div></div>
             <div class="metric"><div class="label">Trades / Open</div><div class="value">{{ pipeline.limits.max_trades_per_day }} / {{ pipeline.limits.max_open_positions }}</div></div>
-            <div class="metric"><div class="label">Daily Loss Stop</div><div class="value red">{{ pipeline.limits.max_daily_loss_pct }}%</div></div>
+            <div class="metric"><div class="label">Loss-Streak Stop</div><div class="value red">{{ pipeline.limits.max_consecutive_losses }} consecutive</div></div>
             <div class="metric"><div class="label">Square-off</div><div class="value">{{ pipeline.limits.force_square_off }}</div></div>
         </div>
         <div class="subtitle" style="margin:12px 0;">{{ pipeline.strategy.market_policy }}</div>
@@ -69,7 +69,7 @@ PIPELINE_MONITOR_SECTION = r"""
                 '<div class="metric"><div class="label">Legacy Filters</div><div class="value green" style="font-size:13px;">Observational</div></div>' +
                 '<div class="metric"><div class="label">Risk / Trade</div><div class="value">' + (limits.risk_per_trade_pct ?? 2) + '%</div></div>' +
                 '<div class="metric"><div class="label">Trades / Open</div><div class="value">' + (limits.max_trades_per_day ?? 10) + ' / ' + (limits.max_open_positions ?? 1) + '</div></div>' +
-                '<div class="metric"><div class="label">Daily Loss Stop</div><div class="value red">' + (limits.max_daily_loss_pct ?? 0.5) + '%</div></div>' +
+                '<div class="metric"><div class="label">Loss-Streak Stop</div><div class="value red">' + (limits.max_consecutive_losses ?? 3) + ' consecutive</div></div>' +
                 '<div class="metric"><div class="label">Square-off</div><div class="value">' + (limits.force_square_off || '15:08 IST') + '</div></div>';
         }
         const decisions = document.getElementById("pipeline-decisions");

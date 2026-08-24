@@ -19,6 +19,7 @@ def _save_day_state(day: "DayState"):
         "date": date.today().isoformat(),
         "trades_taken": day.trades_taken,
         "realized_pnl": day.realized_pnl,
+        "consecutive_losses": day.consecutive_losses,
         "halted": day.halted,
         "halt_reason": day.halt_reason,
     }
@@ -39,6 +40,7 @@ def _load_day_state() -> "DayState":
     return DayState(
         trades_taken=data.get("trades_taken", 0),
         realized_pnl=data.get("realized_pnl", 0.0),
+        consecutive_losses=data.get("consecutive_losses", 0),
         halted=data.get("halted", False),
         halt_reason=data.get("halt_reason", ""),
     )
@@ -48,6 +50,7 @@ def _load_day_state() -> "DayState":
 class DayState:
     trades_taken: int = 0
     realized_pnl: float = 0.0
+    consecutive_losses: int = 0
     halted: bool = False
     halt_reason: str = ""
 
@@ -127,7 +130,10 @@ class RiskManager:
         max_open = getattr(self.cfg, "MAX_OPEN_POSITIONS", None)
         if max_open is not None and current_open_count >= max_open:
             return False  # simultaneous-position cap -- just skip this cycle, not a halt
-        if self.day.realized_pnl <= -self.max_loss_amount():
+        if (
+            bool(getattr(self.cfg, "DAILY_LOSS_KILL_SWITCH_ENABLED", True))
+            and self.day.realized_pnl <= -self.max_loss_amount()
+        ):
             self._halt(f"Daily loss limit ({self.cfg.MAX_DAILY_LOSS_PCT}% of capital) hit")
             return False
         return True
@@ -135,7 +141,17 @@ class RiskManager:
     def record_trade_result(self, pnl: float):
         self.day.trades_taken += 1
         self.day.realized_pnl += pnl
-        if self.day.realized_pnl <= -self.max_loss_amount():
+        if pnl < 0:
+            self.day.consecutive_losses += 1
+        else:
+            self.day.consecutive_losses = 0
+        consecutive_limit = int(getattr(self.cfg, "MAX_CONSECUTIVE_LOSSES", 0) or 0)
+        if consecutive_limit > 0 and self.day.consecutive_losses >= consecutive_limit:
+            self._halt(f"Max consecutive losses ({consecutive_limit}) reached")
+        elif (
+            bool(getattr(self.cfg, "DAILY_LOSS_KILL_SWITCH_ENABLED", True))
+            and self.day.realized_pnl <= -self.max_loss_amount()
+        ):
             self._halt(f"Daily loss limit ({self.cfg.MAX_DAILY_LOSS_PCT}% of capital) hit")
         if self.persist:
             _save_day_state(self.day)
