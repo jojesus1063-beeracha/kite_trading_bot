@@ -132,9 +132,9 @@ EXIT_PRIORITY_ORDER = [
 # ---------------------------------------------------------------------
 # Position sizing / capital (spec #10)
 # ---------------------------------------------------------------------
-FNO_CAPITAL = float(os.environ.get("FNO_TRADING_CAPITAL", "50000"))  # this strategy's OWN capital allocation,
+FNO_CAPITAL = float(os.environ.get("FNO_TRADING_CAPITAL", "5000"))  # this strategy's OWN capital allocation,
                                                                         # distinct from the equity bot's TRADING_CAPITAL
-MAX_CAPITAL_PER_TRADE_PCT = 20.0   # no single trade's premium outlay exceeds this % of FNO_CAPITAL
+MAX_CAPITAL_PER_TRADE_PCT = 100.0   # no single trade's premium outlay exceeds this % of FNO_CAPITAL
 MAX_RISK_PER_TRADE_PCT = 5.0       # max % of FNO_CAPITAL this trade's stop-loss is allowed to risk
 MAX_DAILY_LOSS = 5000.0            # absolute rupee kill-switch for the day
 MAX_TRADES_PER_DAY = 3
@@ -168,7 +168,7 @@ MAX_ORDER_RETRIES = 3
 # and is logged every session, purely for comparison. None is assumed
 # correct -- see strategies/signal_candidates.py.
 # ---------------------------------------------------------------------
-AUTHORIZED_SIGNAL = None   # None = no signal is authorized to trade yet; SHADOW-only until explicitly set
+AUTHORIZED_SIGNAL = "premium_imbalance"   # None = no signal is authorized to trade yet; SHADOW-only until explicitly set
 SHADOW_SIGNAL_CANDIDATES = [
     "premium_imbalance",
     "premium_rate_of_change",
