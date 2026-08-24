@@ -36,15 +36,17 @@ WATCHLIST = [
 # ---------------------------------------------------------------------
 # Strategy timeframes
 # ---------------------------------------------------------------------
-TREND_TIMEFRAME = "15minute"   # Kite historical API interval string
-ENTRY_TIMEFRAME = "5minute"
+TREND_TIMEFRAME = "3minute"   # frozen proposed architecture
+ENTRY_TIMEFRAME = "3minute"
 
 # ---------------------------------------------------------------------
 # Indicator settings
 # ---------------------------------------------------------------------
-TREND_EMA_FAST = 20     # on 15-min chart
-TREND_EMA_SLOW = 50     # on 15-min chart
-ENTRY_EMA = 20          # on 5-min chart
+TREND_EMA_FAST = 9
+TREND_EMA_SLOW = 21
+ENTRY_EMA = 9
+OBSERVATIONAL_EMA = 3
+ENABLE_PROPOSED_DIRECTION_POLICY = True
 VOLUME_LOOKBACK = 20    # bars, for average-volume comparison on 5-min chart
 VOLUME_MULTIPLIER = 1.2  # entry candle volume must exceed avg volume * this
 
@@ -264,3 +266,16 @@ if os.path.exists(_USER_CONFIG_PATH):
     POSITION_CHECK_CRITICAL_SECONDS = _overrides.get("position_check_critical_seconds", POSITION_CHECK_CRITICAL_SECONDS)
     SCAN_DELAY_WARNING_SECONDS = _overrides.get("scan_delay_warning_seconds", SCAN_DELAY_WARNING_SECONDS)
     SCAN_DELAY_CRITICAL_SECONDS = _overrides.get("scan_delay_critical_seconds", SCAN_DELAY_CRITICAL_SECONDS)
+
+# The proposed architecture is frozen for forward testing. Dashboard values
+# from an older deployment must not silently restore legacy timeframes/EMAs.
+if ENABLE_PROPOSED_DIRECTION_POLICY:
+    TREND_TIMEFRAME = "3minute"
+    ENTRY_TIMEFRAME = "3minute"
+    TREND_EMA_FAST = 9
+    TREND_EMA_SLOW = 21
+    ENTRY_EMA = 9
+    # Legacy strategy gates remain available as calculated audit features,
+    # but cannot silently block raw signals in proposed-policy mode.
+    USE_ADX_FILTER = False
+    ADX_MODE = "off"
