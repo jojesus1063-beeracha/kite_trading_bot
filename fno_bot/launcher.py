@@ -218,9 +218,9 @@ def wait_for_market_open(ctx, clock_fn=None, sleep_fn=None, poll_seconds: float 
     """
     clock_fn = clock_fn or (lambda: datetime.now(IST))
     sleep_fn = sleep_fn or time.sleep
-    market_open_at = _today_at(cfg.ENTRY_START_TIME)
-
     now = clock_fn()
+    h, m, s = (int(x) for x in cfg.ENTRY_START_TIME.split(":"))
+    market_open_at = now.replace(hour=h, minute=m, second=s, microsecond=0)
     if now < market_open_at:
         logger.info(f"Waiting for market open at {market_open_at.isoformat()} (now {now.isoformat()})...")
     while clock_fn() < market_open_at:
@@ -307,7 +307,9 @@ def run_entry_window(ctx, broker, tick_store, selection, underlying_token, prev_
     """
     clock_fn = clock_fn or (lambda: datetime.now(IST))
     sleep_fn = sleep_fn or time.sleep
-    window_end = _today_at(cfg.ENTRY_END_TIME)
+    now = clock_fn()
+    h, m, s = (int(x) for x in cfg.ENTRY_END_TIME.split(":"))
+    window_end = now.replace(hour=h, minute=m, second=s, microsecond=0)
     ce_token = selection.ce_contract.instrument_token
     pe_token = selection.pe_contract.instrument_token
     last_snapshot = None
@@ -375,7 +377,8 @@ class OpenPosition:
     entry_monotonic: float
 
 
-def run_entry(broker, cfg_ref, tick_store, selection: StrikeSelection, authorized_result, ticker=None):
+def run_entry(broker, cfg_ref, tick_store, selection: StrikeSelection, authorized_result, ticker=None,
+              position_key=None):
     """GENERATE_SIGNAL -> ENTRY_PENDING. Sizes the position, checks the
     daily kill switch, then executes the entry through execution/entry.py
     -- IDENTICAL code path for PAPER and LIVE (only `broker` differs)."""
@@ -414,21 +417,25 @@ def run_entry(broker, cfg_ref, tick_store, selection: StrikeSelection, authorize
     )
 
     if not result.success:
-        return result, kill_switch, result.abort_reason
+        # Callers interpret the first tuple item as an actual open
+        # position. Returning a failed EntryResult here previously made
+        # the opening-window loop treat an aborted order as a fill.
+        return None, kill_switch, result.abort_reason
 
     position = OpenPosition(
         tradingsymbol=contract.tradingsymbol, exchange=contract.exchange, option_token=contract.instrument_token,
         strike=selection.atm_strike, option_type=direction, quantity=result.filled_quantity,
         entry_price=result.average_price, entry_monotonic=time.monotonic(),
     )
-    save_positions({cfg_ref.UNDERLYING: {
+    save_positions({(position_key or cfg_ref.UNDERLYING): {
         "tradingsymbol": position.tradingsymbol, "exchange": position.exchange, "quantity": position.quantity,
         "entry_price": position.entry_price, "option_type": position.option_type, "strike": position.strike,
     }})
     return position, kill_switch, None
 
 
-def run_monitor_and_exit(broker, ticker, tick_store, position: OpenPosition, kill_switch, cfg_ref):
+def run_monitor_and_exit(broker, ticker, tick_store, position: OpenPosition, kill_switch, cfg_ref,
+                         underlying_name=None):
     """POSITION_OPEN -> MONITOR -> EXIT_PENDING -> CLOSED. Polls once
     per second; escalates to a FORCE_EXIT if disconnected beyond the
     configured recovery timeout while a position is open (spec #26)."""
@@ -480,7 +487,7 @@ def run_monitor_and_exit(broker, ticker, tick_store, position: OpenPosition, kil
 
             exit_price = exit_result.average_price if exit_result.average_price is not None else position.entry_price
             record_trade(
-                underlying=cfg_ref.UNDERLYING, strike=position.strike, option_type=position.option_type,
+                underlying=(underlying_name or cfg_ref.UNDERLYING), strike=position.strike, option_type=position.option_type,
                 direction="BUY", quantity=exit_result.filled_quantity or position.quantity,
                 entry_price=position.entry_price, exit_price=exit_price, mode=cfg_ref.MODE, exit_reason=reason,
                 mfe_pct=excursion.mfe_pct, mae_pct=excursion.mae_pct,
@@ -494,6 +501,10 @@ def run_monitor_and_exit(broker, ticker, tick_store, position: OpenPosition, kil
 
 
 def main():
+    if cfg.UNIVERSE_MODE == "ALL_STOCK_OPTIONS":
+        from fno_bot.stock_options_launcher import run_all_stock_options
+        run_all_stock_options()
+        return
     log_event("BOT_START", underlying=cfg.UNDERLYING, mode=cfg.MODE)
     try:
         kite = _get_kite_client()

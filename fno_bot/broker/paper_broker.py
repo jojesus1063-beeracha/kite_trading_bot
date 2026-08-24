@@ -26,6 +26,8 @@ crash_recovery's broker-reconciliation logic is deliberately bypassed
 for PAPER mode at the launcher level (see launcher.py).
 """
 import logging
+import uuid
+
 from typing import Optional
 
 logger = logging.getLogger("fno.paper_broker")
@@ -76,9 +78,8 @@ class PaperBroker:
 
     def place_order(self, *, variety, exchange, tradingsymbol, transaction_type, quantity,
                      product, order_type, price, market_protection=None, **kwargs):
-        order_id = f"PAPER{self._next_id}"
-        self._next_id += 1
-
+        order_id = f"PAPER-{uuid.uuid4().hex[:12]}"
+  
         token = self._token_by_symbol.get(tradingsymbol)
         tick = self._tick_store.latest(token) if token is not None else None
         slippage_pct = getattr(self._cfg, "PAPER_SLIPPAGE_PCT", 0.5)
