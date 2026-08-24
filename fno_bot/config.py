@@ -39,6 +39,15 @@ ACCESS_TOKEN_FILE = os.environ.get(
 # "SENSEX" or "BFO" once instruments/ is fully wired.
 UNDERLYING = os.environ.get("FNO_UNDERLYING", "SENSEX")
 
+# SINGLE keeps the original index-only launcher behavior. ALL_STOCK_OPTIONS
+# dynamically discovers every NSE equity with listed NFO options and scans
+# only its nearest-expiry ATM CE/PE pair. The feature is opt-in so adding it
+# cannot silently broaden an existing deployment.
+UNIVERSE_MODE = os.environ.get("FNO_UNIVERSE_MODE", "SINGLE").upper()
+ALL_STOCK_OPTIONS_MAX_UNDERLYINGS = int(os.environ.get("FNO_STOCK_OPTION_LIMIT", "0"))  # 0 = all
+ALL_STOCK_OPTIONS_WEBSOCKET_LIMIT = 3000
+ALL_STOCK_OPTIONS_LIVE_ENABLED = False  # PAPER/SHADOW validation is mandatory first
+
 UNDERLYING_REGISTRY = {
     "SENSEX": {"exchange": "BFO", "index_exchange": "BSE", "index_symbol": "SENSEX", "strike_interval": 100},
     "NIFTY": {"exchange": "NFO", "index_exchange": "NSE", "index_symbol": "NIFTY 50", "strike_interval": 50},
@@ -168,7 +177,7 @@ MAX_ORDER_RETRIES = 3
 # and is logged every session, purely for comparison. None is assumed
 # correct -- see strategies/signal_candidates.py.
 # ---------------------------------------------------------------------
-AUTHORIZED_SIGNAL = "premium_imbalance"   # None = no signal is authorized to trade yet; SHADOW-only until explicitly set
+AUTHORIZED_SIGNAL = None   # None = no signal is authorized to trade yet; SHADOW-only until explicitly set
 SHADOW_SIGNAL_CANDIDATES = [
     "premium_imbalance",
     "premium_rate_of_change",
@@ -198,6 +207,7 @@ if os.path.exists(_USER_CONFIG_PATH):
         _overrides = json.load(_f)
 
     UNDERLYING = _overrides.get("underlying", UNDERLYING)
+    UNIVERSE_MODE = _overrides.get("universe_mode", UNIVERSE_MODE).upper()
     MODE = _overrides.get("mode", MODE)
     ENTRY_START_TIME = _overrides.get("entry_start_time", ENTRY_START_TIME)
     ENTRY_END_TIME = _overrides.get("entry_end_time", ENTRY_END_TIME)
@@ -235,6 +245,11 @@ def validate_mode():
     """
     if MODE not in ("SHADOW", "PAPER", "LIVE"):
         raise RuntimeError(f"Invalid FNO_MODE={MODE!r}; must be SHADOW, PAPER, or LIVE")
+    if UNIVERSE_MODE not in ("SINGLE", "ALL_STOCK_OPTIONS"):
+        raise RuntimeError(
+            f"Invalid FNO_UNIVERSE_MODE={UNIVERSE_MODE!r}; "
+            "must be SINGLE or ALL_STOCK_OPTIONS"
+        )
     if MODE == "LIVE" and not is_live_ack_present():
         raise RuntimeError(
             f"REFUSING TO START LIVE TRADING: environment variable {FNO_LIVE_ACK_ENV_VAR} "

@@ -16,7 +16,7 @@ logger = logging.getLogger("fno.strike_selector")
 @dataclass(frozen=True)
 class StrikeSelection:
     underlying_price: float
-    strike_interval: int
+    strike_interval: float
     atm_strike: float
     expiry: date
     ce_contract: ContractRecord
@@ -69,4 +69,56 @@ def select_atm_contracts(
         expiry=expiry,
         ce_contract=ce,
         pe_contract=pe,
+    )
+
+
+def select_nearest_listed_atm_contracts(
+    records: list[ContractRecord],
+    underlying_price: float,
+    expiry: date,
+) -> Optional[StrikeSelection]:
+    """Selects the closest *listed* strike that has both CE and PE.
+
+    Stock-option strike intervals are not uniform across the complete
+    NFO universe and may change after corporate actions.  Market-wide
+    discovery must therefore use the broker's live contract master,
+    rather than a hardcoded interval registry.
+    """
+    if underlying_price <= 0:
+        return None
+
+    by_strike: dict[float, dict[str, ContractRecord]] = {}
+    for record in records:
+        if record.expiry != expiry or record.instrument_type not in ("CE", "PE"):
+            continue
+        by_strike.setdefault(record.strike, {})[record.instrument_type] = record
+
+    paired_strikes = sorted(
+        strike for strike, legs in by_strike.items()
+        if strike > 0 and "CE" in legs and "PE" in legs
+    )
+    if not paired_strikes:
+        return None
+
+    atm_strike = min(paired_strikes, key=lambda strike: (abs(strike - underlying_price), strike))
+    legs = by_strike[atm_strike]
+
+    if len(paired_strikes) >= 2:
+        nearest_index = paired_strikes.index(atm_strike)
+        neighbours = []
+        if nearest_index > 0:
+            neighbours.append(atm_strike - paired_strikes[nearest_index - 1])
+        if nearest_index + 1 < len(paired_strikes):
+            neighbours.append(paired_strikes[nearest_index + 1] - atm_strike)
+        strike_interval = min(neighbours) if neighbours else 0.0
+    else:
+        strike_interval = 0.0
+
+    return StrikeSelection(
+        underlying_price=underlying_price,
+        strike_interval=strike_interval,
+        atm_strike=atm_strike,
+        expiry=expiry,
+        ce_contract=legs["CE"],
+        pe_contract=legs["PE"],
     )
