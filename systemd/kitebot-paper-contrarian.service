@@ -1,8 +1,8 @@
 [Unit]
-Description=Kite Trading Bot - paper contrarian mode
+Description=Kite Trading Bot - paper EMA/market-policy mode with five-depth gate
 Wants=network-online.target
 After=network-online.target
-Conflicts=kitebot.service
+Conflicts=kitebot.service kitebot-live-combined.service
 
 [Service]
 Type=simple
@@ -10,7 +10,7 @@ User=ubuntu
 Group=ubuntu
 EnvironmentFile=/etc/kitebot.env
 WorkingDirectory=/home/ubuntu/kite_trading_bot
-ExecStart=/home/ubuntu/kite_trading_bot/venv/bin/python3 /home/ubuntu/kite_trading_bot/paper_50pct_risk_launcher.py
+ExecStart=/home/ubuntu/kite_trading_bot/venv/bin/python3 /home/ubuntu/kite_trading_bot/paper_depth_launcher.py
 Restart=no
 UMask=0027
 StandardOutput=journal

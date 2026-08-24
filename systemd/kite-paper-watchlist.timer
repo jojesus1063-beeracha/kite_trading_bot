@@ -1,5 +1,5 @@
 [Unit]
-Description=Build frozen full-universe PAPER top-60 each weekday at the 09:27 snapshot
+Description=Build frozen full-universe PAPER top-120 each weekday at the 09:27 snapshot
 
 [Timer]
 # Fire 20 seconds before the policy boundary. The runner stops the old PAPER

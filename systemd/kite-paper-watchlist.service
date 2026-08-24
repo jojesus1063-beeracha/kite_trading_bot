@@ -1,5 +1,5 @@
 [Unit]
-Description=Build frozen full-universe top-60 PAPER watchlist and start the paper bot
+Description=Build frozen full-universe top-120 PAPER watchlist and start the paper depth bot
 Wants=network-online.target
 After=network-online.target
 
