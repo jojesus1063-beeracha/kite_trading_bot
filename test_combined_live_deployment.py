@@ -95,6 +95,13 @@ class CombinedLiveLauncherTests(unittest.TestCase):
         self.assertEqual(config.ENTRY_SCAN_SHORTLIST_SIZE, 120)
         self.assertTrue(config.ENABLE_FIXED_TARGET)
         self.assertFalse(config.ENABLE_TRAILING_STOP)
+        self.assertTrue(config.ENABLE_DEPTH_CONFIRMATION_GATE)
+        self.assertEqual(config.DEPTH_CONFIRMATION_WINDOW_SECONDS, 30.0)
+        self.assertEqual(config.DEPTH_CONFIRMATION_MIN_COVERAGE_SECONDS, 15.0)
+        self.assertEqual(config.DEPTH_CONFIRMATION_IMBALANCE, 0.20)
+        self.assertEqual(config.DEPTH_CONFIRMATION_PERSISTENCE, 0.70)
+        self.assertEqual(config.DEPTH_CONFIRMATION_MAX_SPREAD_BPS, 5.0)
+        self.assertTrue(limits["depth_confirmation_gate"])
 
 
 class PatternModeTests(unittest.TestCase):

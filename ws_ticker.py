@@ -118,6 +118,17 @@ class TickBuffer:
                 return None
             return buf[-1]
 
+    def ticks_received_since(self, symbol: str, received_at: float) -> list[dict]:
+        """Return buffered ticks received at/after a wall-clock epoch cutoff."""
+        with self._lock:
+            buf = self._buffers.get(symbol)
+            if not buf:
+                return []
+            return [
+                tick for tick in buf
+                if float(tick.get("received_at") or 0.0) >= received_at
+            ]
+
 
 class WSTicker:
     """

@@ -97,6 +97,7 @@ from scheduler import candle_interval_minutes, last_completed_candle_close, next
 from scan_latency import build_entry_timing, select_scan_universe
 from cooperative_position_monitor import CooperativeScanMonitor
 from delayed_entry_confirmation import assess_delayed_entry
+from depth_confirmation import evaluate_live_depth
 from pipeline_dashboard import record_pipeline_event
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1480,6 +1481,59 @@ def run_full_scan(
         qty = risk.position_size(signal.entry_price, planned_stop_price)
         if qty > 0 and not cfg.PAPER_TRADING:
             qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
+
+        depth_confirmation = evaluate_live_depth(
+            ws_shadow_engine,
+            symbol,
+            signal.direction,
+            qty,
+            cfg,
+        )
+        depth_detail = depth_confirmation.to_dict()
+        signal_analytics["depth_confirmation"] = depth_detail
+        logger.info(
+            "%s: five-level depth confirmation | direction=%s "
+            "| accepted=%s | classification=%s | median_imbalance=%s "
+            "| buy_fraction=%s | sell_fraction=%s | spread_bps=%s "
+            "| samples=%s | coverage=%ss | reason=%s",
+            symbol,
+            signal.direction,
+            depth_confirmation.accepted,
+            depth_confirmation.classification,
+            depth_confirmation.median_imbalance,
+            depth_confirmation.buy_pressure_fraction,
+            depth_confirmation.sell_pressure_fraction,
+            depth_confirmation.latest_spread_bps,
+            depth_confirmation.sample_count,
+            depth_confirmation.coverage_seconds,
+            depth_confirmation.reason,
+        )
+        if not depth_confirmation.accepted:
+            record_pipeline_event(
+                symbol=symbol,
+                market=signal.market_trend,
+                raw_direction=signal.raw_direction,
+                decision=signal.policy_decision,
+                final_direction=signal.direction,
+                status="DEPTH_CONFIRMATION_REJECTED",
+            )
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": "skipped, five-level depth: " + depth_confirmation.reason,
+                }
+            )
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    **candidate_event_context,
+                    "reason_code": "DEPTH_CONFIRMATION_REJECTED",
+                    "reason": depth_confirmation.reason,
+                    "depth_confirmation": depth_detail,
+                },
+            )
+            continue
+
         tick_size = get_cached_instrument_tick_size(
             symbol,
             exchange,
