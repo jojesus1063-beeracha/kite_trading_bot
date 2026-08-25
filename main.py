@@ -561,7 +561,18 @@ def run_full_scan(
 
         if signal:
             raw_direction = signal.direction
-            resolution = resolve_market_direction(market_trend, raw_direction)
+            if bool(getattr(cfg, "DEPTH_RAW_DIRECTION_ONLY", False)):
+                resolution = {
+                    "decision": "DEPTH_GATE",
+                    "direction": raw_direction,
+                    "reason": "RAW_EMA_DIRECTION_AWAITS_FIVE_LEVEL_DEPTH",
+                    "market": market_trend,
+                }
+            else:
+                resolution = resolve_market_direction(
+                    market_trend,
+                    raw_direction,
+                )
             if resolution["decision"] == "SKIP":
                 record_pipeline_event(
                     symbol=symbol,

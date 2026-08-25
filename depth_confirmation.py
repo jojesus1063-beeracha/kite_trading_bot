@@ -98,6 +98,7 @@ def evaluate_depth_ticks(
     max_age_seconds: float = 2.0,
     max_spread_bps: float = 5.0,
     executable_depth_multiple: float = 2.0,
+    require_directional_confirmation: bool = False,
 ) -> DepthConfirmation:
     """Evaluate recent full-depth ticks for an already-selected direction."""
     direction = str(direction or "").upper()
@@ -215,6 +216,13 @@ def evaluate_depth_ticks(
             f"persistent five-level pressure confirms {direction}",
             **common,
         )
+    if require_directional_confirmation:
+        return DepthConfirmation(
+            False,
+            "NEUTRAL",
+            f"five-level pressure does not confirm {direction}; wait for a later entry",
+            **common,
+        )
     return DepthConfirmation(
         True,
         "NEUTRAL",
@@ -256,4 +264,7 @@ def evaluate_live_depth(
         max_age_seconds=float(getattr(cfg, "DEPTH_CONFIRMATION_MAX_AGE_SECONDS", 2.0)),
         max_spread_bps=float(getattr(cfg, "DEPTH_CONFIRMATION_MAX_SPREAD_BPS", 5.0)),
         executable_depth_multiple=float(getattr(cfg, "DEPTH_CONFIRMATION_SIZE_MULTIPLE", 2.0)),
+        require_directional_confirmation=bool(
+            getattr(cfg, "DEPTH_REQUIRE_DIRECTIONAL_CONFIRMATION", False)
+        ),
     )

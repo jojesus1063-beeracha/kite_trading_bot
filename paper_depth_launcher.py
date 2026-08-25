@@ -68,6 +68,8 @@ def enforce_paper_depth_settings() -> dict:
     cfg.EXIT_IMMEDIATELY_AT_TARGET = True
 
     cfg.ENABLE_DEPTH_CONFIRMATION_GATE = True
+    cfg.DEPTH_RAW_DIRECTION_ONLY = True
+    cfg.DEPTH_REQUIRE_DIRECTIONAL_CONFIRMATION = True
     cfg.DEPTH_CONFIRMATION_WINDOW_SECONDS = PAPER_DEPTH_CONFIRMATION_WINDOW_SECONDS
     cfg.DEPTH_CONFIRMATION_MIN_COVERAGE_SECONDS = PAPER_DEPTH_CONFIRMATION_MIN_COVERAGE_SECONDS
     cfg.DEPTH_CONFIRMATION_MIN_SAMPLES = PAPER_DEPTH_CONFIRMATION_MIN_SAMPLES
@@ -86,6 +88,10 @@ def enforce_paper_depth_settings() -> dict:
         "daily_loss_kill_switch_enabled": cfg.DAILY_LOSS_KILL_SWITCH_ENABLED,
         "max_consecutive_losses": cfg.MAX_CONSECUTIVE_LOSSES,
         "depth_confirmation_gate": cfg.ENABLE_DEPTH_CONFIRMATION_GATE,
+        "direction_policy": "RAW_EMA_PLUS_SAME_SIDE_DEPTH_NO_REVERSAL",
+        "depth_requires_directional_confirmation": (
+            cfg.DEPTH_REQUIRE_DIRECTIONAL_CONFIRMATION
+        ),
         "depth_window_seconds": cfg.DEPTH_CONFIRMATION_WINDOW_SECONDS,
         "depth_imbalance_threshold": cfg.DEPTH_CONFIRMATION_IMBALANCE,
         "depth_persistence": cfg.DEPTH_CONFIRMATION_PERSISTENCE,
@@ -98,8 +104,8 @@ def main() -> None:
     install_two_indicator_patch()
     logger.critical(
         "PAPER DEPTH MODE ACTIVE | settings=%s | NO REAL ORDERS | "
-        "Top-120 paper watchlist; EMA9/EMA21 raw signal; frozen market policy; "
-        "persistent five-level depth confirmation",
+        "Top-120 paper watchlist; NO REVERSALS; EMA9/EMA21 raw side must be "
+        "confirmed by persistent same-side five-level depth before entry",
         settings,
     )
     runpy.run_module("main", run_name="__main__")
