@@ -14,7 +14,14 @@ def _snapshot():
 def test_evaluate_signals_no_authorized_signal_never_trades():
     all_results, authorized = evaluate_signals(_snapshot(), authorized_signal=None)
     assert authorized is None
-    assert len(all_results) == 5  # still evaluated in shadow
+    assert {result.candidate for result in all_results} == {
+        "premium_imbalance",
+        "premium_rate_of_change",
+        "underlying_open_vs_prev_close",
+        "bid_ask_imbalance",
+        "depth_imbalance",
+        "confirmed_momentum",
+    }  # every candidate is still evaluated in shadow
 
 
 def test_evaluate_signals_authorized_signal_surfaces_its_result():
