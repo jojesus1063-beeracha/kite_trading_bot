@@ -1,7 +1,7 @@
 from fno_bot.strategies.signal_candidates import (
     MarketSnapshot, TickPoint, premium_imbalance, premium_rate_of_change,
     underlying_open_vs_prev_close, bid_ask_imbalance, depth_imbalance,
-    evaluate_all_candidates,
+    confirmed_momentum, evaluate_all_candidates,
 )
 
 
@@ -84,11 +84,49 @@ def test_depth_imbalance_more_liquid_leg():
     assert sig.direction == "CE"  # 90 total vs 20 total
 
 
+def test_confirmed_momentum_buys_ce_only_when_all_confirmations_agree():
+    ce_hist = (TickPoint(100.0, 0.0), TickPoint(100.2, 1.0), TickPoint(101.0, 2.1))
+    pe_hist = (TickPoint(100.0, 0.0), TickPoint(99.9, 1.0), TickPoint(99.5, 2.1))
+    sig = confirmed_momentum(_snapshot(
+        underlying_price=101.0, underlying_prev_close=100.0,
+        ce_history=ce_hist, pe_history=pe_hist,
+        ce_best_bid_qty=80, ce_best_ask_qty=20,
+        pe_best_bid_qty=20, pe_best_ask_qty=80,
+    ))
+    assert sig.direction == "CE"
+    assert sig.confidence > 0
+
+
+def test_confirmed_momentum_rejects_cheap_but_falling_directional_leg():
+    ce_hist = (TickPoint(100.0, 0.0), TickPoint(99.0, 1.0), TickPoint(98.0, 2.1))
+    pe_hist = (TickPoint(80.0, 0.0), TickPoint(79.0, 1.0), TickPoint(78.0, 2.1))
+    sig = confirmed_momentum(_snapshot(
+        underlying_price=101.0, underlying_prev_close=100.0,
+        ce_history=ce_hist, pe_history=pe_hist,
+    ))
+    assert sig.direction is None
+    assert "not rising" in sig.reason
+
+
+def test_confirmed_momentum_rejects_when_book_disagrees():
+    ce_hist = (TickPoint(100.0, 0.0), TickPoint(100.5, 1.0), TickPoint(101.0, 2.1))
+    pe_hist = (TickPoint(100.0, 0.0), TickPoint(99.8, 1.0), TickPoint(99.5, 2.1))
+    sig = confirmed_momentum(_snapshot(
+        underlying_price=101.0, underlying_prev_close=100.0,
+        ce_history=ce_hist, pe_history=pe_hist,
+        ce_best_bid_qty=10, ce_best_ask_qty=90,
+        pe_best_bid_qty=90, pe_best_ask_qty=10,
+    ))
+    assert sig.direction is None
+    assert "book" in sig.reason
+
+
 def test_evaluate_all_candidates_never_raises_and_covers_registry():
     results = evaluate_all_candidates(_snapshot())
     names = {r.candidate for r in results}
     assert names == {"premium_imbalance", "premium_rate_of_change",
-                      "underlying_open_vs_prev_close", "bid_ask_imbalance", "depth_imbalance"}
+                      "underlying_open_vs_prev_close", "bid_ask_imbalance", "depth_imbalance",
+                      "confirmed_momentum"}
 
 
 def test_evaluate_all_candidates_survives_a_raising_candidate(monkeypatch):
@@ -103,4 +141,4 @@ def test_evaluate_all_candidates_survives_a_raising_candidate(monkeypatch):
     assert failed.direction is None
     assert "raised" in failed.reason
     # the other candidates still ran despite one raising
-    assert len(results) == 5
+    assert len(results) == 6
