@@ -27,6 +27,9 @@ class NormalizedTick:
     volume: Optional[int]
     exchange_timestamp: Optional[str]   # broker-reported timestamp, if present, as ISO string
     received_monotonic: float           # time.monotonic() when this process received the tick
+    total_buy_qty: Optional[int] = None
+    total_sell_qty: Optional[int] = None
+    open_interest: Optional[int] = None
 
 
 def normalize_kite_tick(raw: dict, clock_fn=None) -> Optional[NormalizedTick]:
@@ -65,6 +68,9 @@ def normalize_kite_tick(raw: dict, clock_fn=None) -> Optional[NormalizedTick]:
         volume=raw.get("volume_traded") or raw.get("volume"),
         exchange_timestamp=exch_ts_str,
         received_monotonic=clock_fn(),
+        total_buy_qty=raw.get("buy_quantity"),
+        total_sell_qty=raw.get("sell_quantity"),
+        open_interest=raw.get("oi"),
     )
 
 

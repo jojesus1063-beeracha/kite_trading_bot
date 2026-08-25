@@ -21,6 +21,7 @@ def test_evaluate_signals_no_authorized_signal_never_trades():
         "bid_ask_imbalance",
         "depth_imbalance",
         "confirmed_momentum",
+        "professional_momentum",
     }  # every candidate is still evaluated in shadow
 
 

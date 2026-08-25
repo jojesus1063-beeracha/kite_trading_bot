@@ -36,6 +36,7 @@ def build_snapshot(
     underlying_prev_close: Optional[float],
     ce_history: tuple = (),
     pe_history: tuple = (),
+    underlying_history: tuple = (),
 ) -> Optional[MarketSnapshot]:
     """
     Reads the latest underlying/CE/PE ticks from the store and
@@ -60,6 +61,7 @@ def build_snapshot(
         pe_best_bid=pe_tick.best_bid, pe_best_ask=pe_tick.best_ask,
         pe_best_bid_qty=pe_tick.best_bid_qty, pe_best_ask_qty=pe_tick.best_ask_qty,
         ce_history=ce_history, pe_history=pe_history,
+        underlying_history=underlying_history,
     )
 
 

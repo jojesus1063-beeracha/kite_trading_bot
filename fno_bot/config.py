@@ -87,6 +87,15 @@ PREPARE_BEFORE_SECONDS = 300     # start PREPARE (auth, contract master, ws conn
 
 FORCE_SQUARE_OFF_TIME = "15:10"  # mandatory end-of-session exit, same discipline as equity bot
 
+# PAPER-only second session.  This does not widen the Opening Scalper's
+# authorization; a separate completed-candle/live-flow engine owns this range.
+INTRADAY_OPTIONS_ENABLED = False
+INTRADAY_ENTRY_START_TIME = "09:20:00"
+INTRADAY_ENTRY_END_TIME = "14:45:00"
+INTRADAY_FORCE_EXIT_TIME = "15:15:00"
+INTRADAY_HISTORICAL_SHORTLIST_SIZE = 10
+INTRADAY_HISTORICAL_CACHE_SECONDS = 55
+
 # ---------------------------------------------------------------------
 # Stale-data / connection-quality protection (spec #25, #26)
 # ---------------------------------------------------------------------
@@ -211,6 +220,13 @@ if os.path.exists(_USER_CONFIG_PATH):
     MODE = _overrides.get("mode", MODE)
     ENTRY_START_TIME = _overrides.get("entry_start_time", ENTRY_START_TIME)
     ENTRY_END_TIME = _overrides.get("entry_end_time", ENTRY_END_TIME)
+    INTRADAY_OPTIONS_ENABLED = _overrides.get("intraday_options_enabled", INTRADAY_OPTIONS_ENABLED)
+    INTRADAY_ENTRY_START_TIME = _overrides.get("intraday_entry_start_time", INTRADAY_ENTRY_START_TIME)
+    INTRADAY_ENTRY_END_TIME = _overrides.get("intraday_entry_end_time", INTRADAY_ENTRY_END_TIME)
+    INTRADAY_FORCE_EXIT_TIME = _overrides.get("intraday_force_exit_time", INTRADAY_FORCE_EXIT_TIME)
+    INTRADAY_HISTORICAL_SHORTLIST_SIZE = _overrides.get(
+        "intraday_historical_shortlist_size", INTRADAY_HISTORICAL_SHORTLIST_SIZE
+    )
     ENTRY_BUFFER_PCT = _overrides.get("entry_buffer_pct", ENTRY_BUFFER_PCT)
     MAX_ENTRY_SLIPPAGE_PCT = _overrides.get("max_entry_slippage_pct", MAX_ENTRY_SLIPPAGE_PCT)
     ENTRY_TIMEOUT_MS = _overrides.get("entry_timeout_ms", ENTRY_TIMEOUT_MS)

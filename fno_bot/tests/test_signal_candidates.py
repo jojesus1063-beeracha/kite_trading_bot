@@ -1,7 +1,7 @@
 from fno_bot.strategies.signal_candidates import (
     MarketSnapshot, TickPoint, premium_imbalance, premium_rate_of_change,
     underlying_open_vs_prev_close, bid_ask_imbalance, depth_imbalance,
-    confirmed_momentum, evaluate_all_candidates,
+    confirmed_momentum, professional_momentum, evaluate_all_candidates,
 )
 
 
@@ -121,12 +121,52 @@ def test_confirmed_momentum_rejects_when_book_disagrees():
     assert "book" in sig.reason
 
 
+def _professional_history(start, end, *, volume_start, volume_end, oi, buy, sell):
+    return tuple(
+        TickPoint(
+            start + (end - start) * index / 30,
+            float(index),
+            int(volume_start + (volume_end - volume_start) * index / 30),
+            oi, buy, sell,
+        )
+        for index in range(31)
+    )
+
+
+def test_professional_momentum_requires_live_spot_option_volume_oi_and_book_agreement():
+    underlying = _professional_history(100.0, 100.10, volume_start=0, volume_end=0,
+                                       oi=None, buy=0, sell=0)
+    ce = _professional_history(100.0, 102.0, volume_start=1000, volume_end=1500,
+                               oi=5000, buy=8000, sell=2000)
+    pe = _professional_history(100.0, 99.0, volume_start=1000, volume_end=1200,
+                               oi=5000, buy=2000, sell=8000)
+    sig = professional_momentum(_snapshot(
+        underlying_history=underlying, ce_history=ce, pe_history=pe,
+    ))
+    assert sig.direction == "CE"
+    assert sig.raw_metrics["selected_volume_delta"] == 500
+
+
+def test_professional_momentum_abstains_without_live_volume_growth():
+    underlying = _professional_history(100.0, 100.10, volume_start=0, volume_end=0,
+                                       oi=None, buy=0, sell=0)
+    ce = _professional_history(100.0, 102.0, volume_start=1000, volume_end=1000,
+                               oi=5000, buy=8000, sell=2000)
+    pe = _professional_history(100.0, 99.0, volume_start=1000, volume_end=1200,
+                               oi=5000, buy=2000, sell=8000)
+    sig = professional_momentum(_snapshot(
+        underlying_history=underlying, ce_history=ce, pe_history=pe,
+    ))
+    assert sig.direction is None
+    assert "volume" in sig.reason
+
+
 def test_evaluate_all_candidates_never_raises_and_covers_registry():
     results = evaluate_all_candidates(_snapshot())
     names = {r.candidate for r in results}
     assert names == {"premium_imbalance", "premium_rate_of_change",
                       "underlying_open_vs_prev_close", "bid_ask_imbalance", "depth_imbalance",
-                      "confirmed_momentum"}
+                      "confirmed_momentum", "professional_momentum"}
 
 
 def test_evaluate_all_candidates_survives_a_raising_candidate(monkeypatch):
@@ -141,4 +181,4 @@ def test_evaluate_all_candidates_survives_a_raising_candidate(monkeypatch):
     assert failed.direction is None
     assert "raised" in failed.reason
     # the other candidates still ran despite one raising
-    assert len(results) == 6
+    assert len(results) == 7

@@ -24,6 +24,10 @@ class TickPoint:
     that need a short recent window rather than just the latest tick."""
     price: float
     at_monotonic: float
+    volume: Optional[int] = None
+    open_interest: Optional[int] = None
+    total_buy_qty: Optional[int] = None
+    total_sell_qty: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,7 @@ class MarketSnapshot:
     pe_best_ask_qty: Optional[int]
     ce_history: tuple = field(default_factory=tuple)   # recent TickPoints, oldest first
     pe_history: tuple = field(default_factory=tuple)
+    underlying_history: tuple = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -177,6 +182,78 @@ def confirmed_momentum(snapshot: MarketSnapshot, min_points: int = 3) -> Directi
     )
 
 
+def professional_momentum(snapshot: MarketSnapshot, min_points: int = 30) -> DirectionSignal:
+    """Conservative live-tick direction for professional PAPER evaluation.
+
+    Requires a sustained underlying move, matching option relative strength,
+    fresh cumulative-volume activity, minimum OI, and total-book pressure.
+    It deliberately abstains when Kite full-mode fields are unavailable.
+    """
+    histories = (snapshot.underlying_history, snapshot.ce_history, snapshot.pe_history)
+    if any(len(history) < min_points for history in histories):
+        return DirectionSignal("professional_momentum", None, None, "collecting 30-second live history", {})
+    span = min(history[-1].at_monotonic - history[0].at_monotonic for history in histories)
+    if span < 29.0:
+        return DirectionSignal("professional_momentum", None, None, "live observation window shorter than 29 seconds", {"span_seconds": span})
+
+    def roc(history):
+        start = history[0].price
+        return None if start <= 0 else (history[-1].price - start) / start * 100
+
+    underlying_roc = roc(snapshot.underlying_history)
+    ce_roc = roc(snapshot.ce_history)
+    pe_roc = roc(snapshot.pe_history)
+    if None in (underlying_roc, ce_roc, pe_roc):
+        return DirectionSignal("professional_momentum", None, None, "invalid live price history", {})
+
+    direction = "CE" if underlying_roc > 0 else "PE"
+    selected = snapshot.ce_history if direction == "CE" else snapshot.pe_history
+    opposing = snapshot.pe_history if direction == "CE" else snapshot.ce_history
+    selected_roc = ce_roc if direction == "CE" else pe_roc
+    opposing_roc = pe_roc if direction == "CE" else ce_roc
+
+    latest = selected[-1]
+    opposite_latest = opposing[-1]
+    volume_delta = None if latest.volume is None or selected[0].volume is None else latest.volume - selected[0].volume
+    opposing_volume_delta = None if opposite_latest.volume is None or opposing[0].volume is None else opposite_latest.volume - opposing[0].volume
+
+    def total_pressure(point):
+        total = (point.total_buy_qty or 0) + (point.total_sell_qty or 0)
+        return None if total <= 0 else ((point.total_buy_qty or 0) - (point.total_sell_qty or 0)) / total
+
+    pressure = total_pressure(latest)
+    opposing_pressure = total_pressure(opposite_latest)
+    metrics = {
+        "span_seconds": span, "underlying_roc_pct": underlying_roc,
+        "ce_roc_pct": ce_roc, "pe_roc_pct": pe_roc,
+        "selected_volume_delta": volume_delta,
+        "opposing_volume_delta": opposing_volume_delta,
+        "selected_oi": latest.open_interest,
+        "selected_pressure": pressure, "opposing_pressure": opposing_pressure,
+    }
+
+    if abs(underlying_roc) < 0.08:
+        return DirectionSignal("professional_momentum", None, 0.0, "underlying 30-second move below 0.08%", metrics)
+    if selected_roc < 1.0:
+        return DirectionSignal("professional_momentum", None, 0.0, "directional option 30-second momentum below 1%", metrics)
+    if selected_roc - opposing_roc < 1.0:
+        return DirectionSignal("professional_momentum", None, 0.0, "CE/PE relative-strength edge below 1%", metrics)
+    if volume_delta is None or volume_delta <= 0:
+        return DirectionSignal("professional_momentum", None, 0.0, "no confirmed live option-volume increase", metrics)
+    if latest.open_interest is None or latest.open_interest < 1000:
+        return DirectionSignal("professional_momentum", None, 0.0, "open interest below 1000 or unavailable", metrics)
+    if pressure is None or opposing_pressure is None or pressure <= opposing_pressure or pressure < 0:
+        return DirectionSignal("professional_momentum", None, 0.0, "total buy/sell pressure does not confirm direction", metrics)
+
+    confidence = min(100.0, abs(underlying_roc) * 150 + selected_roc * 12 +
+                     (selected_roc - opposing_roc) * 10 + (pressure - opposing_pressure) * 20)
+    return DirectionSignal(
+        "professional_momentum", direction, confidence,
+        f"30-second live spot/{direction}/volume/OI/book confirmation",
+        metrics,
+    )
+
+
 def underlying_open_vs_prev_close(snapshot: MarketSnapshot) -> DirectionSignal:
     """
     Simple gap-direction read: underlying opened above previous close
@@ -275,6 +352,7 @@ CANDIDATE_REGISTRY: dict[str, Callable[[MarketSnapshot], DirectionSignal]] = {
     "bid_ask_imbalance": bid_ask_imbalance,
     "depth_imbalance": depth_imbalance,
     "confirmed_momentum": confirmed_momentum,
+    "professional_momentum": professional_momentum,
 }
 
 
