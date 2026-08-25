@@ -1,233 +1,178 @@
-"""
-Standalone read-only monitoring dashboard for the F&O opening scalper.
+"""Read-only F&O activity dashboard.
 
-Deliberately a SEPARATE Flask process on a SEPARATE port from the
-equity bot's dashboard (configure_app.py, port 5000). This file never
-imports anything from the equity bot, never shares its Flask `app`
-instance, and never writes to any fno_bot state -- it only reads the
-same JSON/JSONL files the bot itself already produces
-(fno_bot_status.json, fno_trade_history.jsonl, audit_logs/*.jsonl,
-shadow_logs/*.jsonl). That keeps the isolation guarantee from the
-architecture review intact: even if this dashboard crashes, hangs, or
-someone edits it carelessly, the trading process is completely
-unaffected, because it never talks to this process at all.
-
-Run with:
-    python3 -m fno_bot.dashboard
-Then open http://<host>:5050/ (bind to 0.0.0.0 if viewing from another
-device on the same network, same as the equity dashboard's pattern).
-
-This is intentionally simple (server-rendered HTML, meta-refresh every
-5s, no JS framework, no auth) -- it is a read-only status page for
-personal monitoring during PAPER/SHADOW sessions, not a production
-web app. Add a password gate before ever exposing it beyond localhost,
-same caveat the equity dashboard already carries.
+Set ``FNO_DASHBOARD_RUNTIME_ROOT`` to the active bot worktree when the
+dashboard runs from a different checkout. This process never calls Kite and
+never writes trading state.
 """
 import json
 import os
+from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from flask import Flask
+from flask import Flask, jsonify
 
-from fno_bot.reporting import trade_log
-from fno_bot.audit.event_log import AUDIT_DIR
-from fno_bot.audit.shadow_log import SHADOW_LOG_DIR
+from fno_bot.strategies.session_router import route_session
 
 IST = ZoneInfo("Asia/Kolkata")
-
 app = Flask(__name__)
 
-REFRESH_SECONDS = 5
+
+def _runtime_paths(root=None):
+    root = root or os.environ.get("FNO_DASHBOARD_RUNTIME_ROOT")
+    if not root:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bot = os.path.join(os.path.abspath(root), "fno_bot")
+    today = datetime.now(IST).date().isoformat()
+    return {
+        "root": os.path.abspath(root),
+        "audit": os.path.join(bot, "audit_logs", f"events_{today}.jsonl"),
+        "trades": os.path.join(bot, "fno_trade_history.jsonl"),
+        "status": os.path.join(bot, "fno_bot_status.json"),
+        "positions": os.path.join(bot, "fno_open_positions.json"),
+    }
 
 
-def _tail_jsonl(path: str, limit: int = 20) -> list:
-    """Read the last `limit` JSON lines from a JSONL file. Returns []
-    if the file doesn't exist or any line fails to parse -- a
-    monitoring page must never crash on a partially-written line."""
+def _tail_jsonl(path, limit=5000):
     if not os.path.exists(path):
         return []
     try:
-        with open(path, "r") as f:
-            lines = f.readlines()
-    except Exception:
+        with open(path) as handle:
+            lines = handle.readlines()[-limit:]
+    except OSError:
         return []
     records = []
-    for line in lines[-limit:]:
-        line = line.strip()
-        if not line:
-            continue
+    for line in lines:
         try:
             records.append(json.loads(line))
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             continue
     return records
 
 
-def _today_audit_events(limit: int = 30) -> list:
-    path = os.path.join(AUDIT_DIR, f"events_{datetime.now(IST).date().isoformat()}.jsonl")
-    return list(reversed(_tail_jsonl(path, limit)))
+def _load_json(path, default):
+    try:
+        with open(path) as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return default
 
 
-def _today_shadow_records(limit: int = 20) -> list:
-    path = os.path.join(SHADOW_LOG_DIR, f"shadow_{datetime.now(IST).date().isoformat()}.jsonl")
-    return list(reversed(_tail_jsonl(path, limit)))
+def _event_time(record):
+    value = record.get("timestamp_ist")
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=IST)
+    except (TypeError, ValueError):
+        return None
 
 
-def _status_badge(mode: str) -> str:
-    colors = {"SHADOW": "#888", "PAPER": "#2b6cb0", "LIVE": "#c53030"}
-    color = colors.get(mode, "#888")
-    return f'<span style="background:{color};color:#fff;padding:2px 10px;border-radius:10px;font-size:0.85em;">{mode}</span>'
+def summarize_activity(events, trades, status, positions, now=None):
+    now = now or datetime.now(IST)
+    today = now.date().isoformat()
+    trades_today = [row for row in trades if row.get("date") == today]
+    wins = sum(1 for row in trades_today if (row.get("net_pnl") or 0) > 0)
+    net_pnl = sum(float(row.get("net_pnl") or 0) for row in trades_today)
+    costs = sum(float(row.get("costs") or 0) for row in trades_today)
 
+    evaluations = [row for row in events if row.get("event") == "PROFESSIONAL_SIGNAL_EVALUATED"]
+    latest_by_symbol = {}
+    rejection_counts = Counter()
+    eligible = 0
+    for row in evaluations:
+        symbol = row.get("symbol") or "?"
+        latest_by_symbol[symbol] = row
+        if row.get("direction"):
+            eligible += 1
+        else:
+            rejection_counts[row.get("reason") or "unspecified"] += 1
 
-PAGE_TEMPLATE = """
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta http-equiv="refresh" content="{refresh}">
-<title>F&O Opening Scalper -- Monitor</title>
-<style>
-  body {{ font-family: -apple-system, Helvetica, Arial, sans-serif; background:#0f1115; color:#e6e6e6; margin:0; padding:24px; }}
-  h1 {{ font-size:1.3em; margin-bottom:4px; }}
-  .sub {{ color:#9aa0a6; margin-bottom:20px; font-size:0.9em; }}
-  .cards {{ display:flex; gap:16px; flex-wrap:wrap; margin-bottom:24px; }}
-  .card {{ background:#1a1d24; border:1px solid #2a2e37; border-radius:8px; padding:16px 20px; min-width:150px; }}
-  .card .label {{ color:#9aa0a6; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
-  .card .value {{ font-size:1.5em; margin-top:4px; }}
-  .win {{ color:#48bb78; }}
-  .loss {{ color:#f56565; }}
-  table {{ width:100%; border-collapse:collapse; margin-bottom:28px; font-size:0.9em; }}
-  th, td {{ text-align:left; padding:6px 10px; border-bottom:1px solid #2a2e37; }}
-  th {{ color:#9aa0a6; font-weight:normal; font-size:0.8em; text-transform:uppercase; }}
-  section h2 {{ font-size:1em; color:#c0c4cc; border-bottom:1px solid #2a2e37; padding-bottom:6px; }}
-  .empty {{ color:#666; font-style:italic; padding:10px 0; }}
-  code {{ background:#1a1d24; padding:1px 6px; border-radius:4px; }}
-</style>
-</head>
-<body>
-  <h1>F&amp;O Opening Scalper &mdash; Monitor {mode_badge}</h1>
-  <div class="sub">Read-only. Auto-refreshes every {refresh}s. Separate process from the equity dashboard (port 5000) and from the trading bot itself -- purely a viewer of its log files.</div>
-
-  <div class="cards">
-    <div class="card"><div class="label">State</div><div class="value">{state}</div></div>
-    <div class="card"><div class="label">Underlying</div><div class="value">{underlying}</div></div>
-    <div class="card"><div class="label">Status updated</div><div class="value" style="font-size:0.95em;">{status_updated}</div></div>
-    <div class="card"><div class="label">Trades today</div><div class="value">{count}</div></div>
-    <div class="card"><div class="label">Wins / Losses</div><div class="value"><span class="win">{wins}</span> / <span class="loss">{losses}</span></div></div>
-    <div class="card"><div class="label">Net P&amp;L today</div><div class="value {pnl_class}">{net_pnl}</div></div>
-  </div>
-
-  <section>
-    <h2>Recent closed trades</h2>
-    {trades_table}
-  </section>
-
-  <section>
-    <h2>Recent audit events</h2>
-    {events_table}
-  </section>
-
-  <section>
-    <h2>Shadow / counterfactual captures (no-trade evidence)</h2>
-    {shadow_table}
-  </section>
-
-</body>
-</html>
-"""
-
-
-def _render_trades_table(trades: list) -> str:
-    if not trades:
-        return '<div class="empty">No closed trades yet today.</div>'
-    rows = []
-    for t in reversed(trades[-15:]):
-        result_class = "win" if t.get("result") == "WIN" else "loss"
-        rows.append(
-            f"<tr><td>{t.get('time','')}</td><td>{t.get('underlying','')}</td>"
-            f"<td>{t.get('strike','')} {t.get('option_type','')}</td>"
-            f"<td>{t.get('quantity','')}</td>"
-            f"<td>{t.get('entry_price','')} &rarr; {t.get('exit_price','')}</td>"
-            f"<td>{t.get('exit_reason','')}</td>"
-            f"<td class='{result_class}'>{t.get('net_pnl','')}</td>"
-            f"<td>{t.get('mode','')}</td></tr>"
-        )
-    return (
-        "<table><tr><th>Time</th><th>Underlying</th><th>Contract</th><th>Qty</th>"
-        "<th>Entry &rarr; Exit</th><th>Exit reason</th><th>Net P&amp;L</th><th>Mode</th></tr>"
-        + "".join(rows) + "</table>"
+    timed_events = [(_event_time(row), row) for row in events]
+    latest_event_at = next((stamp for stamp, _ in reversed(timed_events) if stamp), None)
+    event_age = (now - latest_event_at).total_seconds() if latest_event_at else None
+    socket_events = [row.get("event") for row in events if row.get("event") in {
+        "WEBSOCKET_READY", "WEBSOCKET_CLOSED", "WEBSOCKET_ERROR"
+    }]
+    socket_state = "CONNECTED" if socket_events and socket_events[-1] == "WEBSOCKET_READY" else (
+        "DISCONNECTED" if socket_events else "UNKNOWN"
     )
 
+    candidates = []
+    for symbol, row in latest_by_symbol.items():
+        metrics = row.get("metrics") or {}
+        candidates.append({
+            "symbol": symbol, "direction": row.get("direction"),
+            "confidence": row.get("confidence"), "reason": row.get("reason"),
+            "spread_pct": row.get("max_spread_pct"),
+            "spot_roc_pct": metrics.get("underlying_roc_pct"),
+            "ce_roc_pct": metrics.get("ce_roc_pct"), "pe_roc_pct": metrics.get("pe_roc_pct"),
+            "volume_delta": metrics.get("selected_volume_delta"), "oi": metrics.get("selected_oi"),
+            "time": (row.get("timestamp_ist") or "")[11:19],
+        })
+    candidates.sort(key=lambda row: (row["direction"] is None, -(row["confidence"] or 0), row["symbol"]))
 
-def _render_events_table(events: list) -> str:
-    if not events:
-        return '<div class="empty">No audit events logged yet today.</div>'
-    rows = []
-    for e in events:
-        ts = e.get("timestamp_ist", "")[11:19] if e.get("timestamp_ist") else ""
-        extra = {k: v for k, v in e.items() if k not in ("timestamp_ist", "event")}
-        extra_str = ", ".join(f"{k}={v}" for k, v in list(extra.items())[:4])
-        rows.append(f"<tr><td>{ts}</td><td><code>{e.get('event','')}</code></td><td>{extra_str}</td></tr>")
-    return "<table><tr><th>Time</th><th>Event</th><th>Details</th></tr>" + "".join(rows) + "</table>"
+    recent_events = [{
+        "time": (row.get("timestamp_ist") or "")[11:19], "event": row.get("event"),
+        "symbol": row.get("symbol"),
+        "message": row.get("reason") or row.get("exit_reason") or row.get("direction") or "",
+    } for row in reversed(events[-60:])]
+
+    return {
+        "generated_at": now.isoformat(), "session": route_session(now).value,
+        "mode": status.get("mode", "PAPER"), "bot_state": status.get("state", "UNKNOWN"),
+        "socket_state": socket_state,
+        "last_event_age_seconds": round(event_age, 1) if event_age is not None else None,
+        "scanned_symbols": len(latest_by_symbol), "evaluations": len(evaluations),
+        "eligible_evaluations": eligible,
+        "open_positions": list((positions.get("positions") or {}).values()),
+        "summary": {"trades": len(trades_today), "wins": wins, "losses": len(trades_today) - wins,
+                    "win_rate_pct": round(wins / len(trades_today) * 100, 1) if trades_today else None,
+                    "net_pnl": round(net_pnl, 2), "costs": round(costs, 2)},
+        "candidates": candidates[:50],
+        "rejections": [{"reason": reason, "count": count} for reason, count in rejection_counts.most_common(12)],
+        "trades": list(reversed(trades_today[-25:])), "events": recent_events,
+    }
 
 
-def _render_shadow_table(records: list) -> str:
-    if not records:
-        return '<div class="empty">No shadow/counterfactual captures yet today.</div>'
-    rows = []
-    for r in records:
-        ts = r.get("timestamp_ist", "")[11:19] if r.get("timestamp_ist") else ""
-        rows.append(
-            f"<tr><td>{ts}</td><td>CE ref {r.get('reference_ce_price','')}</td>"
-            f"<td>CE MFE {r.get('ce_mfe_pct')}% / MAE {r.get('ce_mae_pct')}%</td>"
-            f"<td>PE ref {r.get('reference_pe_price','')}</td>"
-            f"<td>PE MFE {r.get('pe_mfe_pct')}% / MAE {r.get('pe_mae_pct')}%</td></tr>"
-        )
-    return "<table><tr><th>Time</th><th>CE ref</th><th>CE MFE/MAE</th><th>PE ref</th><th>PE MFE/MAE</th></tr>" + "".join(rows) + "</table>"
+def current_activity(root=None):
+    paths = _runtime_paths(root)
+    activity = summarize_activity(
+        _tail_jsonl(paths["audit"]), _tail_jsonl(paths["trades"], 10000),
+        _load_json(paths["status"], {}), _load_json(paths["positions"], {}),
+    )
+    activity["runtime_root"] = paths["root"]
+    return activity
+
+
+PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Options Command Center</title>
+<style>:root{--bg:#071018;--panel:#0d1923;--line:#20313d;--text:#e7f0f4;--muted:#8296a3;--cyan:#38d6c7;--green:#42d392;--red:#ff6b7a;--amber:#f4bd61}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% -10%,#123541 0,transparent 35%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}.shell{max-width:1500px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:20px}.eyebrow{color:var(--cyan);font-size:12px;letter-spacing:.15em;text-transform:uppercase;font-weight:700}h1{margin:5px 0;font-size:28px}.muted{color:var(--muted);font-size:13px}.pills{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.pill{border:1px solid var(--line);background:#0b151e;padding:7px 11px;border-radius:999px;font-size:12px}.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}.grid{display:grid;grid-template-columns:repeat(6,minmax(130px,1fr));gap:12px}.card,.panel{background:linear-gradient(145deg,rgba(17,34,45,.95),rgba(10,22,31,.95));border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 35px rgba(0,0,0,.18)}.card{padding:15px}.label{text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-size:10px}.value{font-size:24px;font-weight:700;margin-top:7px}.layout{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;margin-top:14px}.panel{padding:16px;overflow:hidden}.panel h2{font-size:14px;margin:0 0 12px}.scroll{overflow:auto;max-height:440px}table{width:100%;border-collapse:collapse;font-size:12px}th{position:sticky;top:0;background:#0e1b25;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-size:9px}th,td{text-align:left;padding:9px;border-bottom:1px solid #192a35;white-space:nowrap}.reason{white-space:normal;max-width:350px}.barrow{display:grid;grid-template-columns:minmax(130px,1fr) 3fr 42px;gap:8px;align-items:center;margin:9px 0;font-size:11px}.bar{height:8px;background:#142630;border-radius:9px;overflow:hidden}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),#5987ff)}.empty{color:var(--muted);padding:25px;text-align:center}.footer{margin-top:14px;color:var(--muted);font-size:11px}@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}.top{flex-direction:column}.pills{justify-content:flex-start}}</style></head>
+<body><main class="shell"><header class="top"><div><div class="eyebrow">Zerodha Live Data · Paper Only</div><h1>Options Command Center</h1><div class="muted">Opening momentum + completed-candle intraday monitoring. Read-only; no order controls.</div></div><div class="pills"><span class="pill" id="mode">—</span><span class="pill" id="session">—</span><span class="pill" id="socket">—</span><span class="pill" id="fresh">—</span></div></header>
+<section class="grid"><div class="card"><div class="label">Bot state</div><div class="value" id="state">—</div></div><div class="card"><div class="label">Symbols scanned</div><div class="value" id="symbols">0</div></div><div class="card"><div class="label">Evaluations</div><div class="value" id="evaluations">0</div></div><div class="card"><div class="label">Trades</div><div class="value" id="trades">0</div></div><div class="card"><div class="label">Win rate</div><div class="value" id="winrate">—</div></div><div class="card"><div class="label">Net P&amp;L</div><div class="value" id="pnl">₹0.00</div></div></section>
+<section class="layout"><div class="panel"><h2>Live candidate board</h2><div class="scroll"><table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Score</th><th>Spread</th><th>Spot ROC</th><th>CE / PE ROC</th><th>OI</th><th>Latest decision</th></tr></thead><tbody id="candidates"></tbody></table></div></div><div class="panel"><h2>Top rejection reasons</h2><div id="rejections"></div></div></section>
+<section class="layout"><div class="panel"><h2>Paper trades</h2><div class="scroll"><table><thead><tr><th>Time</th><th>Underlying</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Net P&amp;L</th></tr></thead><tbody id="tradeRows"></tbody></table></div></div><div class="panel"><h2>Recent activity</h2><div class="scroll"><table><thead><tr><th>Time</th><th>Event</th><th>Symbol</th><th>Message</th></tr></thead><tbody id="events"></tbody></table></div></div></section><div class="footer">Runtime: <span id="root">—</span> · Updated <span id="updated">—</span> · refresh every 3 seconds</div></main>
+<script>const $=id=>document.getElementById(id),fmt=n=>n==null?'—':Number(n).toFixed(2),esc=v=>String(v).replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x])),cell=(v,c='')=>`<td class="${c}">${esc(v??'—')}</td>`;function rows(t,d,r,c){$(t).innerHTML=d.length?d.map(r).join(''):`<tr><td colspan="${c}" class="empty">No records yet</td></tr>`}async function refresh(){try{const d=await fetch('/api/activity',{cache:'no-store'}).then(r=>r.json());$('mode').textContent=d.mode;$('session').textContent=d.session;$('socket').textContent=d.socket_state;$('socket').className='pill '+(d.socket_state==='CONNECTED'?'ok':'bad');$('fresh').textContent=d.last_event_age_seconds==null?'NO EVENTS':`${d.last_event_age_seconds}s old`;$('fresh').className='pill '+(d.last_event_age_seconds!=null&&d.last_event_age_seconds<10?'ok':'warn');$('state').textContent=d.bot_state;$('symbols').textContent=d.scanned_symbols;$('evaluations').textContent=d.evaluations;$('trades').textContent=d.summary.trades;$('winrate').textContent=d.summary.win_rate_pct==null?'—':`${d.summary.win_rate_pct}%`;$('pnl').textContent=`₹${fmt(d.summary.net_pnl)}`;$('pnl').className='value '+(d.summary.net_pnl>0?'ok':d.summary.net_pnl<0?'bad':'');$('root').textContent=d.runtime_root;$('updated').textContent=new Date(d.generated_at).toLocaleTimeString();rows('candidates',d.candidates,c=>`<tr>${cell(c.time)}${cell(c.symbol)}${cell(c.direction||'WAIT',c.direction?'ok':'warn')}${cell(fmt(c.confidence))}${cell(fmt(c.spread_pct)+'%')}${cell(fmt(c.spot_roc_pct)+'%')}${cell(fmt(c.ce_roc_pct)+' / '+fmt(c.pe_roc_pct))}${cell(c.oi)}${cell(c.reason,'reason')}</tr>`,9);const max=Math.max(1,...d.rejections.map(x=>x.count));$('rejections').innerHTML=d.rejections.length?d.rejections.map(x=>`<div class="barrow"><span>${esc(x.reason)}</span><div class="bar"><i style="width:${x.count/max*100}%"></i></div><b>${x.count}</b></div>`).join(''):'<div class="empty">No rejected signals yet</div>';rows('tradeRows',d.trades,t=>`<tr>${cell(t.time)}${cell(t.underlying)}${cell(`${t.strike} ${t.option_type}`)}${cell(t.quantity)}${cell(fmt(t.entry_price))}${cell(fmt(t.exit_price))}${cell(t.exit_reason)}${cell('₹'+fmt(t.net_pnl),t.net_pnl>0?'ok':'bad')}</tr>`,8);rows('events',d.events,e=>`<tr>${cell(e.time)}${cell(e.event)}${cell(e.symbol)}${cell(e.message,'reason')}</tr>`,4)}catch(e){$('fresh').textContent='DASHBOARD ERROR';$('fresh').className='pill bad'}}refresh();setInterval(refresh,3000);</script></body></html>"""
 
 
 @app.route("/")
 def index():
-    status = trade_log.load_bot_status() or {}
-    summary = trade_log.get_today_summary()
-    trades = trade_log.get_trade_history(limit=50)
-    events = _today_audit_events()
-    shadow = _today_shadow_records()
+    return PAGE
 
-    net_pnl = summary.get("total_net_pnl", 0) or 0
-    pnl_class = "win" if net_pnl > 0 else ("loss" if net_pnl < 0 else "")
 
-    html = PAGE_TEMPLATE.format(
-        refresh=REFRESH_SECONDS,
-        mode_badge=_status_badge(status.get("mode", "?")),
-        state=status.get("state", "UNKNOWN"),
-        underlying=status.get("underlying", "-"),
-        status_updated=status.get("updated_at", "-") if status else "no status file yet -- bot not started",
-        count=summary.get("count", 0),
-        wins=summary.get("wins", 0),
-        losses=summary.get("losses", 0),
-        net_pnl=round(net_pnl, 2),
-        pnl_class=pnl_class,
-        trades_table=_render_trades_table(trades),
-        events_table=_render_events_table(events),
-        shadow_table=_render_shadow_table(shadow),
-    )
-    return html
+@app.route("/api/activity")
+def api_activity():
+    return jsonify(current_activity())
 
 
 @app.route("/api/status")
 def api_status():
-    """Small JSON endpoint in case you want to poll this from a
-    script or from the equity dashboard's UI later, without ever
-    importing fno_bot code into that process -- HTTP stays the only
-    coupling point, which is what keeps the isolation guarantee."""
-    status = trade_log.load_bot_status() or {}
-    summary = trade_log.get_today_summary()
-    return {"status": status, "today_summary": summary}
+    activity = current_activity()
+    return jsonify({key: activity[key] for key in (
+        "generated_at", "session", "mode", "bot_state", "socket_state", "summary"
+    )})
 
 
 if __name__ == "__main__":
-    # Port 5050, deliberately different from the equity dashboard's
-    # 5000, so both can run at the same time without collision.
-    app.run(host="0.0.0.0", port=5050, debug=False)
+    app.run(host=os.environ.get("FNO_DASHBOARD_HOST", "0.0.0.0"),
+            port=int(os.environ.get("FNO_DASHBOARD_PORT", "5050")), debug=False)
