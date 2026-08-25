@@ -59,12 +59,19 @@ class ShadowSession:
     def __init__(
         self, params_rotation: RotationParams, params_entry: EntryParams, params_exit: ExitParams,
         window_seconds: float = 1.0, confirmation_required_count: int = 3, quantity: int = 1,
+        mode: str = "SHADOW", paper_slippage_pct: float = 0.0,
     ):
+        if mode not in ("SHADOW", "PAPER"):
+            raise ValueError("Premium Rotation supports SHADOW or PAPER only")
+        if paper_slippage_pct < 0:
+            raise ValueError("paper_slippage_pct must be non-negative")
         self.params_rotation = params_rotation
         self.params_entry = params_entry
         self.params_exit = params_exit
         self.window_seconds = window_seconds
         self.quantity = quantity
+        self.mode = mode
+        self.paper_slippage_pct = paper_slippage_pct
         self.tracker = ConfirmationTracker(required_count=confirmation_required_count)
         self.history: List[TickSample] = []
         self.open_position: Optional[OpenPosition] = None
@@ -102,7 +109,10 @@ class ShadowSession:
             )
             trade_opened = None
             if eligibility.eligible:
-                entry_price = tick.ce_price if eligibility.direction == "CE" else tick.pe_price
+                market_price = tick.ce_price if eligibility.direction == "CE" else tick.pe_price
+                entry_price = market_price
+                if self.mode == "PAPER":
+                    entry_price *= 1 + self.paper_slippage_pct / 100
                 self.open_position = OpenPosition(
                     direction=eligibility.direction, entry_price=entry_price,
                     entry_time=tick.timestamp, peak_favorable_price=entry_price,
@@ -131,9 +141,12 @@ class ShadowSession:
         )
         trade_closed = None
         if exit_reason is not None:
+            exit_price = current_price
+            if self.mode == "PAPER":
+                exit_price *= 1 - self.paper_slippage_pct / 100
             trade_closed = ClosedTrade(
                 direction=self.open_position.direction, entry_price=self.open_position.entry_price,
-                entry_time=self.open_position.entry_time, exit_price=current_price, exit_time=tick.timestamp,
+                entry_time=self.open_position.entry_time, exit_price=exit_price, exit_time=tick.timestamp,
                 exit_reason=exit_reason, quantity=self.quantity,
                 mfe_points=self.mfe_points, mae_points=self.mae_points,
             )
