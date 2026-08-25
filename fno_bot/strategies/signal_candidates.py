@@ -100,6 +100,83 @@ def premium_rate_of_change(snapshot: MarketSnapshot, min_points: int = 2) -> Dir
     )
 
 
+def confirmed_momentum(snapshot: MarketSnapshot, min_points: int = 3) -> DirectionSignal:
+    """Direction only when spot, option momentum, and book pressure agree.
+
+    This is deliberately an abstaining entry signal.  Absolute premium level
+    is never used to choose CE or PE: a cheap, falling option must not become
+    attractive merely because it is cheap.
+    """
+    if snapshot.underlying_prev_close is None or snapshot.underlying_prev_close <= 0:
+        return DirectionSignal("confirmed_momentum", None, None, "previous close unavailable", {})
+    if len(snapshot.ce_history) < min_points or len(snapshot.pe_history) < min_points:
+        return DirectionSignal("confirmed_momentum", None, None, "collecting option momentum history", {})
+
+    span = min(
+        snapshot.ce_history[-1].at_monotonic - snapshot.ce_history[0].at_monotonic,
+        snapshot.pe_history[-1].at_monotonic - snapshot.pe_history[0].at_monotonic,
+    )
+    if span < 2.0:
+        return DirectionSignal("confirmed_momentum", None, None, "momentum window shorter than 2 seconds", {"span_seconds": span})
+
+    gap_pct = (
+        (snapshot.underlying_price - snapshot.underlying_prev_close)
+        / snapshot.underlying_prev_close * 100
+    )
+    ce_start = snapshot.ce_history[0].price
+    pe_start = snapshot.pe_history[0].price
+    if ce_start <= 0 or pe_start <= 0:
+        return DirectionSignal("confirmed_momentum", None, None, "non-positive history price", {})
+    ce_roc_pct = (snapshot.ce_history[-1].price - ce_start) / ce_start * 100
+    pe_roc_pct = (snapshot.pe_history[-1].price - pe_start) / pe_start * 100
+
+    def pressure(bid_qty, ask_qty):
+        total = (bid_qty or 0) + (ask_qty or 0)
+        return None if total <= 0 else ((bid_qty or 0) - (ask_qty or 0)) / total
+
+    ce_pressure = pressure(snapshot.ce_best_bid_qty, snapshot.ce_best_ask_qty)
+    pe_pressure = pressure(snapshot.pe_best_bid_qty, snapshot.pe_best_ask_qty)
+    metrics = {
+        "gap_pct": gap_pct, "ce_roc_pct": ce_roc_pct, "pe_roc_pct": pe_roc_pct,
+        "ce_pressure": ce_pressure, "pe_pressure": pe_pressure, "span_seconds": span,
+    }
+    if ce_pressure is None or pe_pressure is None:
+        return DirectionSignal("confirmed_momentum", None, None, "book pressure unavailable", metrics)
+
+    min_gap_pct = 0.10
+    min_leg_roc_pct = 0.25
+    min_relative_edge_pct = 0.25
+    if abs(gap_pct) < min_gap_pct:
+        return DirectionSignal("confirmed_momentum", None, 0.0, "underlying direction too weak", metrics)
+
+    direction = "CE" if gap_pct > 0 else "PE"
+    selected_roc = ce_roc_pct if direction == "CE" else pe_roc_pct
+    opposing_roc = pe_roc_pct if direction == "CE" else ce_roc_pct
+    selected_pressure = ce_pressure if direction == "CE" else pe_pressure
+    opposing_pressure = pe_pressure if direction == "CE" else ce_pressure
+
+    if selected_roc < min_leg_roc_pct:
+        return DirectionSignal("confirmed_momentum", None, 0.0, "directional option is not rising", metrics)
+    if selected_roc - opposing_roc < min_relative_edge_pct:
+        return DirectionSignal("confirmed_momentum", None, 0.0, "insufficient CE/PE relative-strength edge", metrics)
+    if selected_pressure <= opposing_pressure or selected_pressure < 0:
+        return DirectionSignal("confirmed_momentum", None, 0.0, "order book does not confirm direction", metrics)
+
+    confidence = min(
+        100.0,
+        abs(gap_pct) * 100
+        + selected_roc * 10
+        + (selected_roc - opposing_roc) * 10
+        + max(selected_pressure - opposing_pressure, 0) * 25,
+    )
+    return DirectionSignal(
+        "confirmed_momentum", direction, confidence,
+        f"spot/{direction} momentum/book agree; gap={gap_pct:+.3f}% "
+        f"ce_roc={ce_roc_pct:+.3f}% pe_roc={pe_roc_pct:+.3f}%",
+        metrics,
+    )
+
+
 def underlying_open_vs_prev_close(snapshot: MarketSnapshot) -> DirectionSignal:
     """
     Simple gap-direction read: underlying opened above previous close
@@ -197,6 +274,7 @@ CANDIDATE_REGISTRY: dict[str, Callable[[MarketSnapshot], DirectionSignal]] = {
     "underlying_open_vs_prev_close": underlying_open_vs_prev_close,
     "bid_ask_imbalance": bid_ask_imbalance,
     "depth_imbalance": depth_imbalance,
+    "confirmed_momentum": confirmed_momentum,
 }
 
 

@@ -5,6 +5,7 @@ from fno_bot.instruments.stock_option_universe import StockOptionPair, StockOpti
 from fno_bot.instruments.strike_selector import StrikeSelection
 from fno_bot.market_data.tick_store import NormalizedTick, TickStore
 from fno_bot.stock_options_launcher import rank_candidates
+from fno_bot.strategies.signal_candidates import TickPoint
 
 
 def _tick(token, price, bid, ask, bid_qty=100, ask_qty=100):
@@ -52,3 +53,22 @@ def test_rank_candidates_rejects_wide_spreads(monkeypatch):
     store.update(_tick(301, 120.0, 100.0, 140.0))
     store.update(_tick(302, 100.0, 99.5, 100.5))
     assert rank_candidates(store, [pair], {"WIDE": 99.0}) == []
+
+
+def test_rank_candidates_passes_history_to_confirmed_momentum(monkeypatch):
+    from fno_bot import stock_options_launcher as module
+    monkeypatch.setattr(module.cfg, "AUTHORIZED_SIGNAL", "confirmed_momentum")
+    monkeypatch.setattr(module.cfg, "MAX_TICK_AGE_MS", 1500)
+    monkeypatch.setattr(module.cfg, "MAX_SPREAD_PCT", 3.0)
+    pair = _pair("MOMO", 400)
+    store = TickStore(clock_fn=lambda: 0.0)
+    store.update(_tick(400, 101.0, None, None))
+    store.update(_tick(401, 101.0, 100.5, 101.5, 80, 20))
+    store.update(_tick(402, 99.0, 98.5, 99.5, 20, 80))
+    histories = {
+        401: [TickPoint(100.0, 0.0), TickPoint(100.5, 1.0), TickPoint(101.0, 2.1)],
+        402: [TickPoint(100.0, 0.0), TickPoint(99.5, 1.0), TickPoint(99.0, 2.1)],
+    }
+    ranked = rank_candidates(store, [pair], {"MOMO": 100.0}, histories)
+    assert len(ranked) == 1
+    assert ranked[0].authorized_result.direction == "CE"
