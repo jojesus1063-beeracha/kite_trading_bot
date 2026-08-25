@@ -71,7 +71,7 @@ if config.get("paper_trading") is not True:
     raise SystemExit("FAIL: configuration left PAPER mode")
 if report.get("status") != "success" or report.get("paper_only") is not True:
     raise SystemExit("FAIL: selector report is not successful/PAPER-only")
-if report.get("strategy") != "FULL_ZERODHA_CLEAN_TOP60_MOMENTUM":
+if report.get("strategy") != "FULL_ZERODHA_CLEAN_TOP120_MOMENTUM":
     raise SystemExit("FAIL: unexpected selector strategy")
 if report.get("mode") != "WRITE_CONFIG":
     raise SystemExit("FAIL: selector did not run in WRITE_CONFIG mode")
