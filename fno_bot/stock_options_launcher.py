@@ -10,6 +10,7 @@ LIVE is deliberately blocked until multi-underlying PAPER evidence is reviewed.
 import logging
 import sys
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional
@@ -34,6 +35,7 @@ from fno_bot.launcher import (
 from fno_bot.market_data.tick_store import TickStore
 from fno_bot.market_data.ticker import FnoTicker
 from fno_bot.strategies.opening_scalper import build_snapshot, evaluate_signals
+from fno_bot.strategies.signal_candidates import TickPoint
 
 logger = logging.getLogger("fno.stock_options_launcher")
 IST = ZoneInfo("Asia/Kolkata")
@@ -90,6 +92,7 @@ def rank_candidates(
     tick_store: TickStore,
     pairs: list[StockOptionPair],
     previous_closes: dict[str, Optional[float]],
+    option_histories=None,
 ) -> list[RankedCandidate]:
     """Returns fresh, spread-valid authorized candidates in best-first order."""
     ranked = []
@@ -115,6 +118,8 @@ def rank_candidates(
         snapshot = build_snapshot(
             tick_store, underlying.instrument_token, tokens[1], tokens[2],
             previous_closes.get(underlying.symbol),
+            ce_history=tuple((option_histories or {}).get(tokens[1], ())),
+            pe_history=tuple((option_histories or {}).get(tokens[2], ())),
         )
         if snapshot is None:
             continue
@@ -217,9 +222,19 @@ def run_all_stock_options():
         )
         broker = get_broker(kite, tick_store) if cfg.MODE == "PAPER" else None
         window_end = _today_at(cfg.ENTRY_END_TIME)
+        option_histories = defaultdict(lambda: deque(maxlen=6))
 
         while datetime.now(IST) < window_end:
-            ranked = rank_candidates(tick_store, pairs, previous_closes)
+            sampled_at = time.monotonic()
+            for pair in pairs:
+                for token in (
+                    pair.selection.ce_contract.instrument_token,
+                    pair.selection.pe_contract.instrument_token,
+                ):
+                    tick = tick_store.latest(token)
+                    if tick is not None:
+                        option_histories[token].append(TickPoint(tick.last_price, sampled_at))
+            ranked = rank_candidates(tick_store, pairs, previous_closes, option_histories)
             if ranked:
                 top = ranked[0]
                 log_event(
