@@ -10,6 +10,9 @@ def _raw_tick(token=101, price=196.80, bid=196.5, ask=197.0, bid_qty=50, ask_qty
             "sell": [{"price": ask, "quantity": ask_qty}],
         },
         "volume_traded": 1000,
+        "buy_quantity": 5000,
+        "sell_quantity": 3000,
+        "oi": 25000,
     }
 
 
@@ -21,6 +24,9 @@ def test_normalize_kite_tick_extracts_depth():
     assert tick.best_ask == 197.0
     assert tick.best_bid_qty == 50
     assert tick.best_ask_qty == 40
+    assert tick.total_buy_qty == 5000
+    assert tick.total_sell_qty == 3000
+    assert tick.open_interest == 25000
 
 
 def test_normalize_kite_tick_returns_none_for_malformed_tick():

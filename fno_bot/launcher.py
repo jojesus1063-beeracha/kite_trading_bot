@@ -378,7 +378,7 @@ class OpenPosition:
 
 
 def run_entry(broker, cfg_ref, tick_store, selection: StrikeSelection, authorized_result, ticker=None,
-              position_key=None):
+              position_key=None, signal_still_valid_fn=None):
     """GENERATE_SIGNAL -> ENTRY_PENDING. Sizes the position, checks the
     daily kill switch, then executes the entry through execution/entry.py
     -- IDENTICAL code path for PAPER and LIVE (only `broker` differs)."""
@@ -412,7 +412,7 @@ def run_entry(broker, cfg_ref, tick_store, selection: StrikeSelection, authorize
     result = execute_entry(
         broker, symbol=contract.tradingsymbol, exchange=contract.exchange, quantity=sizing.quantity,
         original_reference_price=reference_price, cfg=cfg_ref, fetch_fresh_market=fetch_fresh_market,
-        signal_still_valid_fn=lambda: True,  # see module docstring: no validated invalidation rule yet
+        signal_still_valid_fn=signal_still_valid_fn or (lambda: True),
         audit_fn=lambda event, **data: log_event(event, **data),
     )
 
@@ -435,7 +435,7 @@ def run_entry(broker, cfg_ref, tick_store, selection: StrikeSelection, authorize
 
 
 def run_monitor_and_exit(broker, ticker, tick_store, position: OpenPosition, kill_switch, cfg_ref,
-                         underlying_name=None):
+                         underlying_name=None, signal_still_valid_fn=None):
     """POSITION_OPEN -> MONITOR -> EXIT_PENDING -> CLOSED. Polls once
     per second; escalates to a FORCE_EXIT if disconnected beyond the
     configured recovery timeout while a position is open (spec #26)."""
@@ -467,7 +467,7 @@ def run_monitor_and_exit(broker, ticker, tick_store, position: OpenPosition, kil
         result, excursion, current_price = monitor_step(
             tick_store=tick_store, option_token=position.option_token, direction="BUY",
             entry_price=position.entry_price, excursion=excursion, entry_monotonic=position.entry_monotonic,
-            signal_still_valid_fn=lambda: True, cfg=cfg_ref,
+            signal_still_valid_fn=signal_still_valid_fn or (lambda: True), cfg=cfg_ref,
             audit_fn=lambda event, **data: log_event(event, **data),
         )
 

@@ -93,6 +93,8 @@ def rank_candidates(
     pairs: list[StockOptionPair],
     previous_closes: dict[str, Optional[float]],
     option_histories=None,
+    confirmation_streaks=None,
+    audit_fn=None,
 ) -> list[RankedCandidate]:
     """Returns fresh, spread-valid authorized candidates in best-first order."""
     ranked = []
@@ -112,7 +114,11 @@ def rank_candidates(
         if ce_spread is None or pe_spread is None:
             continue
         max_spread = max(ce_spread, pe_spread)
-        if max_spread > cfg.MAX_SPREAD_PCT:
+        professional = cfg.AUTHORIZED_SIGNAL == "professional_momentum"
+        spread_limit = min(cfg.MAX_SPREAD_PCT, 1.5) if professional else cfg.MAX_SPREAD_PCT
+        if max_spread > spread_limit:
+            continue
+        if professional and selection.expiry <= date.today():
             continue
 
         snapshot = build_snapshot(
@@ -120,12 +126,40 @@ def rank_candidates(
             previous_closes.get(underlying.symbol),
             ce_history=tuple((option_histories or {}).get(tokens[1], ())),
             pe_history=tuple((option_histories or {}).get(tokens[2], ())),
+            underlying_history=tuple((option_histories or {}).get(tokens[0], ())),
         )
         if snapshot is None:
             continue
-        _, authorized = evaluate_signals(snapshot, cfg.AUTHORIZED_SIGNAL)
+        all_results, authorized = evaluate_signals(snapshot, cfg.AUTHORIZED_SIGNAL)
+        observed = next((item for item in all_results if item.candidate == cfg.AUTHORIZED_SIGNAL), None)
+        if audit_fn is not None and observed is not None:
+            audit_fn(
+                "PROFESSIONAL_SIGNAL_EVALUATED",
+                symbol=underlying.symbol,
+                direction=observed.direction,
+                confidence=observed.confidence,
+                reason=observed.reason,
+                metrics=observed.raw_metrics,
+                max_spread_pct=max_spread,
+            )
         if authorized is None or authorized.confidence is None:
+            if confirmation_streaks is not None:
+                confirmation_streaks[underlying.symbol] = 0
             continue
+        selected_tick = tick_store.latest(tokens[1] if authorized.direction == "CE" else tokens[2])
+        selected_contract = selection.ce_contract if authorized.direction == "CE" else selection.pe_contract
+        if professional and (
+            selected_tick.last_price < 20.0
+            or selected_tick.best_bid_qty is None
+            or selected_tick.best_bid_qty < selected_contract.lot_size
+        ):
+            if confirmation_streaks is not None:
+                confirmation_streaks[underlying.symbol] = 0
+            continue
+        if professional and confirmation_streaks is not None:
+            confirmation_streaks[underlying.symbol] += 1
+            if confirmation_streaks[underlying.symbol] < 3:
+                continue
         ranked.append(RankedCandidate(
             pair=pair,
             authorized_result=authorized,
@@ -195,6 +229,42 @@ def select_and_subscribe_atm_pairs(
     return pairs, previous_closes
 
 
+def build_signal_validator(pair, tick_store, histories, previous_close, expected_direction):
+    """Require three consecutive live failures before invalidating a position."""
+    invalid_streak = 0
+
+    def validate():
+        nonlocal invalid_streak
+        sampled_at = time.monotonic()
+        tokens = (
+            pair.underlying.instrument_token,
+            pair.selection.ce_contract.instrument_token,
+            pair.selection.pe_contract.instrument_token,
+        )
+        for token in tokens:
+            tick = tick_store.latest(token)
+            history = histories[token]
+            if tick is not None and (not history or sampled_at - history[-1].at_monotonic >= 0.8):
+                history.append(TickPoint(
+                    tick.last_price, sampled_at, tick.volume, tick.open_interest,
+                    tick.total_buy_qty, tick.total_sell_qty,
+                ))
+        snapshot = build_snapshot(
+            tick_store, tokens[0], tokens[1], tokens[2], previous_close,
+            ce_history=tuple(histories[tokens[1]]),
+            pe_history=tuple(histories[tokens[2]]),
+            underlying_history=tuple(histories[tokens[0]]),
+        )
+        if snapshot is None:
+            invalid_streak += 1
+        else:
+            _, current = evaluate_signals(snapshot, cfg.AUTHORIZED_SIGNAL)
+            invalid_streak = 0 if current is not None and current.direction == expected_direction else invalid_streak + 1
+        return invalid_streak < 3
+
+    return validate
+
+
 def run_all_stock_options():
     cfg.validate_mode()
     if cfg.MODE == "LIVE" and not cfg.ALL_STOCK_OPTIONS_LIVE_ENABLED:
@@ -222,19 +292,28 @@ def run_all_stock_options():
         )
         broker = get_broker(kite, tick_store) if cfg.MODE == "PAPER" else None
         window_end = _today_at(cfg.ENTRY_END_TIME)
-        option_histories = defaultdict(lambda: deque(maxlen=6))
+        option_histories = defaultdict(lambda: deque(maxlen=31))
+        confirmation_streaks = defaultdict(int)
 
         while datetime.now(IST) < window_end:
             sampled_at = time.monotonic()
             for pair in pairs:
                 for token in (
+                    pair.underlying.instrument_token,
                     pair.selection.ce_contract.instrument_token,
                     pair.selection.pe_contract.instrument_token,
                 ):
                     tick = tick_store.latest(token)
                     if tick is not None:
-                        option_histories[token].append(TickPoint(tick.last_price, sampled_at))
-            ranked = rank_candidates(tick_store, pairs, previous_closes, option_histories)
+                        option_histories[token].append(TickPoint(
+                            tick.last_price, sampled_at, tick.volume, tick.open_interest,
+                            tick.total_buy_qty, tick.total_sell_qty,
+                        ))
+            ranked = rank_candidates(
+                tick_store, pairs, previous_closes, option_histories,
+                confirmation_streaks=confirmation_streaks,
+                audit_fn=log_event,
+            )
             if ranked:
                 top = ranked[0]
                 log_event(
@@ -251,15 +330,21 @@ def run_all_stock_options():
                     filled = False
                     terminal_kill_switch = False
                     for candidate in ranked:
+                        signal_validator = build_signal_validator(
+                            candidate.pair, tick_store, option_histories,
+                            candidate.previous_close, candidate.authorized_result.direction,
+                        ) if cfg.AUTHORIZED_SIGNAL == "professional_momentum" else None
                         position, kill_switch, error = run_entry(
                             broker, cfg, tick_store, candidate.pair.selection,
                             candidate.authorized_result, ticker=ticker,
                             position_key=candidate.pair.underlying.symbol,
+                            signal_still_valid_fn=signal_validator,
                         )
                         if position is not None:
                             run_monitor_and_exit(
                                 broker, ticker, tick_store, position, kill_switch, cfg,
                                 underlying_name=candidate.pair.underlying.symbol,
+                                signal_still_valid_fn=signal_validator,
                             )
                             filled = True
                             break
