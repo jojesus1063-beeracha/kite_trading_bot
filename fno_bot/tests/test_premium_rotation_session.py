@@ -73,3 +73,39 @@ def test_counterfactual_handles_insufficient_future_data():
     session.on_tick(TickSample(0.0, 100, 150, 20000))
     cf = compute_counterfactual(session.history, rejection_index=0, direction="CE", horizon_seconds=[60.0])
     assert cf.horizons == {}   # no future data yet -- must not fabricate a result
+
+
+def test_paper_mode_applies_adverse_slippage_on_both_sides():
+    session = ShadowSession(
+        RotationParams(
+            ce_momentum_min_pct=1.0, pe_weakness_max_pct=0.3,
+            velocity_min=1.5, underlying_confirm_min_pct=0.005,
+        ),
+        EntryParams(score_threshold=60.0, dominance_margin=15.0,
+                    anti_chase_max_extension_pct=25.0),
+        ExitParams(profit_target_points=1.0),
+        window_seconds=1.0, confirmation_required_count=3,
+        quantity=75, mode="PAPER", paper_slippage_pct=0.5,
+    )
+    ce_seq = [100, 101.5, 103.2, 105.1, 107.3]
+    pe_seq = [150, 148.8, 147.3, 145.6, 143.7]
+    underlying_seq = [20000, 20003, 20007, 20011, 20016]
+    opened = None
+    for i in range(len(ce_seq)):
+        record = session.on_tick(TickSample(float(i), ce_seq[i], pe_seq[i], underlying_seq[i]))
+        opened = opened or record.trade_opened
+    assert opened is not None
+    assert opened["entry_price"] > ce_seq[3]
+    assert session.closed_trades
+    trade = session.closed_trades[0]
+    assert trade.quantity == 75
+    assert trade.exit_price < ce_seq[4]
+
+
+def test_live_mode_is_structurally_rejected():
+    try:
+        ShadowSession(RotationParams(), EntryParams(), ExitParams(), mode="LIVE")
+    except ValueError as exc:
+        assert "SHADOW or PAPER" in str(exc)
+    else:
+        raise AssertionError("LIVE mode must be rejected")

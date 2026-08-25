@@ -73,7 +73,8 @@ def select_atm_pair(kite, underlying_config: dict, target_date):
     index_exchange = underlying_config["index_exchange"]
     strike_interval = underlying_config["strike_interval"]
 
-    spot = kite.ltp([f"{index_exchange}:{index_symbol}"])[f"{index_exchange}:{index_symbol}"]["last_price"]
+    underlying_quote = kite.ltp([f"{index_exchange}:{index_symbol}"])[f"{index_exchange}:{index_symbol}"]
+    spot = underlying_quote["last_price"]
     instruments = kite.instruments(exchange)
     name = underlying_config.get("name", index_symbol.split()[0])
     opts = [i for i in instruments if i["name"] == name and i["segment"] == f"{exchange}-OPT"]
@@ -92,23 +93,33 @@ def select_atm_pair(kite, underlying_config: dict, target_date):
     ce = next(i for i in same_expiry if i["strike"] == atm_strike and i["instrument_type"] == "CE")
     pe = next(i for i in same_expiry if i["strike"] == atm_strike and i["instrument_type"] == "PE")
 
+    option_quotes = kite.ltp([f"{exchange}:{ce['tradingsymbol']}", f"{exchange}:{pe['tradingsymbol']}"])
+    ce_price = option_quotes[f"{exchange}:{ce['tradingsymbol']}"]["last_price"]
+    pe_price = option_quotes[f"{exchange}:{pe['tradingsymbol']}"]["last_price"]
+
     return {
         "spot": spot, "strike": atm_strike, "expiry": nearest_expiry,
+        "underlying_token": underlying_quote["instrument_token"],
         "ce_token": ce["instrument_token"], "ce_symbol": ce["tradingsymbol"],
         "pe_token": pe["instrument_token"], "pe_symbol": pe["tradingsymbol"],
+        "ce_price": ce_price, "pe_price": pe_price,
+        "lot_size": int(ce["lot_size"]),
         "strike_interval": strike_interval,
     }
 
 
-def build_session() -> ShadowSession:
+def build_session(quantity: int = 1) -> ShadowSession:
     """Experimental defaults per spec -- collected in one place so
     they're easy to find and tune once shadow data accumulates
     (section 20's parameter-replay requirement)."""
     params_rotation = RotationParams()
     params_entry = EntryParams()
     params_exit = ExitParams()
-    return ShadowSession(params_rotation, params_entry, params_exit,
-                          window_seconds=10.0, confirmation_required_count=3, quantity=1)
+    return ShadowSession(
+        params_rotation, params_entry, params_exit,
+        window_seconds=10.0, confirmation_required_count=3, quantity=quantity,
+        mode=cfg.MODE, paper_slippage_pct=cfg.PAPER_SLIPPAGE_PCT,
+    )
 
 
 def run_shadow_session(underlying_name: str = "NIFTY", market_start_hour: int = 9, market_start_minute: int = 15):
@@ -117,6 +128,8 @@ def run_shadow_session(underlying_name: str = "NIFTY", market_start_hour: int = 
     loop only reads ticks, evaluates, and logs. Structurally complete,
     UNVERIFIED against real data (see module docstring).
     """
+    if cfg.MODE == "LIVE":
+        raise RuntimeError("Premium Rotation LIVE execution is structurally disabled")
     kite = get_kite_client()
     today = datetime.now(IST).date()
     today_str = str(today)
@@ -128,7 +141,15 @@ def run_shadow_session(underlying_name: str = "NIFTY", market_start_hour: int = 
 
     day_state = load_day_state(DAY_STATE_PATH, today_str)
     kill_params = KillSwitchParams()
-    session = build_session()
+    premium_per_lot = max(selection["ce_price"], selection["pe_price"]) * selection["lot_size"]
+    lots = int(cfg.FNO_CAPITAL // premium_per_lot) if premium_per_lot > 0 else 0
+    if cfg.MODE == "PAPER" and lots < 1:
+        raise RuntimeError(
+            f"insufficient PAPER capital for one lot: capital={cfg.FNO_CAPITAL}, "
+            f"premium_per_lot={premium_per_lot:.2f}"
+        )
+    quantity = selection["lot_size"] * max(lots, 1)
+    session = build_session(quantity=quantity)
     audit_log = RotationAuditLog(AUDIT_LOG_PATH_TEMPLATE.format(date=today_str))
 
     market_open = datetime.now(IST).replace(
@@ -155,9 +176,10 @@ def run_shadow_session(underlying_name: str = "NIFTY", market_start_hour: int = 
             latest_ticks[t["instrument_token"]] = t["last_price"]
 
     def on_connect(ws, response):
-        ws.subscribe([selection["ce_token"], selection["pe_token"]])
-        ws.set_mode(ws.MODE_FULL, [selection["ce_token"], selection["pe_token"]])
-        logger.info("WEBSOCKET_READY, subscribed CE/PE")
+        tokens = [selection["underlying_token"], selection["ce_token"], selection["pe_token"]]
+        ws.subscribe(tokens)
+        ws.set_mode(ws.MODE_FULL, tokens)
+        logger.info("WEBSOCKET_READY, subscribed underlying/CE/PE")
 
     kws.on_ticks = on_ticks
     kws.on_connect = on_connect
@@ -171,14 +193,17 @@ def run_shadow_session(underlying_name: str = "NIFTY", market_start_hour: int = 
     while True:
         now_dt = datetime.now(IST)
         now_hhmm = now_dt.strftime("%H:%M")
+        if now_hhmm >= "15:30":
+            logger.info("Session end, stopping")
+            break
         seconds_since_open = (now_dt - market_open).total_seconds()
         elapsed_monotonic = time.monotonic() - session_start
 
         ce_price = latest_ticks.get(selection["ce_token"])
         pe_price = latest_ticks.get(selection["pe_token"])
-        underlying_price = selection["spot"]   # placeholder until a dedicated underlying subscription is added on the VM
+        underlying_price = latest_ticks.get(selection["underlying_token"])
 
-        if ce_price is None or pe_price is None:
+        if ce_price is None or pe_price is None or underlying_price is None:
             time.sleep(1)
             continue
 
@@ -186,6 +211,8 @@ def run_shadow_session(underlying_name: str = "NIFTY", market_start_hour: int = 
                            underlying_price=underlying_price)
 
         allowed, kill_reason = can_take_new_trade(day_state, kill_params)
+        if now_hhmm >= session.params_exit.session_cutoff_hhmm and session.open_position is None:
+            allowed, kill_reason = False, "session entry cutoff reached"
         protected = is_within_opening_protection(seconds_since_open, OPENING_PROTECTION_SECONDS)
 
         # Gates now flow all the way into evaluate_entry() -- a trade
@@ -200,6 +227,12 @@ def run_shadow_session(underlying_name: str = "NIFTY", market_start_hour: int = 
         )
         audit_log.log_observation(record)
 
+        if record.trade_opened:
+            logger.info(
+                "PAPER TRADE OPENED direction=%s fill=%.2f quantity=%s",
+                record.trade_opened["direction"], record.trade_opened["entry_price"], quantity,
+            )
+
         if record.trade_closed:
             pnl = net_pnl_for_closed_trade(record.trade_closed)
             audit_log.log_trade_closed(record.trade_closed, pnl)
@@ -213,8 +246,14 @@ def run_shadow_session(underlying_name: str = "NIFTY", market_start_hour: int = 
         ):
             logger.info("Re-ATM triggered -- reselect logic present, re-subscribe wiring not yet added on the VM")
 
-        if now_hhmm >= "15:30":
-            logger.info("Session end, stopping")
-            break
-
         time.sleep(1)
+
+    kws.close()
+
+
+def main():
+    run_shadow_session(underlying_name=cfg.UNDERLYING)
+
+
+if __name__ == "__main__":
+    main()
