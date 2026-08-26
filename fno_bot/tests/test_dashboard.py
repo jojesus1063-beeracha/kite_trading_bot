@@ -13,15 +13,16 @@ def test_summarize_activity_counts_scans_rejections_and_net_pnl():
         {"timestamp_ist": "2026-08-26T09:59:58+05:30", "event": "WEBSOCKET_READY"},
         {"timestamp_ist": "2026-08-26T09:59:59+05:30", "event": "PROFESSIONAL_SIGNAL_EVALUATED", "symbol": "TCS", "direction": None, "reason": "ADX below 20"},
         {"timestamp_ist": "2026-08-26T10:00:00+05:30", "event": "PROFESSIONAL_SIGNAL_EVALUATED", "symbol": "INFY", "direction": "CE", "confidence": 80},
+        {"timestamp_ist": "2026-08-26T10:00:00+05:30", "event": "INTRADAY_SIGNAL_EVALUATED", "symbol": "INFY", "direction": None, "reason": "ADX below 20"},
     ]
     trades = [{"date": "2026-08-26", "net_pnl": 25, "costs": 5}]
     result = summarize_activity(events, trades, {"mode": "PAPER", "state": "SCAN"}, {"positions": {}}, now)
     assert result["session"] == "INTRADAY"
     assert result["socket_state"] == "CONNECTED"
     assert result["scanned_symbols"] == 2
-    assert result["evaluations"] == 2
+    assert result["evaluations"] == 3
     assert result["summary"]["net_pnl"] == 25
-    assert result["rejections"][0] == {"reason": "ADX below 20", "count": 1}
+    assert result["rejections"][0] == {"reason": "ADX below 20", "count": 2}
 
 
 def test_current_activity_reads_configured_runtime_root(tmp_path, monkeypatch):
