@@ -420,6 +420,12 @@ def run_all_stock_options():
                             candidate.authorized_result, ticker=ticker,
                             position_key=candidate.pair.underlying.symbol,
                             signal_still_valid_fn=signal_validator,
+                            recent_option_prices=[point.price for point in option_histories[
+                                candidate.pair.selection.ce_contract.instrument_token
+                                if candidate.authorized_result.direction == "CE"
+                                else candidate.pair.selection.pe_contract.instrument_token
+                            ]],
+                            entry_spread_pct=candidate.max_spread_pct,
                         )
                         if position is not None:
                             traded_symbol = candidate.pair.underlying.symbol
