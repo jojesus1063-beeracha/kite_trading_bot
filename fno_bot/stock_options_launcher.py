@@ -358,6 +358,7 @@ def run_all_stock_options():
         )
         option_histories = defaultdict(lambda: deque(maxlen=31))
         confirmation_streaks = defaultdict(int)
+        cooldown_until = {}
         candle_cache = HistoricalCandleCache(
             kite, ttl_seconds=cfg.INTRADAY_HISTORICAL_CACHE_SECONDS
         )
@@ -381,6 +382,10 @@ def run_all_stock_options():
                 confirmation_streaks=confirmation_streaks,
                 audit_fn=log_event,
             )
+            live_ranked = [
+                candidate for candidate in live_ranked
+                if time.monotonic() >= cooldown_until.get(candidate.pair.underlying.symbol, 0)
+            ]
             session = route_session(datetime.now(IST))
             ranked = live_ranked
             if session == TradingSession.INTRADAY and cfg.INTRADAY_OPTIONS_ENABLED:
@@ -404,7 +409,6 @@ def run_all_stock_options():
                     eligible_count=len(ranked),
                 )
                 if cfg.MODE == "PAPER":
-                    filled = False
                     terminal_kill_switch = False
                     for candidate in ranked:
                         signal_validator = build_signal_validator(
@@ -418,18 +422,31 @@ def run_all_stock_options():
                             signal_still_valid_fn=signal_validator,
                         )
                         if position is not None:
+                            traded_symbol = candidate.pair.underlying.symbol
                             run_monitor_and_exit(
                                 broker, ticker, tick_store, position, kill_switch, cfg,
                                 underlying_name=candidate.pair.underlying.symbol,
                                 signal_still_valid_fn=signal_validator,
                             )
-                            filled = True
+                            cooldown_until[traded_symbol] = (
+                                time.monotonic() + cfg.REENTRY_COOLDOWN_MINUTES * 60
+                            )
+                            log_event(
+                                "REENTRY_COOLDOWN_STARTED",
+                                symbol=traded_symbol,
+                                cooldown_minutes=cfg.REENTRY_COOLDOWN_MINUTES,
+                            )
+                            # Histories collected before/during a blocking position
+                            # monitor no longer represent a contiguous 30-second
+                            # window. Re-warm them before authorizing another trade.
+                            option_histories.clear()
+                            confirmation_streaks.clear()
                             break
                         if error and "kill switch halted" in str(error):
                             logger.warning("market-wide entry stopped by kill switch: %s", error)
                             terminal_kill_switch = True
                             break
-                    if filled or terminal_kill_switch:
+                    if terminal_kill_switch:
                         return
             time.sleep(1.0)
     finally:

@@ -157,6 +157,7 @@ MAX_RISK_PER_TRADE_PCT = 5.0       # max % of FNO_CAPITAL this trade's stop-loss
 MAX_DAILY_LOSS = 5000.0            # absolute rupee kill-switch for the day
 MAX_TRADES_PER_DAY = 3
 MAX_CONSECUTIVE_LOSSES = 2
+REENTRY_COOLDOWN_MINUTES = 30
 MAX_CAPITAL_EXPOSURE_PCT = 30.0    # cap on total F&O capital deployed at once (relevant once >1 concurrent position is allowed)
 
 # ---------------------------------------------------------------------
@@ -242,6 +243,7 @@ if os.path.exists(_USER_CONFIG_PATH):
     MAX_DAILY_LOSS = _overrides.get("max_daily_loss", MAX_DAILY_LOSS)
     MAX_TRADES_PER_DAY = _overrides.get("max_trades_per_day", MAX_TRADES_PER_DAY)
     MAX_CONSECUTIVE_LOSSES = _overrides.get("max_consecutive_losses", MAX_CONSECUTIVE_LOSSES)
+    REENTRY_COOLDOWN_MINUTES = _overrides.get("reentry_cooldown_minutes", REENTRY_COOLDOWN_MINUTES)
     AUTHORIZED_SIGNAL = _overrides.get("authorized_signal", AUTHORIZED_SIGNAL)
     DEBUG_TICK_LOGGING = _overrides.get("debug_tick_logging", DEBUG_TICK_LOGGING)
 
