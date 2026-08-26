@@ -1,0 +1,20 @@
+[Unit]
+Description=Kite F&O Option Buying V1 - PAPER ONLY
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/kite_fno_option_buying_v1_paper
+EnvironmentFile=/home/ubuntu/kite_trading_bot/kitebot-fno.env
+Environment=PYTHONUNBUFFERED=1
+Environment=FNO_V1_ACCESS_TOKEN_FILE=/home/ubuntu/kite_trading_bot/access_token.txt
+Environment=FNO_V1_SIGNAL_LOG_DIR=/home/ubuntu/kite_trading_bot/signal_logs
+ExecStart=/home/ubuntu/kite_trading_bot/venv/bin/python3 -m fno_bot.option_buying_v1.launcher
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

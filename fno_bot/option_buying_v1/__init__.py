@@ -8,12 +8,14 @@ watchlist or position store.
 
 from .config import OptionBuyingConfig
 from .engine import OptionBuyingEngine, UnderlyingSignal
+from .orchestrator import OptionBuyingPaperOrchestrator
 from .resolver import OptionContractResolver, OptionRejection, ResolvedOption
 
 __all__ = [
     "OptionBuyingConfig",
     "OptionBuyingEngine",
     "UnderlyingSignal",
+    "OptionBuyingPaperOrchestrator",
     "OptionContractResolver",
     "OptionRejection",
     "ResolvedOption",

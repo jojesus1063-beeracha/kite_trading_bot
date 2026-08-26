@@ -17,6 +17,15 @@ option and exposes no live broker-order method. The position engine measures
 MFE/MAE and persists closed PAPER records. It intentionally has no arbitrary
 target or stop; its only automatic exit is the 15:10 mandatory square-off.
 
-Production integration must call `force_square_off()` on every clock/tick
-cycle and must supply a current best-ask price for entry and best-bid price for
-exit. Do not enable live execution without a separate reviewed implementation.
+`launcher.py` supplies the PAPER orchestration. It tails only equity signals
+already recorded with `executed=true`, rejects stale signals, refreshes spot
+from Zerodha, resolves against today's NFO master, prices entry at best ask,
+subscribes to the selected option and monitors ticks. From 15:10 it retries
+best-bid exits; at the final 15:15 PAPER deadline it uses an explicitly audited
+last-price fallback so a simulated position cannot remain overnight. State and
+consumed signal IDs are persisted atomically for crash-safe restarts.
+When deployed from a separate worktree, set `FNO_V1_SIGNAL_LOG_DIR` to
+the equity bot's actual `signal_logs` directory; the example systemd unit
+does this explicitly.
+
+Do not enable live execution without a separate reviewed implementation.

@@ -143,7 +143,13 @@ class OptionBuyingEngine:
         )
         self.realized_pnl += position.net_pnl or 0.0
         self.closed_positions.append(position)
-        append_closed_position(position, self.config.trade_log_path)
+        try:
+            append_closed_position(position, self.config.trade_log_path)
+        except Exception as exc:
+            self.audit(
+                "OPTION_REPORTING_ERROR", position_id=position.position_id,
+                reason=str(exc),
+            )
         self.audit(
             "OPTION_PAPER_EXIT_FILLED", position_id=position.position_id,
             reason=reason, gross_pnl=position.gross_pnl, net_pnl=position.net_pnl,
