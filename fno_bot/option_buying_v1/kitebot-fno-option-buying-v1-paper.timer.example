@@ -1,0 +1,10 @@
+[Unit]
+Description=Start Kite F&O Option Buying V1 PAPER session
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:25:00 Asia/Kolkata
+Persistent=false
+Unit=kitebot-fno-option-buying-v1-paper.service
+
+[Install]
+WantedBy=timers.target

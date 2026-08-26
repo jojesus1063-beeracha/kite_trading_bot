@@ -34,6 +34,27 @@ FNO_TRADE_LOG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "fno_option_buying_v1_trades.jsonl",
 )
+FNO_V1_SIGNAL_LOG_DIR = os.environ.get(
+    "FNO_V1_SIGNAL_LOG_DIR",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "signal_logs"),
+)
+FNO_V1_ACCESS_TOKEN_FILE = os.environ.get(
+    "FNO_V1_ACCESS_TOKEN_FILE",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "access_token.txt"),
+)
+FNO_V1_STATE_PATH = os.environ.get(
+    "FNO_V1_STATE_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fno_option_buying_v1_state.json"),
+)
+FNO_V1_STATUS_PATH = os.environ.get(
+    "FNO_V1_STATUS_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fno_option_buying_v1_status.json"),
+)
+FNO_V1_POLL_SECONDS = 1.0
+FNO_V1_MAX_TICK_AGE_MS = 5_000.0
+FNO_V1_MAX_SIGNAL_AGE_SECONDS = 30.0
+FNO_V1_FORCE_EXIT_RETRY_UNTIL = "15:15"
+FNO_V1_REQUIRE_EXECUTED_EQUITY_SIGNAL = True
 
 
 @dataclass(frozen=True)
@@ -62,6 +83,15 @@ class OptionBuyingConfig:
     require_current_instrument_master: bool = FNO_REQUIRE_CURRENT_INSTRUMENT_MASTER
     exit_policy: str = FNO_EXIT_POLICY
     trade_log_path: str = FNO_TRADE_LOG_PATH
+    signal_log_dir: str = FNO_V1_SIGNAL_LOG_DIR
+    access_token_file: str = FNO_V1_ACCESS_TOKEN_FILE
+    state_path: str = FNO_V1_STATE_PATH
+    status_path: str = FNO_V1_STATUS_PATH
+    poll_seconds: float = FNO_V1_POLL_SECONDS
+    max_tick_age_ms: float = FNO_V1_MAX_TICK_AGE_MS
+    max_signal_age_seconds: float = FNO_V1_MAX_SIGNAL_AGE_SECONDS
+    force_exit_retry_until: str = FNO_V1_FORCE_EXIT_RETRY_UNTIL
+    require_executed_equity_signal: bool = FNO_V1_REQUIRE_EXECUTED_EQUITY_SIGNAL
 
     def validate(self) -> None:
         if not self.enabled:

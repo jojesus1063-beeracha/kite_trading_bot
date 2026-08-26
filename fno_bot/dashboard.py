@@ -30,6 +30,8 @@ def _runtime_paths(root=None):
         "trades": os.path.join(bot, "fno_trade_history.jsonl"),
         "status": os.path.join(bot, "fno_bot_status.json"),
         "positions": os.path.join(bot, "fno_open_positions.json"),
+        "v1_trades": os.path.join(bot, "fno_option_buying_v1_trades.jsonl"),
+        "v1_status": os.path.join(bot, "fno_option_buying_v1_status.json"),
     }
 
 
@@ -98,7 +100,7 @@ def summarize_activity(events, trades, status, positions, now=None):
         "WEBSOCKET_READY", "WEBSOCKET_CLOSED", "WEBSOCKET_ERROR"
     }]
     socket_state = "CONNECTED" if socket_events and socket_events[-1] == "WEBSOCKET_READY" else (
-        "DISCONNECTED" if socket_events else "UNKNOWN"
+        "DISCONNECTED" if socket_events else status.get("socket_state", "UNKNOWN")
     )
 
     candidates = []
@@ -140,6 +142,34 @@ def summarize_activity(events, trades, status, positions, now=None):
 
 def current_activity(root=None):
     paths = _runtime_paths(root)
+    v1_status = _load_json(paths["v1_status"], {})
+    if v1_status:
+        v1_trades = []
+        for source in _tail_jsonl(paths["v1_trades"], 10000):
+            row = dict(source)
+            entry_time = row.get("entry_time") or ""
+            exit_time = row.get("final_exit_time") or ""
+            row.update({
+                "date": entry_time[:10], "time": (exit_time or entry_time)[11:19],
+                "entry_price": row.get("entry_option_price"),
+                "exit_price": row.get("final_exit_price"),
+                "costs": row.get("estimated_charges", 0),
+            })
+            v1_trades.append(row)
+        positions = {
+            "positions": {
+                row.get("position_id", str(index)): row
+                for index, row in enumerate(v1_status.get("open_positions", []))
+            }
+        }
+        activity = summarize_activity(
+            _tail_jsonl(paths["audit"]), v1_trades, v1_status, positions,
+        )
+        activity["available_capital"] = v1_status.get("available_capital")
+        activity["realized_pnl"] = v1_status.get("realized_pnl")
+        activity["strategy"] = "FNO_OPTION_BUYING_V1"
+        activity["runtime_root"] = paths["root"]
+        return activity
     activity = summarize_activity(
         _tail_jsonl(paths["audit"]), _tail_jsonl(paths["trades"], 10000),
         _load_json(paths["status"], {}), _load_json(paths["positions"], {}),

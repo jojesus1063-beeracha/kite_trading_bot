@@ -39,6 +39,8 @@ fno_open_positions.json.lock
 fno_trade_history.jsonl
 fno_bot_status.json
 fno_option_buying_v1_trades.jsonl
+fno_option_buying_v1_state.json
+fno_option_buying_v1_status.json
 shared_capital_ledger.json
 shared_capital_ledger.json.lock
 fno_bot/user_config_fno.json
