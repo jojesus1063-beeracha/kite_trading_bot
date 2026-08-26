@@ -77,7 +77,9 @@ def summarize_activity(events, trades, status, positions, now=None):
     net_pnl = sum(float(row.get("net_pnl") or 0) for row in trades_today)
     costs = sum(float(row.get("costs") or 0) for row in trades_today)
 
-    evaluations = [row for row in events if row.get("event") == "PROFESSIONAL_SIGNAL_EVALUATED"]
+    evaluations = [row for row in events if row.get("event") in {
+        "PROFESSIONAL_SIGNAL_EVALUATED", "INTRADAY_SIGNAL_EVALUATED"
+    }]
     latest_by_symbol = {}
     rejection_counts = Counter()
     eligible = 0

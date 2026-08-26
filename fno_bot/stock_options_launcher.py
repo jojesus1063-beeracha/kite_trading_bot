@@ -34,7 +34,10 @@ from fno_bot.launcher import (
 )
 from fno_bot.market_data.tick_store import TickStore
 from fno_bot.market_data.ticker import FnoTicker
+from fno_bot.market_data.historical_candles import HistoricalCandleCache
+from fno_bot.strategies.intraday_momentum import evaluate_intraday_momentum
 from fno_bot.strategies.opening_scalper import build_snapshot, evaluate_signals
+from fno_bot.strategies.session_router import TradingSession, route_session
 from fno_bot.strategies.signal_candidates import TickPoint
 
 logger = logging.getLogger("fno.stock_options_launcher")
@@ -265,6 +268,64 @@ def build_signal_validator(pair, tick_store, histories, previous_close, expected
     return validate
 
 
+def rank_intraday_candidates(
+    live_ranked,
+    tick_store,
+    histories,
+    candle_cache,
+    audit_fn=None,
+):
+    """Apply completed-candle confirmation only to the live shortlist.
+
+    This bounded funnel prevents historical API calls across the entire F&O
+    universe. The cache guarantees at most one request per shortlisted symbol
+    per minute.
+    """
+    confirmed = []
+    for candidate in live_ranked[:cfg.INTRADAY_HISTORICAL_SHORTLIST_SIZE]:
+        pair = candidate.pair
+        tokens = (
+            pair.underlying.instrument_token,
+            pair.selection.ce_contract.instrument_token,
+            pair.selection.pe_contract.instrument_token,
+        )
+        snapshot = build_snapshot(
+            tick_store, tokens[0], tokens[1], tokens[2], candidate.previous_close,
+            ce_history=tuple(histories[tokens[1]]),
+            pe_history=tuple(histories[tokens[2]]),
+            underlying_history=tuple(histories[tokens[0]]),
+        )
+        if snapshot is None:
+            continue
+        try:
+            candles = candle_cache.completed_minute_candles(tokens[0])
+            decision = evaluate_intraday_momentum(candles, snapshot)
+        except Exception as exc:
+            if audit_fn:
+                audit_fn("INTRADAY_DATA_REJECTED", symbol=pair.underlying.symbol, reason=str(exc))
+            continue
+        if audit_fn:
+            audit_fn(
+                "INTRADAY_SIGNAL_EVALUATED",
+                symbol=pair.underlying.symbol,
+                direction=decision.direction,
+                confidence=decision.confidence,
+                reason=decision.reason,
+                metrics=decision.metrics,
+            )
+        if decision.direction is None or decision.confidence is None:
+            continue
+        confirmed.append(RankedCandidate(
+            pair=pair,
+            authorized_result=decision,
+            confidence=float(decision.confidence),
+            max_spread_pct=candidate.max_spread_pct,
+            previous_close=candidate.previous_close,
+        ))
+    return sorted(confirmed, key=lambda item: (-item.confidence, item.max_spread_pct,
+                                               item.pair.underlying.symbol))
+
+
 def run_all_stock_options():
     cfg.validate_mode()
     if cfg.MODE == "LIVE" and not cfg.ALL_STOCK_OPTIONS_LIVE_ENABLED:
@@ -291,11 +352,17 @@ def run_all_stock_options():
             ticker, tick_store, underlyings, previous_closes
         )
         broker = get_broker(kite, tick_store) if cfg.MODE == "PAPER" else None
-        window_end = _today_at(cfg.ENTRY_END_TIME)
+        opening_end = _today_at(cfg.ENTRY_END_TIME)
+        session_end = _today_at(
+            cfg.INTRADAY_ENTRY_END_TIME if cfg.INTRADAY_OPTIONS_ENABLED else cfg.ENTRY_END_TIME
+        )
         option_histories = defaultdict(lambda: deque(maxlen=31))
         confirmation_streaks = defaultdict(int)
+        candle_cache = HistoricalCandleCache(
+            kite, ttl_seconds=cfg.INTRADAY_HISTORICAL_CACHE_SECONDS
+        )
 
-        while datetime.now(IST) < window_end:
+        while datetime.now(IST) < session_end:
             sampled_at = time.monotonic()
             for pair in pairs:
                 for token in (
@@ -309,15 +376,25 @@ def run_all_stock_options():
                             tick.last_price, sampled_at, tick.volume, tick.open_interest,
                             tick.total_buy_qty, tick.total_sell_qty,
                         ))
-            ranked = rank_candidates(
+            live_ranked = rank_candidates(
                 tick_store, pairs, previous_closes, option_histories,
                 confirmation_streaks=confirmation_streaks,
                 audit_fn=log_event,
             )
+            session = route_session(datetime.now(IST))
+            ranked = live_ranked
+            if session == TradingSession.INTRADAY and cfg.INTRADAY_OPTIONS_ENABLED:
+                ranked = rank_intraday_candidates(
+                    live_ranked, tick_store, option_histories, candle_cache,
+                    audit_fn=log_event,
+                )
+            elif datetime.now(IST) >= opening_end and not cfg.INTRADAY_OPTIONS_ENABLED:
+                break
             if ranked:
                 top = ranked[0]
                 log_event(
                     "STOCK_OPTION_CANDIDATE_RANKED",
+                    session=session.value,
                     symbol=top.pair.underlying.symbol,
                     strike=top.pair.selection.atm_strike,
                     expiry=str(top.pair.selection.expiry),

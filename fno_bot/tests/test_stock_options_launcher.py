@@ -4,7 +4,7 @@ from fno_bot.instruments.contract_master import ContractRecord
 from fno_bot.instruments.stock_option_universe import StockOptionPair, StockOptionUnderlying
 from fno_bot.instruments.strike_selector import StrikeSelection
 from fno_bot.market_data.tick_store import NormalizedTick, TickStore
-from fno_bot.stock_options_launcher import rank_candidates
+from fno_bot.stock_options_launcher import RankedCandidate, rank_candidates, rank_intraday_candidates
 from fno_bot.strategies.signal_candidates import TickPoint
 
 
@@ -72,3 +72,39 @@ def test_rank_candidates_passes_history_to_confirmed_momentum(monkeypatch):
     ranked = rank_candidates(store, [pair], {"MOMO": 100.0}, histories)
     assert len(ranked) == 1
     assert ranked[0].authorized_result.direction == "CE"
+
+
+def test_intraday_funnel_uses_completed_candles_only_for_live_shortlist(monkeypatch):
+    from types import SimpleNamespace
+    from fno_bot import stock_options_launcher as module
+
+    monkeypatch.setattr(module.cfg, "INTRADAY_HISTORICAL_SHORTLIST_SIZE", 1)
+    monkeypatch.setattr(module, "evaluate_intraday_momentum", lambda candles, snapshot:
+                        SimpleNamespace(direction="CE", confidence=77.0,
+                                        reason="confirmed", metrics={"completed_candles": len(candles)}))
+    store = TickStore(clock_fn=lambda: 0.0)
+    first, second = _pair("FIRST", 500), _pair("SECOND", 600)
+    for pair in (first, second):
+        base = pair.underlying.instrument_token
+        store.update(_tick(base, 100.0, None, None))
+        store.update(_tick(base + 1, 101.0, 100.5, 101.5))
+        store.update(_tick(base + 2, 99.0, 98.5, 99.5))
+    histories = {
+        token: [TickPoint(100.0, 0.0), TickPoint(101.0, 20.0)]
+        for token in (500, 501, 502, 600, 601, 602)
+    }
+    live = [
+        RankedCandidate(first, SimpleNamespace(direction="CE"), 90.0, 1.0, 99.0),
+        RankedCandidate(second, SimpleNamespace(direction="CE"), 80.0, 1.0, 99.0),
+    ]
+
+    class Cache:
+        calls = []
+        def completed_minute_candles(self, token):
+            self.calls.append(token)
+            return [object()] * 30
+
+    cache = Cache()
+    ranked = rank_intraday_candidates(live, store, histories, cache)
+    assert [item.pair.underlying.symbol for item in ranked] == ["FIRST"]
+    assert cache.calls == [500]
