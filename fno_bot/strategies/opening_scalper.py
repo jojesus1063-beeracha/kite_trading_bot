@@ -105,6 +105,9 @@ def evaluate_exit_conditions(
     past_force_square_off: bool,
     emergency_condition: bool = False,
     emergency_reason: Optional[str] = None,
+    stop_price_override: Optional[float] = None,
+    target_price_override: Optional[float] = None,
+    stop_reason: str = "HARD_STOP_LOSS",
 ) -> ExitCheckResult:
     """
     Evaluates the exit hierarchy in the exact documented priority
@@ -118,11 +121,11 @@ def evaluate_exit_conditions(
     if emergency_condition:
         return ExitCheckResult(True, emergency_reason or "EMERGENCY_RISK_EXIT")
 
-    target_price = entry_price * (1 + target_pct / 100)
-    stop_price = entry_price * (1 - stop_loss_pct / 100)
+    target_price = target_price_override or entry_price * (1 + target_pct / 100)
+    stop_price = stop_price_override or entry_price * (1 - stop_loss_pct / 100)
 
     if current_price <= stop_price:
-        return ExitCheckResult(True, "HARD_STOP_LOSS")
+        return ExitCheckResult(True, stop_reason)
 
     if not signal_still_valid:
         return ExitCheckResult(True, "SIGNAL_INVALIDATION")

@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from fno_bot.strategies.opening_scalper import evaluate_exit_conditions, ExitCheckResult
 from fno_bot.market_data.tick_store import TickStore
+from fno_bot.strategies.dynamic_exits import DynamicExitPlan
 
 logger = logging.getLogger("fno.position_monitor")
 
@@ -73,10 +74,24 @@ def compute_monitor_decision(
     cfg,
     emergency_condition: bool = False,
     emergency_reason: Optional[str] = None,
+    risk_plan: Optional[DynamicExitPlan] = None,
 ) -> tuple[ExitCheckResult, ExcursionState]:
     """Pure: no I/O. Returns the exit decision plus the updated
     excursion state -- callers persist/act on both."""
     updated = update_excursion(excursion, current_price)
+    stop_override = None
+    target_override = None
+    stop_reason = "HARD_STOP_LOSS"
+    if risk_plan is not None:
+        target_override = entry_price * (1 + risk_plan.target_pct / 100)
+        stop_override = entry_price * (1 - risk_plan.stop_pct / 100)
+        if updated.mfe_pct >= risk_plan.breakeven_trigger_pct:
+            stop_override = max(stop_override, entry_price * (1 + risk_plan.breakeven_floor_pct / 100))
+            stop_reason = "DYNAMIC_BREAKEVEN_STOP"
+        if updated.mfe_pct >= risk_plan.trailing_activation_pct:
+            trailing = updated.max_favorable_price * (1 - risk_plan.trailing_distance_pct / 100)
+            stop_override = max(stop_override, trailing)
+            stop_reason = "DYNAMIC_TRAILING_STOP"
     result = evaluate_exit_conditions(
         direction=direction,
         entry_price=entry_price,
@@ -89,6 +104,9 @@ def compute_monitor_decision(
         past_force_square_off=is_past_force_square_off(now_ist, cfg.FORCE_SQUARE_OFF_TIME),
         emergency_condition=emergency_condition,
         emergency_reason=emergency_reason,
+        stop_price_override=stop_override,
+        target_price_override=target_override,
+        stop_reason=stop_reason,
     )
     return result, updated
 
@@ -106,6 +124,7 @@ def monitor_step(
     audit_fn: Callable[..., None] = lambda *a, **k: None,
     clock_fn=None,
     now_ist_fn=None,
+    risk_plan: Optional[DynamicExitPlan] = None,
 ) -> tuple[ExitCheckResult, ExcursionState, Optional[float]]:
     """
     Thin orchestration for ONE monitoring cycle: reads the latest tick
@@ -130,6 +149,7 @@ def monitor_step(
         direction=direction, entry_price=entry_price, current_price=current_price,
         excursion=excursion, held_seconds=held_seconds,
         signal_still_valid=signal_still_valid_fn(), now_ist=now_ist_fn(), cfg=cfg,
+        risk_plan=risk_plan,
     )
 
     if result.should_exit:

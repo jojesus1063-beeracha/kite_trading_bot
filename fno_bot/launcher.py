@@ -37,6 +37,7 @@ import sys
 import time
 import logging
 from dataclasses import dataclass
+from dataclasses import asdict
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from typing import Optional
@@ -375,10 +376,12 @@ class OpenPosition:
     quantity: int
     entry_price: float
     entry_monotonic: float
+    risk_plan: object = None
 
 
 def run_entry(broker, cfg_ref, tick_store, selection: StrikeSelection, authorized_result, ticker=None,
-              position_key=None, signal_still_valid_fn=None):
+              position_key=None, signal_still_valid_fn=None, recent_option_prices=None,
+              entry_spread_pct=None):
     """GENERATE_SIGNAL -> ENTRY_PENDING. Sizes the position, checks the
     daily kill switch, then executes the entry through execution/entry.py
     -- IDENTICAL code path for PAPER and LIVE (only `broker` differs)."""
@@ -390,9 +393,28 @@ def run_entry(broker, cfg_ref, tick_store, selection: StrikeSelection, authorize
     if not kill_switch.can_take_new_trade():
         return None, kill_switch, f"kill switch halted: {kill_switch.day.halt_reason}"
 
+    risk_plan = None
+    sizing_stop_pct = cfg_ref.STOP_LOSS_PCT
+    if getattr(cfg_ref, "DYNAMIC_EXITS_ENABLED", False) and recent_option_prices:
+        from fno_bot.strategies.dynamic_exits import build_dynamic_exit_plan
+        signal_metrics = (
+            getattr(authorized_result, "raw_metrics", None)
+            or getattr(authorized_result, "metrics", None)
+            or {}
+        )
+        momentum = signal_metrics.get(
+            "selected_option_roc_pct",
+            signal_metrics.get("ce_roc_pct" if direction == "CE" else "pe_roc_pct", 0),
+        )
+        risk_plan = build_dynamic_exit_plan(
+            recent_option_prices, momentum, entry_spread_pct,
+            reference_price, contract.lot_size,
+        )
+        sizing_stop_pct = risk_plan.stop_pct
+
     sizing = compute_quantity(
         fno_capital=cfg_ref.FNO_CAPITAL, max_capital_per_trade_pct=cfg_ref.MAX_CAPITAL_PER_TRADE_PCT,
-        max_risk_per_trade_pct=cfg_ref.MAX_RISK_PER_TRADE_PCT, stop_loss_pct=cfg_ref.STOP_LOSS_PCT,
+        max_risk_per_trade_pct=cfg_ref.MAX_RISK_PER_TRADE_PCT, stop_loss_pct=sizing_stop_pct,
         entry_reference_price=reference_price, lot_size=contract.lot_size,
     )
     if sizing.lots < 1:
@@ -422,14 +444,22 @@ def run_entry(broker, cfg_ref, tick_store, selection: StrikeSelection, authorize
         # the opening-window loop treat an aborted order as a fill.
         return None, kill_switch, result.abort_reason
 
+    if risk_plan is not None:
+        risk_plan = build_dynamic_exit_plan(
+            recent_option_prices, momentum, entry_spread_pct,
+            result.average_price, result.filled_quantity,
+        )
+        log_event("DYNAMIC_EXIT_PLAN_CREATED", symbol=contract.tradingsymbol, **asdict(risk_plan))
+
     position = OpenPosition(
         tradingsymbol=contract.tradingsymbol, exchange=contract.exchange, option_token=contract.instrument_token,
         strike=selection.atm_strike, option_type=direction, quantity=result.filled_quantity,
-        entry_price=result.average_price, entry_monotonic=time.monotonic(),
+        entry_price=result.average_price, entry_monotonic=time.monotonic(), risk_plan=risk_plan,
     )
     save_positions({(position_key or cfg_ref.UNDERLYING): {
         "tradingsymbol": position.tradingsymbol, "exchange": position.exchange, "quantity": position.quantity,
         "entry_price": position.entry_price, "option_type": position.option_type, "strike": position.strike,
+        "risk_plan": asdict(risk_plan) if risk_plan else None,
     }})
     return position, kill_switch, None
 
@@ -469,6 +499,7 @@ def run_monitor_and_exit(broker, ticker, tick_store, position: OpenPosition, kil
             entry_price=position.entry_price, excursion=excursion, entry_monotonic=position.entry_monotonic,
             signal_still_valid_fn=signal_still_valid_fn or (lambda: True), cfg=cfg_ref,
             audit_fn=lambda event, **data: log_event(event, **data),
+            risk_plan=position.risk_plan,
         )
 
         if emergency or result.should_exit:

@@ -128,6 +128,7 @@ MAX_LOSS_RUPEES = None            # optional absolute rupee cap per trade, in ad
 MAX_ADVERSE_MOVE_PCT = None       # optional secondary/emergency threshold beyond STOP_LOSS_PCT; None = unused
 
 MAX_HOLD_SECONDS = 90             # time stop -- exit if opening momentum hasn't produced target/SL by then
+DYNAMIC_EXITS_ENABLED = False     # opt-in PAPER validation; LIVE remains blocked for all-stock options
 MAX_ENTRY_WINDOW_SECONDS = 300    # if no valid signal has fired this long after ENTRY_START_TIME, stop trying for the day
 
 EXIT_ORDER_BUFFER_PCT = 1.0       # initial exit limit = best_bid * (1 - buffer/100), i.e. slightly aggressive of bid
@@ -235,6 +236,7 @@ if os.path.exists(_USER_CONFIG_PATH):
     TARGET_PCT = _overrides.get("target_pct", TARGET_PCT)
     STOP_LOSS_PCT = _overrides.get("stop_loss_pct", STOP_LOSS_PCT)
     MAX_HOLD_SECONDS = _overrides.get("max_hold_seconds", MAX_HOLD_SECONDS)
+    DYNAMIC_EXITS_ENABLED = _overrides.get("dynamic_exits_enabled", DYNAMIC_EXITS_ENABLED)
     MAX_TICK_AGE_MS = _overrides.get("max_tick_age_ms", MAX_TICK_AGE_MS)
     MAX_SPREAD_PCT = _overrides.get("max_spread_pct", MAX_SPREAD_PCT)
     FNO_CAPITAL = _overrides.get("fno_capital", FNO_CAPITAL)
