@@ -24,7 +24,6 @@ from paper_contrarian_launcher import install_two_indicator_patch
 
 logger = logging.getLogger("paper_matmon_launcher")
 
-# These settings are allowed to participate in Matmon entry authorization.
 MATMON_REQUIRED = {
     "PAPER_TRADING": True,
     "ENABLE_WS_CANDLES": True,
@@ -36,9 +35,13 @@ MATMON_REQUIRED = {
     "MATMON_QUOTE_MAX_AGE_SECONDS": 2.0,
     "ENTRY_TIMEFRAME": "3minute",
     "ENTRY_SCAN_SHORTLIST_SIZE": 120,
+    "CAPITAL": 5000.0,
+    "RISK_PER_TRADE_PCT": 2.0,
+    "MAX_POSITION_SIZE_PCT": 20.0,
+    "MAX_OPEN_POSITIONS": 5,
+    "MAX_TRADES_PER_DAY": 100,
 }
 
-# Inherited research gates that must never veto a Matmon entry.
 MATMON_FORBIDDEN_TRUE = (
     "ENABLE_FINAL_EMA_DISTANCE_GATE",
     "ENABLE_RVOL_FILTER",
@@ -69,15 +72,15 @@ def enforce_settings():
     cfg.ENTRY_TIMEFRAME = "3minute"
     cfg.ENTRY_SCAN_SHORTLIST_SIZE = 120
 
-    # Paper sizing/risk controls. These are operational guards, not signals.
     cfg.CAPITAL = 5000.0
     cfg.RISK_PER_TRADE_PCT = 2.0
-    cfg.MAX_OPEN_POSITIONS = 3
-    cfg.MAX_TRADES_PER_DAY = 7
+    cfg.MAX_POSITION_SIZE_PCT = 20.0
+    cfg.MAX_OPEN_POSITIONS = 5
+    cfg.MAX_TRADES_PER_DAY = 100
     cfg.CHECK_MARGIN_BEFORE_ENTRY = False
 
     cfg.PROPOSED_CLEAN_PIPELINE = True
-    cfg.ENABLE_DEPTH_CONFIRMATION_GATE = True  # execution hook replaced below by Matmon quote confirmation
+    cfg.ENABLE_DEPTH_CONFIRMATION_GATE = True
     cfg.DEPTH_RAW_DIRECTION_ONLY = True
     cfg.DEPTH_REQUIRE_DIRECTIONAL_CONFIRMATION = True
     cfg.PAPER_PRICE_ACTION_OBSERVATIONAL = True
@@ -87,7 +90,6 @@ def enforce_settings():
 
 
 def assert_runtime_contract():
-    """Fail closed if inherited configuration can change Matmon's entry model."""
     errors = []
     for name, expected in MATMON_REQUIRED.items():
         actual = getattr(cfg, name, None)
@@ -111,18 +113,14 @@ def assert_runtime_contract():
 
 
 def install_matmon_policy():
-    # Reuse the established EMA-direction plumbing, then explicitly neutralize
-    # every inherited research gate and verify the final runtime state.
     install_two_indicator_patch()
     enforce_settings()
-
     ema_evaluate = strategy.evaluate
 
     def evaluate_with_di(symbol, df_15m, df_entry, df_index, cfg_obj):
         signal = ema_evaluate(symbol, df_15m, df_entry, df_index, cfg_obj)
         if signal is None:
             return None
-
         period = int(getattr(cfg_obj, "MATMON_DI_PERIOD", 14))
         pdi, mdi, _ = directional_indicators(df_entry, period)
         p = pd.to_numeric(pdi, errors="coerce").dropna()
@@ -130,27 +128,15 @@ def install_matmon_policy():
         if p.empty or m.empty:
             logger.info("MATMON REJECT | %s | DI_UNAVAILABLE", symbol)
             return None
-
         plus_di = float(p.iloc[-1])
         minus_di = float(m.iloc[-1])
         if not di_agrees(signal.direction, plus_di, minus_di):
-            logger.info(
-                "MATMON REJECT | %s | direction=%s +DI=%.3f -DI=%.3f | DI_DISAGREES",
-                symbol, signal.direction, plus_di, minus_di,
-            )
+            logger.info("MATMON REJECT | %s | direction=%s +DI=%.3f -DI=%.3f | DI_DISAGREES", symbol, signal.direction, plus_di, minus_di)
             return None
-
         detail = dict(getattr(signal, "price_action_detail", {}) or {})
-        detail["matmon"] = {
-            "plus_di": plus_di,
-            "minus_di": minus_di,
-            "di_agree": True,
-        }
+        detail["matmon"] = {"plus_di": plus_di, "minus_di": minus_di, "di_agree": True}
         signal.price_action_detail = detail
-        logger.info(
-            "MATMON DI PASS | %s | direction=%s +DI=%.3f -DI=%.3f",
-            symbol, signal.direction, plus_di, minus_di,
-        )
+        logger.info("MATMON DI PASS | %s | direction=%s +DI=%.3f -DI=%.3f", symbol, signal.direction, plus_di, minus_di)
         return signal
 
     strategy.evaluate = evaluate_with_di
@@ -160,35 +146,21 @@ def install_matmon_policy():
         buffer = getattr(ticker, "tick_buffer", None) if ticker is not None else None
         if buffer is None:
             return DepthConfirmation(False, "UNAVAILABLE", "MATMON_NO_TICKS")
-
         evidence = evaluate_quote_window(
-            buffer,
-            symbol,
-            direction,
+            buffer, symbol, direction,
             window_seconds=float(getattr(cfg_obj, "MATMON_QUOTE_WINDOW_SECONDS", 3.0)),
             max_age_seconds=float(getattr(cfg_obj, "MATMON_QUOTE_MAX_AGE_SECONDS", 2.0)),
             now=now,
         )
-        logger.info(
-            "MATMON QUOTE | %s | %s | first=%s/%s last=%s/%s | %s",
-            symbol, direction, evidence.first_bid, evidence.first_ask,
-            evidence.last_bid, evidence.last_ask, evidence.reason,
-        )
+        logger.info("MATMON QUOTE | %s | %s | first=%s/%s last=%s/%s | %s", symbol, direction, evidence.first_bid, evidence.first_ask, evidence.last_bid, evidence.last_ask, evidence.reason)
         current = time.time() if now is None else float(now)
         return DepthConfirmation(
             bool(evidence.confirmed),
             "CONFIRMED" if evidence.confirmed else "MATMON_REJECT",
             evidence.reason,
             sample_count=2 if evidence.available else 0,
-            coverage_seconds=(
-                max(0.0, evidence.last_received_at - evidence.first_received_at)
-                if evidence.first_received_at is not None and evidence.last_received_at is not None
-                else 0.0
-            ),
-            latest_age_seconds=(
-                max(0.0, current - evidence.last_received_at)
-                if evidence.last_received_at is not None else None
-            ),
+            coverage_seconds=(max(0.0, evidence.last_received_at - evidence.first_received_at) if evidence.first_received_at is not None and evidence.last_received_at is not None else 0.0),
+            latest_age_seconds=(max(0.0, current - evidence.last_received_at) if evidence.last_received_at is not None else None),
         )
 
     depth_confirmation.evaluate_live_depth = evaluate_matmon_quote
@@ -199,7 +171,7 @@ def main():
     enforce_settings()
     install_matmon_policy()
     logger.critical(
-        "MATMON HAELOHIM PAPER MODE ACTIVE | capital=5000 risk=2%% max_open=3 max_trades=7 | "
+        "MATMON HAELOHIM PAPER MODE ACTIVE | capital=5000 risk=2%% max_position=20%% max_open=5 max_trades=100 | "
         "ENTRY=EMA9/21 + DI(14) + 3s BID/ASK REPRICING | LEGACY ENTRY VETOES OFF | NO REAL ORDERS"
     )
     runpy.run_module("main", run_name="__main__")
