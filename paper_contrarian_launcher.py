@@ -571,8 +571,14 @@ def install_two_indicator_patch(*, live_combined=False):
             guard_ok, guard_detail = _paper_entry_guard(
                 symbol,
                 max_per_symbol=1,
-                force_active=live_combined,
-                fail_closed=live_combined,
+                force_active=(
+                    live_combined
+                    or bool(getattr(cfg, "PAPER_TRADING", False))
+                ),
+                fail_closed=(
+                    live_combined
+                    or bool(getattr(cfg, "PAPER_TRADING", False))
+                ),
             )
             event["paper_entry_guard"] = guard_detail
             if not guard_ok:

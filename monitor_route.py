@@ -65,7 +65,7 @@ MONITOR_PAGE = """
       <div class="live-mark"><span class="dot {{ 'dot-green' if health.get('api_connection') == 'Authenticated' else 'dot-red' }}"></span>{{ health.get('trading_mode','N/A') }} · {{ health.get('api_connection','N/A') }}</div>
     </header>
     <nav class="quick-nav" aria-label="Dashboard sections">
-      <a href="#system-status">System</a><a href="#portfolio-summary">Portfolio</a><a href="#pipeline-dashboard">Pipeline</a><a href="#live-positions">Positions</a><a href="#today-session">Session</a><a href="#watchlist-analysis">Watchlist</a><a href="/">Settings</a>
+      <a href="#system-status">System</a><a href="#portfolio-summary">Portfolio</a><a href="#pipeline-dashboard">Pipeline</a><a href="#live-positions">Positions</a><a href="#today-session">Session</a><a href="#fno-options">F&O</a><a href="#watchlist-analysis">Watchlist</a><a href="/">Settings</a>
     </nav>
 
     <div class="section" id="system-status">
@@ -162,6 +162,281 @@ MONITOR_PAGE = """
             <div class="metric"><div class="label">Largest Loser</div><div class="value red">Rs{{ "%.2f"|format(session.get('largest_loser', 0) or 0) }}</div></div>
         </div>
     </div>
+
+    <div class="section" id="fno-options">
+
+        <h2>F&O Options · Professional Momentum</h2>
+
+        <div id="fno-live">
+            <div class="empty">
+                Loading F&O monitor...
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+    (function () {
+        const root = document.getElementById("fno-live");
+        if (!root) return;
+
+        function n(v, d) {
+            const x = Number(v);
+            return Number.isFinite(x) ? x.toFixed(d) : "-";
+        }
+
+        function esc(v) {
+            return String(v ?? "-")
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;");
+        }
+
+        function render(f) {
+            if (!f) {
+                root.innerHTML =
+                    '<div class="empty">F&O data unavailable.</div>';
+                return;
+            }
+
+            const serviceClass =
+                f.service_active ? "green" : "red";
+
+            const feed =
+                f.pressure_present > 0
+                ? '<span class="green">DATA PRESENT</span>'
+                : f.evaluations > 0
+                  ? '<span class="red">DATA MISSING</span>'
+                  : '<span class="yellow">WAITING</span>';
+
+            let html = `
+            <div class="grid">
+
+              <div class="metric">
+                <div class="label">Service</div>
+                <div class="value ${serviceClass}">
+                  <span class="dot ${f.service_active ? "dot-green" : "dot-red"}"></span>
+                  ${f.service_active ? "RUNNING" : "STOPPED"}
+                </div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Mode</div>
+                <div class="value green">${esc(f.mode)}</div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Strategy</div>
+                <div class="value">${esc(f.strategy)}</div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Universe</div>
+                <div class="value">${esc(f.universe)}</div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Capital</div>
+                <div class="value">Rs${n(f.capital,2)}</div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Evaluations</div>
+                <div class="value">${esc(f.evaluations)}</div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Signals</div>
+                <div class="value">${esc(f.signals)}</div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Open Positions</div>
+                <div class="value">${(f.positions || []).length}</div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Trades Today</div>
+                <div class="value">${(f.trades || []).length}</div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Wins / Losses</div>
+                <div class="value">
+                  <span class="green">${esc(f.wins)}</span>
+                  /
+                  <span class="red">${esc(f.losses)}</span>
+                </div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Paper P&L</div>
+                <div class="value ${(Number(f.pnl || 0) >= 0) ? "green" : "red"}">
+                  Rs${n(f.pnl,2)}
+                </div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Audit Freshness</div>
+                <div class="value ${(Number(f.audit_age_seconds || 9999) < 30) ? "green" : "yellow"}">
+                  ${f.audit_age_seconds == null ? "N/A" : esc(f.audit_age_seconds) + " sec"}
+                </div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Pressure Present</div>
+                <div class="value green">${esc(f.pressure_present)}</div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Pressure Missing</div>
+                <div class="value ${f.pressure_missing ? "red" : "green"}">
+                  ${esc(f.pressure_missing)}
+                </div>
+              </div>
+
+              <div class="metric">
+                <div class="label">Pressure Feed</div>
+                <div class="value">${feed}</div>
+              </div>
+
+            </div>
+            `;
+
+
+            html += `
+              <div style="height:18px"></div>
+              <h2>Live Rejection Funnel</h2>
+            `;
+
+            if ((f.rejections || []).length) {
+
+                html += `
+                <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Reason</th>
+                      <th>Count</th>
+                      <th>%</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                `;
+
+                for (const r of f.rejections) {
+                    html += `
+                    <tr>
+                      <td>${esc(r.reason)}</td>
+                      <td>${esc(r.count)}</td>
+                      <td>${n(r.pct,2)}%</td>
+                    </tr>
+                    `;
+                }
+
+                html += "</tbody></table></div>";
+
+            } else {
+                html += '<div class="empty">No evaluations yet.</div>';
+            }
+
+
+            html += `
+              <div style="height:18px"></div>
+              <h2>Latest Professional Evaluations</h2>
+            `;
+
+            if ((f.latest || []).length) {
+
+                html += `
+                <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Symbol</th>
+                      <th>Direction</th>
+                      <th>Spot 30s %</th>
+                      <th>CE 30s %</th>
+                      <th>PE 30s %</th>
+                      <th>Volume Δ</th>
+                      <th>OI</th>
+                      <th>Pressure</th>
+                      <th>Decision</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                `;
+
+                for (const x of f.latest) {
+
+                    const pressure =
+                        x.selected_pressure == null
+                        ? '<span class="red">MISSING</span>'
+                        : esc(x.selected_pressure);
+
+                    html += `
+                    <tr>
+                      <td>${esc(x.time)}</td>
+                      <td>${esc(x.symbol)}</td>
+                      <td>${esc(x.direction)}</td>
+                      <td>${n(x.underlying_roc,3)}</td>
+                      <td>${n(x.ce_roc,3)}</td>
+                      <td>${n(x.pe_roc,3)}</td>
+                      <td>${esc(x.volume_delta)}</td>
+                      <td>${esc(x.oi)}</td>
+                      <td>${pressure}</td>
+                      <td>${esc(x.reason)}</td>
+                    </tr>
+                    `;
+                }
+
+                html += "</tbody></table></div>";
+
+            } else {
+                html += '<div class="empty">No F&O evaluations available.</div>';
+            }
+
+            root.innerHTML = html;
+        }
+
+
+        async function refreshFno() {
+            try {
+                const response = await fetch(
+                    "/api/monitor-data",
+                    {
+                        cache: "no-store",
+                        credentials: "same-origin"
+                    }
+                );
+
+                if (!response.ok) return;
+
+                const data = await response.json();
+
+                render(data.fno);
+
+            } catch (_) {
+                // Preserve last good display.
+            }
+        }
+
+        refreshFno();
+
+        const timer = setInterval(
+            refreshFno,
+            5000
+        );
+
+        window.addEventListener(
+            "pagehide",
+            () => clearInterval(timer),
+            { once: true }
+        );
+    })();
+    </script>
+
 """ + WATCHLIST_SECTION + """
   </div>
 </body>

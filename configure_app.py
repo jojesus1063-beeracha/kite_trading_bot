@@ -1061,6 +1061,7 @@ def backtest_comparison():
 
 
 from monitor_route import MONITOR_PAGE
+from fno_monitor_reader import load_fno_monitor
 from trade_log import load_bot_status
 from watchlist_range_analytics import load_watchlist_snapshot
 from watchlist_dashboard_helpers import compute_summary_cards, classify_report_freshness
@@ -1091,6 +1092,7 @@ def api_monitor_data():
         "summary_cards": summary_cards,
         "watchlist_symbols": watchlist_snapshot.get("symbols", []) if watchlist_snapshot else [],
         "pipeline": load_pipeline_dashboard(),
+        "fno": load_fno_monitor(),
     }
 
 
@@ -1127,6 +1129,7 @@ def monitor():
         summary_cards=summary_cards,
         watchlist_symbols_json=watchlist_symbols_json,
         pipeline=load_pipeline_dashboard(),
+        fno=load_fno_monitor(),
     )
 
 

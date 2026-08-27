@@ -100,28 +100,104 @@ class Signal:
 
 
 def rebuild_signal_for_direction(signal, final_direction, reference_candle, cfg):
-    """Rebuild stop/target from the final side; never reuse raw geometry."""
+    """
+    Rebuild stop/target from the final trade direction.
+
+    Prefer structural candle geometry when it is valid relative to
+    the actual entry price. If the reference candle has already moved
+    completely beyond the entry, fall back to ATR-based geometry.
+
+    The final safety invariant is always:
+
+        BUY  : stop < entry < target
+        SELL : target < entry < stop
+    """
     direction = str(final_direction).strip().upper()
     entry = float(signal.entry_price)
+
+    if entry <= 0:
+        raise ValueError(f"invalid entry price: {entry}")
+
+    # ATR is used only as a fallback when candle structure cannot
+    # produce valid geometry relative to the actual entry.
+    atr = None
+
+    try:
+        atr_value = reference_candle.get("atr")
+        if atr_value is not None:
+            atr = float(atr_value)
+            if atr <= 0:
+                atr = None
+    except (TypeError, ValueError, AttributeError):
+        atr = None
+
+    # Conservative fallback distance.
+    # One ATR preserves volatility scaling without changing direction.
+    fallback_distance = atr if atr is not None else entry * 0.005
+
     if direction == "BUY":
-        stop = float(reference_candle["low"]) * (1 - cfg.SL_BUFFER_PCT / 100)
+        structural_stop = (
+            float(reference_candle["low"])
+            * (1 - cfg.SL_BUFFER_PCT / 100)
+        )
+
+        if structural_stop < entry:
+            stop = structural_stop
+        else:
+            stop = entry - fallback_distance
+
         risk = entry - stop
         target = entry + risk * cfg.RISK_REWARD_MIN
+
     elif direction == "SELL":
-        buffer_pct = getattr(cfg, "SL_BUFFER_PCT_SELL", None) or cfg.SL_BUFFER_PCT
-        stop = float(reference_candle["high"]) * (1 + buffer_pct / 100)
+        buffer_pct = (
+            getattr(cfg, "SL_BUFFER_PCT_SELL", None)
+            or cfg.SL_BUFFER_PCT
+        )
+
+        structural_stop = (
+            float(reference_candle["high"])
+            * (1 + buffer_pct / 100)
+        )
+
+        if structural_stop > entry:
+            stop = structural_stop
+        else:
+            stop = entry + fallback_distance
+
         risk = stop - entry
         target = entry - risk * cfg.RISK_REWARD_MIN
+
     else:
-        raise ValueError(f"invalid final direction: {final_direction}")
-    if risk <= 0 or target <= 0:
         raise ValueError(
-            f"invalid {direction} geometry entry={entry} stop={stop} target={target}"
+            f"invalid final direction: {final_direction}"
         )
+
+    # Final fail-closed safety validation.
+    if direction == "BUY":
+        valid = (
+            stop > 0
+            and stop < entry
+            and target > entry
+        )
+    else:
+        valid = (
+            target > 0
+            and target < entry
+            and stop > entry
+        )
+
+    if risk <= 0 or not valid:
+        raise ValueError(
+            f"invalid {direction} geometry "
+            f"entry={entry} stop={stop} target={target}"
+        )
+
     signal.direction = direction
     signal.final_direction = direction
     signal.stop_loss = stop
     signal.target = target
+
     return signal
 
 

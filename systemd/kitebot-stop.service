@@ -7,3 +7,4 @@ Type=oneshot
 ExecStart=/usr/bin/systemctl stop kitebot-paper-contrarian.service
 ExecStart=/usr/bin/systemctl stop kitebot.service
 ExecStart=/usr/bin/systemctl stop kitebot-live-combined.service
+ExecStart=/usr/bin/systemctl stop kitebot-equity-socket-shadow.service

@@ -198,8 +198,10 @@ class WSTicker:
             # entirely (falling back to REST) if normalization fails.
 
             tick = {
+                "instrument_token": token,
                 "exchange_timestamp": ts,
                 "last_price": raw.get("last_price"),
+                "last_quantity": raw.get("last_quantity"),
                 "volume_traded": raw.get("volume_traded"),  # cumulative for the session
                 "depth": raw.get("depth"),  # bid/ask levels, used by phase-4 entry pricing
                 "received_at": now,

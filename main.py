@@ -1489,6 +1489,178 @@ def run_full_scan(
                 f"drift={fresh_validation.drift_pct:+.4f}%"
             )
 
+        # -------------------------------------------------
+        # FINAL PAPER EMA9 / ATR EXECUTION GATE
+        #
+        # Re-check EMA9 proximity immediately before
+        # depth/order execution.
+        #
+        # Enabled only by the PAPER launcher.
+        # -------------------------------------------------
+        if bool(
+            getattr(
+                cfg,
+                "ENABLE_FINAL_EMA_DISTANCE_GATE",
+                False,
+            )
+        ):
+            quality_detail = (
+                signal_analytics.get(
+                    "entry_quality_detail"
+                )
+                or {}
+            )
+
+            ema_entry = quality_detail.get("ema_entry")
+            atr_value = quality_detail.get("atr")
+
+            execution_price = (
+                fresh_validation.live_price
+                if fresh_validation.live_price is not None
+                else signal.entry_price
+            )
+
+            try:
+                ema_entry = float(ema_entry)
+                atr_value = float(atr_value)
+                execution_price = float(execution_price)
+
+            except (TypeError, ValueError):
+
+                logger.warning(
+                    "%s: FINAL EMA DISTANCE gate blocked: "
+                    "EMA9/ATR data unavailable "
+                    "| ema9=%s atr=%s price=%s",
+                    symbol,
+                    ema_entry,
+                    atr_value,
+                    execution_price,
+                )
+
+                record_pipeline_event(
+                    symbol=symbol,
+                    market=signal.market_trend,
+                    raw_direction=signal.raw_direction,
+                    decision=signal.policy_decision,
+                    final_direction=signal.direction,
+                    status="FINAL_EMA_DISTANCE_REJECTED",
+                )
+
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "blocked: final EMA9/ATR "
+                            "data unavailable"
+                        ),
+                    }
+                )
+
+                continue
+
+            if atr_value <= 0:
+
+                logger.warning(
+                    "%s: FINAL EMA DISTANCE gate blocked: "
+                    "invalid ATR=%s",
+                    symbol,
+                    atr_value,
+                )
+
+                continue
+
+            final_ema_distance_atr = (
+                abs(execution_price - ema_entry)
+                / atr_value
+            )
+
+            max_final_ema_distance = float(
+                getattr(
+                    cfg,
+                    "FINAL_EMA_DISTANCE_ATR_MAX",
+                    0.25,
+                )
+            )
+
+            signal_analytics[
+                "final_execution_ema_distance_atr"
+            ] = round(final_ema_distance_atr, 6)
+
+            signal_analytics[
+                "final_execution_ema_price"
+            ] = execution_price
+
+            signal_analytics[
+                "final_execution_ema9"
+            ] = ema_entry
+
+            signal_analytics[
+                "final_execution_atr"
+            ] = atr_value
+
+            logger.info(
+                "%s: FINAL EMA DISTANCE CHECK "
+                "| live=%.4f ema9=%.4f atr=%.4f "
+                "| distance_atr=%.4f max=%.4f "
+                "| result=%s",
+                symbol,
+                execution_price,
+                ema_entry,
+                atr_value,
+                final_ema_distance_atr,
+                max_final_ema_distance,
+                (
+                    "PASS"
+                    if final_ema_distance_atr
+                    <= max_final_ema_distance
+                    else "BLOCK"
+                ),
+            )
+
+            if (
+                final_ema_distance_atr
+                > max_final_ema_distance
+            ):
+
+                record_pipeline_event(
+                    symbol=symbol,
+                    market=signal.market_trend,
+                    raw_direction=signal.raw_direction,
+                    decision=signal.policy_decision,
+                    final_direction=signal.direction,
+                    status="FINAL_EMA_DISTANCE_REJECTED",
+                )
+
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "blocked: final EMA9 distance "
+                            f"{final_ema_distance_atr:.3f} "
+                            "ATR > "
+                            f"{max_final_ema_distance:.3f}"
+                        ),
+                    }
+                )
+
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **candidate_event_context,
+                        "reason_code":
+                            "FINAL_EMA_DISTANCE_REJECTED",
+                        "live_price": execution_price,
+                        "ema9": ema_entry,
+                        "atr": atr_value,
+                        "ema_distance_atr":
+                            final_ema_distance_atr,
+                        "max_ema_distance_atr":
+                            max_final_ema_distance,
+                    },
+                )
+
+                continue
+
         qty = risk.position_size(signal.entry_price, planned_stop_price)
         if qty > 0 and not cfg.PAPER_TRADING:
             qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)

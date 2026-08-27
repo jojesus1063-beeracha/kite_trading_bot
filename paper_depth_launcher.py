@@ -20,10 +20,10 @@ from paper_contrarian_launcher import install_two_indicator_patch
 logger = logging.getLogger("paper_depth_launcher")
 
 PAPER_RISK_PER_TRADE_PCT = 2.0
-PAPER_MAX_OPEN_POSITIONS = 120
-PAPER_CAPITAL = 100_000.0
-PAPER_MAX_TRADES_PER_DAY = 999
-PAPER_MAX_EMA_DISTANCE_ATR = 2.0
+PAPER_MAX_OPEN_POSITIONS = 3
+PAPER_CAPITAL = 5_000.0
+PAPER_MAX_TRADES_PER_DAY = 7
+PAPER_MAX_EMA_DISTANCE_ATR = 0.25
 PAPER_MAX_DAILY_LOSS_PCT = 0.5
 PAPER_DAILY_LOSS_KILL_SWITCH_ENABLED = False
 PAPER_MAX_CONSECUTIVE_LOSSES = 0
@@ -61,6 +61,8 @@ def enforce_paper_depth_settings() -> dict:
     cfg.PROPOSED_CLEAN_PIPELINE = True
     cfg.ENTRY_SCAN_SHORTLIST_SIZE = 120
     entry_quality.MAX_EMA_DISTANCE_ATR = PAPER_MAX_EMA_DISTANCE_ATR
+    cfg.ENABLE_FINAL_EMA_DISTANCE_GATE = True
+    cfg.FINAL_EMA_DISTANCE_ATR_MAX = PAPER_MAX_EMA_DISTANCE_ATR
     cfg.MAX_ENTRY_EXTENSION_ATR = 1.55
     price_action.validate_breakout = validate_directional_breakout
     cfg.ENABLE_FIXED_TARGET = True
@@ -69,7 +71,7 @@ def enforce_paper_depth_settings() -> dict:
 
     cfg.ENABLE_DEPTH_CONFIRMATION_GATE = True
     cfg.DEPTH_RAW_DIRECTION_ONLY = True
-    cfg.DEPTH_REQUIRE_DIRECTIONAL_CONFIRMATION = True
+    cfg.DEPTH_REQUIRE_DIRECTIONAL_CONFIRMATION = False
     cfg.DEPTH_CONFIRMATION_WINDOW_SECONDS = PAPER_DEPTH_CONFIRMATION_WINDOW_SECONDS
     cfg.DEPTH_CONFIRMATION_MIN_COVERAGE_SECONDS = PAPER_DEPTH_CONFIRMATION_MIN_COVERAGE_SECONDS
     cfg.DEPTH_CONFIRMATION_MIN_SAMPLES = PAPER_DEPTH_CONFIRMATION_MIN_SAMPLES
@@ -88,7 +90,7 @@ def enforce_paper_depth_settings() -> dict:
         "daily_loss_kill_switch_enabled": cfg.DAILY_LOSS_KILL_SWITCH_ENABLED,
         "max_consecutive_losses": cfg.MAX_CONSECUTIVE_LOSSES,
         "depth_confirmation_gate": cfg.ENABLE_DEPTH_CONFIRMATION_GATE,
-        "direction_policy": "RAW_EMA_PLUS_SAME_SIDE_DEPTH_NO_REVERSAL",
+        "direction_policy": "RAW_EMA_NEAR_EMA9_PLUS_OPPOSITE_DEPTH_VETO",
         "depth_requires_directional_confirmation": (
             cfg.DEPTH_REQUIRE_DIRECTIONAL_CONFIRMATION
         ),
@@ -104,8 +106,8 @@ def main() -> None:
     install_two_indicator_patch()
     logger.critical(
         "PAPER DEPTH MODE ACTIVE | settings=%s | NO REAL ORDERS | "
-        "Top-120 paper watchlist; NO REVERSALS; EMA9/EMA21 raw side must be "
-        "confirmed by persistent same-side five-level depth before entry",
+        "Top-120 paper watchlist; NO REVERSALS; EMA9/EMA21 raw side requires "
+        "EMA9 distance <=0.25 ATR; persistent opposite five-level depth vetoes entry",
         settings,
     )
     runpy.run_module("main", run_name="__main__")

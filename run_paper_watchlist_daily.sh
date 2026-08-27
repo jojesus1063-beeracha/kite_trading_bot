@@ -38,13 +38,13 @@ PY
 echo "Waiting 20 seconds for the 09:27:10 selector boundary..."
 sleep 20
 
-echo "Clean full-universe PAPER top-120 generation started:"
+echo "Clean full-universe PAPER top-30 generation started:"
 TZ=Asia/Kolkata date
 
 "$PYTHON" paper_full_universe_top60_selector.py \
   --write \
-  --top 120 \
-  --min-selected 120 \
+  --top 30 \
+  --min-selected 30 \
   --max-price 2200 \
   --min-turnover 1000000 \
   --max-spread-pct 0.25 \
@@ -71,7 +71,7 @@ if config.get("paper_trading") is not True:
     raise SystemExit("FAIL: configuration left PAPER mode")
 if report.get("status") != "success" or report.get("paper_only") is not True:
     raise SystemExit("FAIL: selector report is not successful/PAPER-only")
-if report.get("strategy") != "FULL_ZERODHA_CLEAN_TOP120_MOMENTUM":
+if report.get("strategy") != "FULL_ZERODHA_CLEAN_TOP30_MOMENTUM":
     raise SystemExit("FAIL: unexpected selector strategy")
 if report.get("mode") != "WRITE_CONFIG":
     raise SystemExit("FAIL: selector did not run in WRITE_CONFIG mode")
@@ -83,9 +83,9 @@ if generated.date() != datetime.now(ist).date():
 watchlist = config.get("watchlist") or []
 output_watchlist = payload.get("watchlist") or []
 selected = report.get("selected") or []
-if len(watchlist) != 120 or len(output_watchlist) != 120 or len(selected) != 120:
+if len(watchlist) != 30 or len(output_watchlist) != 30 or len(selected) != 30:
     raise SystemExit(
-        f"FAIL: expected exactly 120 stocks; config={len(watchlist)} "
+        f"FAIL: expected exactly 30 stocks; config={len(watchlist)} "
         f"output={len(output_watchlist)} report={len(selected)}"
     )
 
@@ -102,7 +102,7 @@ if any(item.get("ordinary_equity_clean") is not True for item in selected):
 cleaning = report.get("cleaning") or {}
 clean_total = int(cleaning.get("clean_total") or 0)
 quotes_received = int(report.get("quotes_received") or 0)
-if clean_total < 120:
+if clean_total < 30:
     raise SystemExit(f"FAIL: cleaned universe too small: {clean_total}")
 minimum_quotes = math.ceil(clean_total * 0.90)
 if quotes_received < minimum_quotes:
@@ -153,5 +153,5 @@ print("Open-extreme counts:", report.get("selected_open_extreme_counts"))
 print("Watchlist count:", len(watchlist))
 PY
 
-echo "Clean full-universe PAPER top-120 generation completed:"
+echo "Clean full-universe PAPER top-30 generation completed:"
 TZ=Asia/Kolkata date

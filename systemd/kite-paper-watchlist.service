@@ -12,8 +12,10 @@ WorkingDirectory=/home/ubuntu/kite_trading_bot
 # Fail closed: stop the existing PAPER process before selection and start the
 # updated PAPER stack only after selector validation succeeds.
 ExecStartPre=+/usr/bin/systemctl stop kitebot-paper-contrarian.service
+ExecStartPre=+/usr/bin/systemctl stop kitebot-equity-socket-shadow.service
 ExecStart=/bin/bash /home/ubuntu/kite_trading_bot/run_paper_watchlist_daily.sh
 ExecStartPost=+/usr/bin/systemctl start kitebot-paper-contrarian.service
+ExecStartPost=+/usr/bin/systemctl start kitebot-equity-socket-shadow.service
 TimeoutStartSec=900
 UMask=0027
 StandardOutput=journal
