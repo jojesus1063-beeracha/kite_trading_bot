@@ -3,6 +3,7 @@
 from __future__ import annotations
 import logging
 import runpy
+import time
 import pandas as pd
 
 import config as cfg
@@ -36,9 +37,8 @@ def enforce_settings():
     cfg.MAX_TRADES_PER_DAY = 7
     cfg.CHECK_MARGIN_BEFORE_ENTRY = False
     cfg.PROPOSED_CLEAN_PIPELINE = True
-    # Matmon replaces these technical vetoes; operational/risk safety remains.
     cfg.ENABLE_FINAL_EMA_DISTANCE_GATE = False
-    cfg.ENABLE_DEPTH_CONFIRMATION_GATE = True  # repurposed below as quote-repricing gate
+    cfg.ENABLE_DEPTH_CONFIRMATION_GATE = True
     cfg.DEPTH_RAW_DIRECTION_ONLY = True
     cfg.DEPTH_REQUIRE_DIRECTIONAL_CONFIRMATION = True
     cfg.ENABLE_RVOL_FILTER = False
@@ -51,8 +51,10 @@ def enforce_settings():
 
 
 def install_matmon_policy():
-    # First install the existing clean EMA9/21 raw-signal generator.
     install_two_indicator_patch()
+    # The base clean-pipeline patch enables some research gates. Matmon makes
+    # those observational; re-assert the isolated Matmon settings afterwards.
+    enforce_settings()
     ema_evaluate = strategy.evaluate
 
     def evaluate_with_di(symbol, df_15m, df_entry, df_index, cfg_obj):
@@ -66,8 +68,7 @@ def install_matmon_policy():
         if p.empty or m.empty:
             logger.info("MATMON REJECT | %s | DI_UNAVAILABLE", symbol)
             return None
-        plus_di = float(p.iloc[-1])
-        minus_di = float(m.iloc[-1])
+        plus_di = float(p.iloc[-1]); minus_di = float(m.iloc[-1])
         if not di_agrees(signal.direction, plus_di, minus_di):
             logger.info("MATMON REJECT | %s | direction=%s +DI=%.3f -DI=%.3f | DI_DISAGREES",
                         symbol, signal.direction, plus_di, minus_di)
@@ -92,24 +93,19 @@ def install_matmon_policy():
             max_age_seconds=float(getattr(cfg_obj, "MATMON_QUOTE_MAX_AGE_SECONDS", 2.0)),
             now=now,
         )
-        logger.info(
-            "MATMON QUOTE | %s | %s | first=%s/%s last=%s/%s | %s",
-            symbol, direction, evidence.first_bid, evidence.first_ask,
-            evidence.last_bid, evidence.last_ask, evidence.reason,
-        )
+        logger.info("MATMON QUOTE | %s | %s | first=%s/%s last=%s/%s | %s",
+                    symbol, direction, evidence.first_bid, evidence.first_ask,
+                    evidence.last_bid, evidence.last_ask, evidence.reason)
+        current = time.time() if now is None else float(now)
         return DepthConfirmation(
             bool(evidence.confirmed),
             "CONFIRMED" if evidence.confirmed else "MATMON_REJECT",
             evidence.reason,
             sample_count=2 if evidence.available else 0,
-            coverage_seconds=(
-                max(0.0, evidence.last_received_at - evidence.first_received_at)
-                if evidence.first_received_at is not None and evidence.last_received_at is not None else 0.0
-            ),
-            latest_age_seconds=(
-                max(0.0, (now if now is not None else __import__('time').time()) - evidence.last_received_at)
-                if evidence.last_received_at is not None else None
-            ),
+            coverage_seconds=(max(0.0, evidence.last_received_at - evidence.first_received_at)
+                              if evidence.first_received_at is not None and evidence.last_received_at is not None else 0.0),
+            latest_age_seconds=(max(0.0, current - evidence.last_received_at)
+                                if evidence.last_received_at is not None else None),
         )
 
     depth_confirmation.evaluate_live_depth = evaluate_matmon_quote
