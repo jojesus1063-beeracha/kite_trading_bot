@@ -1,202 +1,74 @@
 #!/usr/bin/env python3
+"""Matmon HaElohim entry-direction policy.
+
+Strategy authorization stages handled here:
+1. EMA3/EMA15 direction on completed 3-minute candles.
+2. DI14 must agree with that direction.
+
+Quote CLEAN and microstructure confirmation are handled by dedicated modules.
+This module does not place orders.
 """
-Matmon HaElohim — PAPER entry policy.
-
-Technical entry authorization:
-    1. EMA9 / EMA21 determines candidate direction.
-    2. DI must agree with that direction.
-    3. Live quote repricing must confirm that direction.
-
-Legacy indicators are observational only.
-
-NO LIVE ORDERS.
-"""
-
 from dataclasses import dataclass, asdict
+from math import isfinite
 from typing import Optional
 
 
 @dataclass
-class MatmonDecision:
+class MatmonDirectionDecision:
     accepted: bool
     direction: Optional[str]
     reason: str
-
-    ema9: Optional[float] = None
-    ema21: Optional[float] = None
+    ema3: Optional[float] = None
+    ema15: Optional[float] = None
     plus_di: Optional[float] = None
     minus_di: Optional[float] = None
-
-    di_agree: bool = False
-    quote_confirm: bool = False
 
     def to_dict(self):
         return asdict(self)
 
 
-def ema_direction(ema9, ema21):
-    if ema9 is None or ema21 is None:
+def _finite(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
         return None
+    return number if isfinite(number) else None
 
-    ema9 = float(ema9)
-    ema21 = float(ema21)
 
-    if ema9 > ema21:
+def ema_direction(ema3, ema15):
+    fast = _finite(ema3)
+    slow = _finite(ema15)
+    if fast is None or slow is None:
+        return None
+    if fast > slow:
         return "BUY"
-
-    if ema9 < ema21:
+    if fast < slow:
         return "SELL"
-
     return None
 
 
 def di_agrees(direction, plus_di, minus_di):
-    if (
-        direction not in {"BUY", "SELL"}
-        or plus_di is None
-        or minus_di is None
-    ):
+    pdi = _finite(plus_di)
+    mdi = _finite(minus_di)
+    if direction not in {"BUY", "SELL"} or pdi is None or mdi is None:
         return False
-
-    plus_di = float(plus_di)
-    minus_di = float(minus_di)
-
     if direction == "BUY":
-        return plus_di > minus_di
-
-    return minus_di > plus_di
-
-
-def quote_confirms(
-    direction,
-    first_bid,
-    first_ask,
-    last_bid,
-    last_ask,
-):
-    """
-    Quote confirmation deliberately checks REPRICING,
-    not merely visible bid/ask quantity.
-
-    BUY:
-        best bid must rise
-        AND best ask must rise.
-
-    SELL:
-        best bid must fall
-        AND best ask must fall.
-
-    This prevents a large stationary bid wall from being
-    interpreted automatically as bullish confirmation.
-    """
-
-    values = (
-        first_bid,
-        first_ask,
-        last_bid,
-        last_ask,
-    )
-
-    if any(v is None for v in values):
-        return False
-
-    first_bid = float(first_bid)
-    first_ask = float(first_ask)
-    last_bid = float(last_bid)
-    last_ask = float(last_ask)
-
-    if min(values) <= 0:
-        return False
-
-    if first_ask < first_bid or last_ask < last_bid:
-        return False
-
-    if direction == "BUY":
-        return (
-            last_bid > first_bid
-            and last_ask > first_ask
-        )
-
-    if direction == "SELL":
-        return (
-            last_bid < first_bid
-            and last_ask < first_ask
-        )
-
-    return False
+        return pdi > mdi
+    return mdi > pdi
 
 
-def evaluate(
-    *,
-    ema9,
-    ema21,
-    plus_di,
-    minus_di,
-    first_bid,
-    first_ask,
-    last_bid,
-    last_ask,
-):
-    direction = ema_direction(ema9, ema21)
-
+def evaluate_direction(*, ema3, ema15, plus_di, minus_di):
+    direction = ema_direction(ema3, ema15)
     if direction is None:
-        return MatmonDecision(
-            False,
-            None,
-            "EMA_DIRECTION_UNAVAILABLE",
-            ema9=ema9,
-            ema21=ema21,
-            plus_di=plus_di,
-            minus_di=minus_di,
+        return MatmonDirectionDecision(
+            False, None, "EMA_DIRECTION_UNAVAILABLE", ema3, ema15, plus_di, minus_di
         )
 
-    di_ok = di_agrees(
-        direction,
-        plus_di,
-        minus_di,
-    )
-
-    if not di_ok:
-        return MatmonDecision(
-            False,
-            direction,
-            "DI_DISAGREES",
-            ema9=ema9,
-            ema21=ema21,
-            plus_di=plus_di,
-            minus_di=minus_di,
-            di_agree=False,
+    if not di_agrees(direction, plus_di, minus_di):
+        return MatmonDirectionDecision(
+            False, direction, "DI_DISAGREES", ema3, ema15, plus_di, minus_di
         )
 
-    quote_ok = quote_confirms(
-        direction,
-        first_bid,
-        first_ask,
-        last_bid,
-        last_ask,
-    )
-
-    if not quote_ok:
-        return MatmonDecision(
-            False,
-            direction,
-            "QUOTE_NOT_CONFIRMED",
-            ema9=ema9,
-            ema21=ema21,
-            plus_di=plus_di,
-            minus_di=minus_di,
-            di_agree=True,
-            quote_confirm=False,
-        )
-
-    return MatmonDecision(
-        True,
-        direction,
-        "MATMON_ENTRY_CONFIRMED",
-        ema9=ema9,
-        ema21=ema21,
-        plus_di=plus_di,
-        minus_di=minus_di,
-        di_agree=True,
-        quote_confirm=True,
+    return MatmonDirectionDecision(
+        True, direction, "MATMON_EMA_DI_CONFIRMED", ema3, ema15, plus_di, minus_di
     )
