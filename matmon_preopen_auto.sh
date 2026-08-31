@@ -13,8 +13,15 @@ echo "===== MATMON PREOPEN AUTO $(date) ====="
 for attempt in {1..11}; do
     now=$(date +%H%M%S)
 
+    if [ "$now" -lt 090000 ]; then
+        echo "Outside pre-open window: current time $now is before 09:00:00."
+        echo "Preserving existing Top-120."
+        exit 0
+    fi
+
     if [ "$now" -ge 091300 ]; then
         echo "Pre-open cutoff reached before attempt $attempt."
+        echo "Preserving existing Top-120."
         break
     fi
 
