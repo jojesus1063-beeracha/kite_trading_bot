@@ -1,5 +1,8 @@
+import inspect
 import time
 from types import SimpleNamespace
+
+import pandas as pd
 
 from ws_ticker import TickBuffer
 from matmon_entry_policy import evaluate_direction
@@ -7,6 +10,7 @@ from matmon_quote_confirmation import evaluate_quote_window
 from matmon_microstructure import evaluate_microstructure, weighted_5_imbalance
 from matmon_live_candidate_launcher import authorize_candidate, dry_run_execution_boundary
 import matmon_live_candidate_launcher as live_candidate
+import paper_matmon_launcher as paper_matmon
 
 
 def _depth(base_bid=100.0, base_ask=100.1, bid_qty=120, ask_qty=80):
@@ -44,6 +48,33 @@ def _cfg():
         MATMON_QUOTE_WINDOW_SECONDS=3.0,
         MATMON_QUOTE_MAX_AGE_SECONDS=2.0,
     )
+
+
+def _paper_cfg():
+    return SimpleNamespace(
+        MATMON_EMA_FAST=3,
+        MATMON_EMA_SLOW=15,
+        MATMON_DI_PERIOD=14,
+        STOP_LOSS_PERCENT=0.45,
+        PROFIT_TARGET_PERCENT=0.70,
+    )
+
+
+def _trend_df(up=True, rows=40):
+    base = 100.0
+    step = 0.25 if up else -0.25
+    data = []
+    for i in range(rows):
+        close = base + step * i
+        data.append({
+            "date": pd.Timestamp("2026-08-31 09:15", tz="Asia/Kolkata") + pd.Timedelta(minutes=3 * i),
+            "open": close - (0.10 if up else -0.10),
+            "high": close + 0.20,
+            "low": close - 0.20,
+            "close": close,
+            "volume": 1000 + i,
+        })
+    return pd.DataFrame(data)
 
 
 def test_01_ema3_gt_ema15_buy():
@@ -243,3 +274,44 @@ def test_24_microstructure_uses_same_clean_ticks():
     clean = evaluate_quote_window(b, "ABC", "BUY", now=now)
     micro = evaluate_microstructure("BUY", clean.ticks)
     assert clean.confirmed and micro.sample_count == len(clean.ticks)
+
+
+def test_25_paper_signal_is_direct_ema3_15_di14_buy():
+    signal = paper_matmon._matmon_signal("ABC", _trend_df(up=True), _paper_cfg())
+    assert signal is not None and signal.direction == "BUY"
+    detail = signal.price_action_detail["matmon"]
+    assert detail["ema3"] > detail["ema15"]
+    assert detail["plus_di"] > detail["minus_di"]
+
+
+def test_26_paper_signal_is_direct_ema3_15_di14_sell():
+    signal = paper_matmon._matmon_signal("ABC", _trend_df(up=False), _paper_cfg())
+    assert signal is not None and signal.direction == "SELL"
+    detail = signal.price_action_detail["matmon"]
+    assert detail["ema3"] < detail["ema15"]
+    assert detail["minus_di"] > detail["plus_di"]
+
+
+def test_27_paper_launcher_has_no_contrarian_patch_dependency():
+    source = inspect.getsource(paper_matmon)
+    assert "paper_contrarian_launcher" not in source
+    assert "install_two_indicator_patch" not in source
+    assert "ema_evaluate = strategy.evaluate" not in source
+
+
+def test_28_paper_period_contract_is_3_15_14():
+    assert paper_matmon.MATMON_REQUIRED["MATMON_EMA_FAST"] == 3
+    assert paper_matmon.MATMON_REQUIRED["MATMON_EMA_SLOW"] == 15
+    assert paper_matmon.MATMON_REQUIRED["MATMON_DI_PERIOD"] == 14
+
+
+def test_29_paper_confirmation_requires_microstructure():
+    source = inspect.getsource(paper_matmon.install_matmon_policy)
+    assert "evaluate_quote_window" in source
+    assert "evaluate_microstructure(direction, clean.ticks)" in source
+    assert source.index("evaluate_quote_window") < source.index("evaluate_microstructure(direction, clean.ticks)")
+
+
+def test_30_paper_margin_guard_not_disabled():
+    source = inspect.getsource(paper_matmon.enforce_settings)
+    assert "cfg.CHECK_MARGIN_BEFORE_ENTRY = True" in source
