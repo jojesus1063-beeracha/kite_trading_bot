@@ -315,3 +315,35 @@ def test_29_paper_confirmation_requires_microstructure():
 def test_30_paper_margin_guard_not_disabled():
     source = inspect.getsource(paper_matmon.enforce_settings)
     assert "cfg.CHECK_MARGIN_BEFORE_ENTRY = True" in source
+
+
+def test_31_pre_di_ticks_cannot_satisfy_clean():
+    now = time.time()
+    di_passed_at = now - 1.0
+    b = _buffer([
+        _tick(now - 4.0, 100.00, 100.10, 100.00, bid_qty=100, ask_qty=90),
+        _tick(now - 2.0, 100.05, 100.15, 100.10, bid_qty=120, ask_qty=80),
+        _tick(now - 0.1, 100.10, 100.20, 100.24, bid_qty=140, ask_qty=70),
+    ])
+    evidence = evaluate_quote_window(
+        b,
+        "ABC",
+        "BUY",
+        now=now,
+        not_before=di_passed_at,
+    )
+    assert not evidence.confirmed
+    assert evidence.reason == "MATMON_INSUFFICIENT_QUOTE_WINDOW"
+
+
+def test_32_paper_contract_forces_rest_authoritative_shadow_mode():
+    assert paper_matmon.MATMON_REQUIRED["WS_CANDLE_MODE"] == "shadow"
+    source = inspect.getsource(paper_matmon.enforce_settings)
+    assert 'cfg.WS_CANDLE_MODE = "shadow"' in source
+
+
+def test_33_paper_confirmation_consumes_post_di_timestamp():
+    source = inspect.getsource(paper_matmon.install_matmon_policy)
+    assert "_MATMON_DI_PASSED_AT[symbol] = time.time()" in source
+    assert "_MATMON_DI_PASSED_AT.pop(symbol, None)" in source
+    assert "not_before=di_passed_at" in source
