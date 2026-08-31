@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Matmon live-candidate DRY-RUN launcher.
 
-This file exists to validate the intended live strategy path without exposing
-or invoking a real-order boundary. It deliberately requires PAPER_TRADING=True
-and contains no broker order call.
+This file validates the intended production strategy path without exposing or
+invoking a real-order boundary. It deliberately requires PAPER_TRADING=True,
+REST-authoritative completed candles (WS_CANDLE_MODE=shadow), and contains no
+broker order call.
 """
 from __future__ import annotations
 
@@ -16,6 +17,12 @@ from matmon_quote_confirmation import evaluate_quote_window
 from matmon_microstructure import evaluate_microstructure
 
 logger = logging.getLogger("matmon_live_candidate_launcher")
+
+REQUIRED_EMA_FAST = 3
+REQUIRED_EMA_SLOW = 15
+REQUIRED_DI_PERIOD = 14
+REQUIRED_ENTRY_TIMEFRAME = "3minute"
+REQUIRED_WS_CANDLE_MODE = "shadow"
 
 
 @dataclass
@@ -33,15 +40,32 @@ class CandidateResult:
 
 
 def assert_dry_run_contract(cfg_obj=cfg):
+    """Fail closed unless the production-candidate remains simulation only."""
+    errors = []
     if not bool(getattr(cfg_obj, "PAPER_TRADING", False)):
-        raise SystemExit("SAFETY BLOCK: Matmon live-candidate requires PAPER_TRADING=True")
+        errors.append("PAPER_TRADING must be True")
     if not bool(getattr(cfg_obj, "ENABLE_WS_CANDLES", False)):
-        raise SystemExit("SAFETY BLOCK: Matmon requires MODE_FULL WebSocket data")
+        errors.append("ENABLE_WS_CANDLES must be True")
+    if str(getattr(cfg_obj, "WS_CANDLE_MODE", REQUIRED_WS_CANDLE_MODE)).lower() != REQUIRED_WS_CANDLE_MODE:
+        errors.append("WS_CANDLE_MODE must be shadow so REST candles remain authoritative")
+    if str(getattr(cfg_obj, "ENTRY_TIMEFRAME", REQUIRED_ENTRY_TIMEFRAME)) != REQUIRED_ENTRY_TIMEFRAME:
+        errors.append("ENTRY_TIMEFRAME must be 3minute")
+    if int(getattr(cfg_obj, "MATMON_EMA_FAST", REQUIRED_EMA_FAST)) != REQUIRED_EMA_FAST:
+        errors.append("MATMON_EMA_FAST must be 3")
+    if int(getattr(cfg_obj, "MATMON_EMA_SLOW", REQUIRED_EMA_SLOW)) != REQUIRED_EMA_SLOW:
+        errors.append("MATMON_EMA_SLOW must be 15")
+    if int(getattr(cfg_obj, "MATMON_DI_PERIOD", REQUIRED_DI_PERIOD)) != REQUIRED_DI_PERIOD:
+        errors.append("MATMON_DI_PERIOD must be 14")
+    if not bool(getattr(cfg_obj, "CHECK_MARGIN_BEFORE_ENTRY", True)):
+        errors.append("CHECK_MARGIN_BEFORE_ENTRY must be True")
+
+    if errors:
+        raise SystemExit("SAFETY BLOCK: Matmon live-candidate contract failed: " + "; ".join(errors))
     return True
 
 
 def authorize_candidate(*, tick_buffer, symbol, ema3, ema15, plus_di, minus_di,
-                        cfg_obj=cfg, now=None):
+                        cfg_obj=cfg, now=None, not_before=None):
     """Run the complete Matmon strategy contract and stop at a dry-run boundary."""
     assert_dry_run_contract(cfg_obj)
 
@@ -61,6 +85,7 @@ def authorize_candidate(*, tick_buffer, symbol, ema3, ema15, plus_di, minus_di,
         window_seconds=float(getattr(cfg_obj, "MATMON_QUOTE_WINDOW_SECONDS", 3.0)),
         max_age_seconds=float(getattr(cfg_obj, "MATMON_QUOTE_MAX_AGE_SECONDS", 2.0)),
         now=now,
+        not_before=not_before,
     )
     if not clean.confirmed:
         return CandidateResult(
@@ -91,9 +116,9 @@ def authorize_candidate(*, tick_buffer, symbol, ema3, ema15, plus_di, minus_di,
 def dry_run_execution_boundary(result: CandidateResult):
     """Return audit data only. This function never submits a broker order."""
     if not isinstance(result, CandidateResult) or not result.accepted:
-        return {"would_submit": False, "reason": getattr(result, "reason", "REJECTED")}
+        return {"would_authorize": False, "reason": getattr(result, "reason", "REJECTED")}
     return {
-        "would_submit": True,
+        "would_authorize": True,
         "direction": result.direction,
         "reason": result.reason,
         "execution_boundary": "DRY_RUN_ONLY",
@@ -103,8 +128,9 @@ def dry_run_execution_boundary(result: CandidateResult):
 def main():
     assert_dry_run_contract(cfg)
     logger.critical(
-        "MATMON LIVE-CANDIDATE DRY-RUN READY | EMA3/15 -> DI14 -> 3s FULL-PATH CLEAN -> "
-        "LTP velocity -> weighted-5 direction -> weighted-5 strengthening | NO REAL ORDERS"
+        "MATMON LIVE-CANDIDATE DRY-RUN READY | REST completed 3m candles | "
+        "EMA3/15 -> DI14 -> fresh post-DI 3s FULL-PATH CLEAN -> LTP velocity -> "
+        "weighted-5 direction -> weighted-5 strengthening | NO REAL ORDERS"
     )
 
 
