@@ -87,6 +87,15 @@ def evaluate_quote_window(tick_buffer, symbol, direction, *, window_seconds=3.0,
         valid.append((received, quote[0], quote[1], tick))
 
     if not valid:
+        # The narrow working-window query intentionally excludes old ticks.  Use
+        # the buffer's latest tick only to distinguish "stream exists but is
+        # stale" from "no usable tick has ever been buffered".  This does not
+        # make stale evidence eligible for CLEAN confirmation.
+        latest_tick = tick_buffer.latest(symbol)
+        latest_received = _number((latest_tick or {}).get("received_at"))
+        if (latest_received is not None and latest_received > 0
+                and now - latest_received > max_age_seconds):
+            return QuoteEvidence(False, False, "MATMON_STALE_QUOTE")
         return QuoteEvidence(False, False, "MATMON_NO_TICKS")
 
     valid.sort(key=lambda row: row[0])
