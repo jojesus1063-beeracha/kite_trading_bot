@@ -162,8 +162,11 @@ def cleaned_equity_instruments(kite: Any) -> tuple[list[dict[str, Any]], dict[st
     clean_by_exchange: Counter[str] = Counter()
     seen: set[tuple[str, str]] = set()
 
+    from data_feed import _get_instrument_master
+
     for exchange in ("NSE", "BSE"):
-        instruments = kite.instruments(exchange)
+        master = _get_instrument_master(kite, exchange)
+        instruments = list(master.values())
         if not isinstance(instruments, list):
             raise RuntimeError(f"Kite {exchange} instrument response was not a list")
         raw_by_exchange[exchange] += len(instruments)

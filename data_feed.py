@@ -99,6 +99,9 @@ def _write_instrument_master_disk_cache(
                 "tick_size": inst.get("tick_size"),
                 "name": inst.get("name"),
                 "exchange": inst.get("exchange", exchange),
+                "segment": inst.get("segment"),
+                "instrument_type": inst.get("instrument_type"),
+                "lot_size": inst.get("lot_size"),
             }
         )
 

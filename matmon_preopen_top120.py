@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import json
+import math
+import shutil
+import time
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from auth import get_kite_client
+from paper_full_universe_top60_selector import (
+    cleaned_equity_instruments,
+    fetch_selector_quotes,
+)
+
+IST = ZoneInfo("Asia/Kolkata")
+ROOT = Path(__file__).resolve().parent
+CONFIG = ROOT / "user_config.json"
+RUNTIME = ROOT / "runtime" / "matmon" / "preopen"
+TOP_N = 120
+
+# Broad safety/liquidity constraints only.
+MIN_PRICE = 20.0
+MAX_PRICE = 2200.0
+MAX_SPREAD_PCT = 0.50
+MIN_DEPTH_VALUE = 1000.0
+
+
+def num(v, default=0.0):
+    try:
+        x = float(v)
+        return x if math.isfinite(x) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def depth_side_value(levels):
+    total = 0.0
+    for x in levels or []:
+        if not isinstance(x, dict):
+            continue
+        total += num(x.get("price")) * num(x.get("quantity"))
+    return total
+
+
+def evaluate(row, quote):
+    if not isinstance(quote, dict):
+        return None
+
+    last = num(quote.get("last_price"))
+
+    if not (MIN_PRICE <= last <= MAX_PRICE):
+        return None
+
+    depth = quote.get("depth") or {}
+    buys = depth.get("buy") or []
+    sells = depth.get("sell") or []
+
+    if not buys or not sells:
+        return None
+
+    bid = num(buys[0].get("price"))
+    ask = num(sells[0].get("price"))
+
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return None
+
+    mid = (bid + ask) / 2.0
+
+    if mid <= 0:
+        return None
+
+    spread_pct = ((ask - bid) / mid) * 100.0
+
+    if spread_pct > MAX_SPREAD_PCT:
+        return None
+
+    buy_value = depth_side_value(buys)
+    sell_value = depth_side_value(sells)
+    depth_value = buy_value + sell_value
+
+    if depth_value < MIN_DEPTH_VALUE:
+        return None
+
+    # 0..1: total visible depth / liquidity.
+    liquidity_raw = math.log1p(depth_value)
+
+    # 0..1: absolute directional imbalance.
+    imbalance = (
+        abs(buy_value - sell_value) / depth_value
+        if depth_value > 0 else 0.0
+    )
+
+    # Tighter spread is better.
+    spread_quality = max(
+        0.0,
+        1.0 - (spread_pct / MAX_SPREAD_PCT),
+    )
+
+    volume = num(quote.get("volume"))
+    volume_raw = math.log1p(max(0.0, volume))
+
+    ohlc = quote.get("ohlc") or {}
+    prev_close = num(ohlc.get("close"))
+
+    gap_pct = (
+        ((last - prev_close) / prev_close) * 100.0
+        if prev_close > 0 else 0.0
+    )
+
+    return {
+        "symbol": row["symbol"],
+        "exchange": row["exchange"],
+        "last_price": round(last, 4),
+        "bid": round(bid, 4),
+        "ask": round(ask, 4),
+        "spread_pct": round(spread_pct, 6),
+        "buy_depth_value": round(buy_value, 2),
+        "sell_depth_value": round(sell_value, 2),
+        "depth_value": round(depth_value, 2),
+        "imbalance": round(imbalance, 6),
+        "volume": int(volume),
+        "gap_pct": round(gap_pct, 6),
+
+        # Raw values normalized after the complete universe is collected.
+        "_liq": liquidity_raw,
+        "_vol": volume_raw,
+        "_spread": spread_quality,
+        "_imbalance": imbalance,
+    }
+
+
+def normalize(rows, key):
+    values = [num(x.get(key)) for x in rows]
+
+    if not values:
+        return
+
+    lo = min(values)
+    hi = max(values)
+
+    for row in rows:
+        value = num(row.get(key))
+        row[key + "_norm"] = (
+            (value - lo) / (hi - lo)
+            if hi > lo else 0.0
+        )
+
+
+def main():
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+
+    cfg = json.loads(CONFIG.read_text())
+
+    if cfg.get("paper_trading") is not True:
+        raise SystemExit(
+            "ABORT: user_config.json is not PAPER"
+        )
+
+    kite = get_kite_client()
+
+    rows, cleaning = cleaned_equity_instruments(kite)
+
+    if len(rows) < TOP_N:
+        raise SystemExit(
+            f"ABORT: cleaned universe only {len(rows)}"
+        )
+
+    keys = [
+        f'{x["exchange"]}:{x["symbol"]}'
+        for x in rows
+    ]
+
+    quotes = fetch_selector_quotes(kite, keys)
+
+    candidates = []
+
+    for row in rows:
+        key = f'{row["exchange"]}:{row["symbol"]}'
+        candidate = evaluate(row, quotes.get(key))
+
+        if candidate is not None:
+            candidates.append(candidate)
+
+    if len(candidates) < TOP_N:
+        raise SystemExit(
+            f"ABORT: only {len(candidates)} valid pre-open candidates"
+        )
+
+    normalize(candidates, "_liq")
+    normalize(candidates, "_vol")
+
+    for c in candidates:
+        # PRE-OPEN DISCOVERY ONLY.
+        #
+        # Liquidity/activity dominate.
+        # Book imbalance helps rank active names.
+        # Direction is deliberately NOT used here.
+        #
+        # BUY/SELL remains exclusively Matmon:
+        # EMA3/15 -> DI14 -> 3s repricing.
+
+        c["preopen_score"] = round(
+            45.0 * c["_liq_norm"]
+            + 25.0 * c["_vol_norm"]
+            + 20.0 * c["_spread"]
+            + 10.0 * c["_imbalance"],
+            6,
+        )
+
+    # Deduplicate the same symbol if available on both exchanges.
+    candidates.sort(
+        key=lambda x: (
+            -x["preopen_score"],
+            -x["depth_value"],
+            x["spread_pct"],
+            x["symbol"],
+        )
+    )
+
+    selected = []
+    seen = set()
+
+    for c in candidates:
+        if c["symbol"] in seen:
+            continue
+
+        seen.add(c["symbol"])
+        selected.append(c)
+
+        if len(selected) == TOP_N:
+            break
+
+    if len(selected) != TOP_N:
+        raise SystemExit(
+            f"ABORT: unique selected count={len(selected)}"
+        )
+
+    watchlist = [
+        {
+            "symbol": x["symbol"],
+            "exchange": x["exchange"],
+        }
+        for x in selected
+    ]
+
+    if len({x["symbol"] for x in watchlist}) != TOP_N:
+        raise SystemExit("ABORT: duplicate symbols")
+
+    # Preserve complete previous configuration.
+    backup_dir = RUNTIME / "config_backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+
+    backup = (
+        backup_dir /
+        f"user_config_before_preopen_{stamp}.json"
+    )
+
+    shutil.copy2(CONFIG, backup)
+
+    updated = dict(cfg)
+    updated["watchlist"] = watchlist
+
+    tmp = CONFIG.with_suffix(".json.tmp")
+
+    tmp.write_text(
+        json.dumps(updated, indent=2) + "\n"
+    )
+
+    tmp.replace(CONFIG)
+
+    # Read-back verification.
+    check = json.loads(CONFIG.read_text())
+
+    if check.get("paper_trading") is not True:
+        raise RuntimeError("POST-WRITE PAPER CHECK FAILED")
+
+    if check.get("watchlist") != watchlist:
+        raise RuntimeError("POST-WRITE WATCHLIST CHECK FAILED")
+
+    report = {
+        "generated_at": datetime.now(IST).isoformat(),
+        "strategy": "MATMON_PREOPEN_TOP120",
+        "cleaning": cleaning,
+        "valid_candidates": len(candidates),
+        "selected_count": len(selected),
+        "watchlist": watchlist,
+        "selected_details": [
+            {
+                k: v
+                for k, v in x.items()
+                if not k.startswith("_")
+            }
+            for x in selected
+        ],
+        "config_backup": str(backup),
+    }
+
+    report_path = RUNTIME / f"top120_{stamp}.json"
+
+    report_path.write_text(
+        json.dumps(report, indent=2) + "\n"
+    )
+
+    (RUNTIME / "latest.json").write_text(
+        json.dumps(report, indent=2) + "\n"
+    )
+
+    print("MATMON PREOPEN TOP-120")
+    print("Clean universe :", len(rows))
+    print("Valid candidates:", len(candidates))
+    print("Selected       :", len(selected))
+    print("Unique         :", len(seen))
+    print("Backup         :", backup)
+    print("Report         :", report_path)
+
+    print()
+    print("TOP 20")
+
+    for i, x in enumerate(selected[:20], 1):
+        print(
+            f'{i:3d}. '
+            f'{x["exchange"]}:{x["symbol"]:<16} '
+            f'score={x["preopen_score"]:6.2f} '
+            f'spread={x["spread_pct"]:.3f}% '
+            f'depth={x["depth_value"]:,.0f} '
+            f'imb={x["imbalance"]:.3f}'
+        )
+
+    print()
+    print("MATMON_PREOPEN_TOP120=PASS")
+    print("PAPER_ONLY=TRUE")
+    print("NO_ORDERS_PLACED")
+
+
+if __name__ == "__main__":
+    main()
