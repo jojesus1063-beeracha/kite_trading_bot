@@ -1,3 +1,4 @@
+import ast
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,9 +37,25 @@ def test_02_live_candidate_contract_blocks_nonpaper_and_ws_live():
 
 
 def test_03_readiness_code_contract_contains_no_execution_boundary():
+    """Reject actual execution calls, not harmless audit strings naming them."""
     source = inspect.getsource(readiness)
-    for token in ("place_order(", "modify_order(", "cancel_order("):
-        assert token not in source
+    tree = ast.parse(source)
+    forbidden_calls = {
+        "place_order",
+        "modify_order",
+        "cancel_order",
+        "place_entry_order",
+    }
+    invoked = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name):
+            invoked.add(func.id)
+        elif isinstance(func, ast.Attribute):
+            invoked.add(func.attr)
+    assert forbidden_calls.isdisjoint(invoked)
     assert "DRY_RUN_ONLY" in source
 
 
