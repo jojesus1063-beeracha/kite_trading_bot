@@ -115,14 +115,21 @@ def authorize_candidate(*, tick_buffer, symbol, ema3, ema15, plus_di, minus_di,
 
 def dry_run_execution_boundary(result: CandidateResult):
     """Return audit data only. This function never submits a broker order."""
-    if not isinstance(result, CandidateResult) or not result.accepted:
-        return {"would_authorize": False, "reason": getattr(result, "reason", "REJECTED")}
-    return {
-        "would_authorize": True,
-        "direction": result.direction,
-        "reason": result.reason,
-        "execution_boundary": "DRY_RUN_ONLY",
+    accepted = isinstance(result, CandidateResult) and bool(result.accepted)
+    payload = {
+        "would_authorize": accepted,
+        # Retained only for older audit/tests; this does not mean an order is submitted.
+        "would_submit": accepted,
+        "reason": getattr(result, "reason", "REJECTED"),
     }
+    if accepted:
+        payload.update(
+            {
+                "direction": result.direction,
+                "execution_boundary": "DRY_RUN_ONLY",
+            }
+        )
+    return payload
 
 
 def main():
