@@ -70,13 +70,33 @@ def _full_path_clean(rows, direction):
     )
 
 
-def evaluate_quote_window(tick_buffer, symbol, direction, *, window_seconds=3.0,
-                          max_age_seconds=2.0, now=None):
-    """Fail closed unless a fresh full observation window is CLEAN end-to-end."""
+def evaluate_quote_window(
+    tick_buffer,
+    symbol,
+    direction,
+    *,
+    window_seconds=3.0,
+    max_age_seconds=2.0,
+    now=None,
+    not_before=None,
+):
+    """Fail closed unless a fresh full observation window is CLEAN end-to-end.
+
+    ``not_before`` is the earliest eligible tick timestamp. Matmon uses it to
+    ensure quote evidence comes strictly from after the completed-candle
+    EMA/DI authorization step; pre-authorization ticks can never satisfy CLEAN.
+    """
     now = time.time() if now is None else float(now)
     window_seconds = max(0.1, float(window_seconds))
     max_age_seconds = max(0.1, float(max_age_seconds))
-    rows = tick_buffer.ticks_received_since(symbol, now - window_seconds - max_age_seconds)
+    not_before = _number(not_before)
+    if not_before is not None and not_before > now + 1.0:
+        return QuoteEvidence(False, False, "MATMON_INVALID_QUOTE_START")
+
+    query_start = now - window_seconds - max_age_seconds
+    if not_before is not None:
+        query_start = max(query_start, not_before)
+    rows = tick_buffer.ticks_received_since(symbol, query_start)
 
     valid = []
     for tick in rows:
@@ -84,12 +104,20 @@ def evaluate_quote_window(tick_buffer, symbol, direction, *, window_seconds=3.0,
         received = _number((tick or {}).get("received_at"))
         if quote is None or received is None or received <= 0:
             continue
+        if not_before is not None and received < not_before:
+            continue
         valid.append((received, quote[0], quote[1], tick))
 
     if not valid:
-        # The narrow working-window query intentionally excludes old ticks.  Use
+        # When a post-authorization boundary is supplied, old buffered ticks
+        # are deliberately ineligible and must not be reclassified as usable
+        # evidence. The caller needs a fresh post-DI batch.
+        if not_before is not None:
+            return QuoteEvidence(False, False, "MATMON_NO_POST_DI_TICKS")
+
+        # The narrow working-window query intentionally excludes old ticks. Use
         # the buffer's latest tick only to distinguish "stream exists but is
-        # stale" from "no usable tick has ever been buffered".  This does not
+        # stale" from "no usable tick has ever been buffered". This does not
         # make stale evidence eligible for CLEAN confirmation.
         latest_tick = tick_buffer.latest(symbol)
         latest_received = _number((latest_tick or {}).get("received_at"))
