@@ -35,6 +35,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from kiteconnect.exceptions import NetworkException
 from zoneinfo import ZoneInfo
 
 from auth import get_kite_client
@@ -80,6 +81,8 @@ DISALLOWED_SUFFIXES = (
 # documented 1 quote request/second rate limit.
 SELECTOR_QUOTE_BATCH_SIZE = 200
 SELECTOR_QUOTE_BATCH_DELAY_SECONDS = 1.10
+SELECTOR_QUOTE_MAX_ATTEMPTS = 3
+SELECTOR_QUOTE_RETRY_BACKOFF_SECONDS = (1.50, 3.00)
 
 # Ordinary cash-company symbols can legitimately contain hyphens (for example
 # HCL-INSYS and NAM-INDIA), so do not reject all hyphenated symbols. These
@@ -212,16 +215,36 @@ def fetch_selector_quotes(
     kite: Any,
     quote_keys: list[str],
 ) -> dict[str, dict[str, Any]]:
-    """Fetch full quotes in shorter, rate-limited batches for this selector."""
+    """Fetch full quotes in rate-limited batches with bounded transient retry."""
     quotes: dict[str, dict[str, Any]] = {}
+
     for start in range(0, len(quote_keys), SELECTOR_QUOTE_BATCH_SIZE):
         if start:
             time.sleep(SELECTOR_QUOTE_BATCH_DELAY_SECONDS)
+
         batch = quote_keys[start : start + SELECTOR_QUOTE_BATCH_SIZE]
-        response = kite.quote(batch)
-        if not isinstance(response, dict):
-            raise RuntimeError("Kite quote response was not a dictionary")
-        quotes.update(response)
+
+        for attempt in range(1, SELECTOR_QUOTE_MAX_ATTEMPTS + 1):
+            try:
+                response = kite.quote(batch)
+
+                if not isinstance(response, dict):
+                    raise RuntimeError(
+                        "Kite quote response was not a dictionary"
+                    )
+
+                quotes.update(response)
+                break
+
+            except NetworkException:
+                if attempt >= SELECTOR_QUOTE_MAX_ATTEMPTS:
+                    raise
+
+                backoff = SELECTOR_QUOTE_RETRY_BACKOFF_SECONDS[
+                    attempt - 1
+                ]
+                time.sleep(backoff)
+
     return quotes
 
 
