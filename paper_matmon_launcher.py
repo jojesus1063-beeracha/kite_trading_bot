@@ -2,10 +2,11 @@
 """Matmon HaElohim PAPER launcher.
 
 Entry authorization is intentionally narrow and fail-closed:
-completed 3-minute EMA3/EMA15 direction -> DI(14) agreement -> fresh 3-second
-full-path CLEAN quote confirmation -> LTP velocity + weighted-5 direction +
-weighted-5 strengthening. Legacy research filters remain observational only.
-Operational/risk guards in main remain responsible for safe paper execution.
+completed REST 3-minute EMA3/EMA15 direction -> DI(14) agreement -> fresh
+post-DI 3-second full-path CLEAN quote confirmation -> LTP velocity +
+weighted-5 direction + weighted-5 strengthening. Legacy research filters
+remain observational only. Operational/risk guards in main remain responsible
+for safe paper execution.
 """
 from __future__ import annotations
 
@@ -26,9 +27,15 @@ from matmon_microstructure import evaluate_microstructure
 
 logger = logging.getLogger("paper_matmon_launcher")
 
+# One-shot per-symbol timestamp marking when the completed-candle EMA/DI step
+# passed. The confirmation hook consumes this timestamp so ticks received
+# before EMA/DI authorization can never satisfy the 3-second CLEAN gate.
+_MATMON_DI_PASSED_AT: dict[str, float] = {}
+
 MATMON_REQUIRED = {
     "PAPER_TRADING": True,
     "ENABLE_WS_CANDLES": True,
+    "WS_CANDLE_MODE": "shadow",
     "MATMON_MODE": True,
     "MATMON_EMA_FAST": 3,
     "MATMON_EMA_SLOW": 15,
@@ -66,6 +73,11 @@ def enforce_settings():
     if not bool(getattr(cfg, "ENABLE_WS_CANDLES", False)):
         raise SystemExit("SAFETY BLOCK: Matmon requires MODE_FULL WebSocket ticks")
 
+    # REST candles remain authoritative for EMA3/EMA15/DI14. The WS engine
+    # still runs in shadow mode and supplies MODE_FULL ticks/depth for the
+    # post-DI confirmation gate, but candle_provider will not augment REST
+    # candles while WS_CANDLE_MODE == "shadow".
+    cfg.WS_CANDLE_MODE = "shadow"
     cfg.MATMON_MODE = True
     cfg.MATMON_EMA_FAST = 3
     cfg.MATMON_EMA_SLOW = 15
@@ -113,9 +125,10 @@ def assert_runtime_contract():
         raise SystemExit("MATMON RUNTIME CONTRACT FAILED:\n - " + "\n - ".join(errors))
 
     logger.critical(
-        "MATMON RUNTIME CONTRACT PASS | ENTRY AUTHORIZATION ONLY: "
-        "EMA3/15 -> DI(14) -> 3s FULL-PATH CLEAN -> LTP velocity -> "
-        "weighted-5 direction -> weighted-5 strengthening | legacy research vetoes disabled"
+        "MATMON RUNTIME CONTRACT PASS | REST 3m INPUTS: "
+        "EMA3/15 -> DI(14) -> post-DI 3s FULL-PATH CLEAN -> LTP velocity -> "
+        "weighted-5 direction -> weighted-5 strengthening | WS candles shadow-only | "
+        "legacy research vetoes disabled"
     )
 
 
@@ -129,6 +142,7 @@ def _latest_finite(series):
 
 def _matmon_signal(symbol, df_entry, cfg_obj):
     """Build a raw Matmon signal from one completed 3-minute candle history."""
+    started = time.perf_counter()
     if df_entry is None or df_entry.empty:
         logger.info("MATMON REJECT | %s | NO_ENTRY_CANDLES", symbol)
         return None
@@ -148,17 +162,24 @@ def _matmon_signal(symbol, df_entry, cfg_obj):
         )
         return None
 
+    calc_started = time.perf_counter()
     ema3 = _latest_finite(ema(df_entry, fast_period))
     ema15 = _latest_finite(ema(df_entry, slow_period))
     pdi, mdi, _ = directional_indicators(df_entry, di_period)
     plus_di = _latest_finite(pdi)
     minus_di = _latest_finite(mdi)
+    calc_ms = (time.perf_counter() - calc_started) * 1000.0
 
     decision = evaluate_direction(
         ema3=ema3,
         ema15=ema15,
         plus_di=plus_di,
         minus_di=minus_di,
+    )
+    total_ms = (time.perf_counter() - started) * 1000.0
+    logger.info(
+        "MATMON_LATENCY | %s | stage=EMA_DI calc_ms=%.3f total_ms=%.3f accepted=%s",
+        symbol, calc_ms, total_ms, decision.accepted,
     )
     if not decision.accepted:
         logger.info(
@@ -203,6 +224,7 @@ def _matmon_signal(symbol, df_entry, cfg_obj):
                 "plus_di": plus_di,
                 "minus_di": minus_di,
                 "direction_reason": decision.reason,
+                "ema_di_latency_ms": total_ms,
             }
         },
     )
@@ -214,17 +236,26 @@ def install_matmon_policy():
 
     def evaluate_matmon(symbol, df_15m, df_entry, df_index, cfg_obj):
         del df_15m, df_index
-        return _matmon_signal(symbol, df_entry, cfg_obj)
+        signal = _matmon_signal(symbol, df_entry, cfg_obj)
+        if signal is not None:
+            _MATMON_DI_PASSED_AT[symbol] = time.time()
+        return signal
 
     strategy.evaluate = evaluate_matmon
 
     def evaluate_matmon_quote(ws_engine, symbol, direction, planned_quantity, cfg_obj, *, now=None):
         del planned_quantity
+        confirmation_started = time.perf_counter()
+        di_passed_at = _MATMON_DI_PASSED_AT.pop(symbol, None)
+        if di_passed_at is None:
+            return DepthConfirmation(False, "MATMON_REJECT", "MATMON_DI_PASS_TIMESTAMP_UNAVAILABLE")
+
         ticker = getattr(ws_engine, "ws_ticker", None) if ws_engine is not None else None
         buffer = getattr(ticker, "tick_buffer", None) if ticker is not None else None
         if buffer is None:
             return DepthConfirmation(False, "UNAVAILABLE", "MATMON_NO_TICKS")
 
+        clean_started = time.perf_counter()
         clean = evaluate_quote_window(
             buffer,
             symbol,
@@ -232,12 +263,19 @@ def install_matmon_policy():
             window_seconds=float(getattr(cfg_obj, "MATMON_QUOTE_WINDOW_SECONDS", 3.0)),
             max_age_seconds=float(getattr(cfg_obj, "MATMON_QUOTE_MAX_AGE_SECONDS", 2.0)),
             now=now,
+            not_before=di_passed_at,
         )
+        clean_ms = (time.perf_counter() - clean_started) * 1000.0
         if not clean.confirmed:
+            total_ms = (time.perf_counter() - confirmation_started) * 1000.0
             logger.info(
-                "MATMON CONFIRM REJECT | %s | %s | CLEAN=%s | first=%s/%s last=%s/%s",
+                "MATMON_LATENCY | %s | stage=CONFIRM clean_eval_ms=%.3f micro_ms=0.000 total_ms=%.3f accepted=False",
+                symbol, clean_ms, total_ms,
+            )
+            logger.info(
+                "MATMON CONFIRM REJECT | %s | %s | CLEAN=%s | first=%s/%s last=%s/%s | post_di_start=%s",
                 symbol, direction, clean.reason,
-                clean.first_bid, clean.first_ask, clean.last_bid, clean.last_ask,
+                clean.first_bid, clean.first_ask, clean.last_bid, clean.last_ask, di_passed_at,
             )
             current = time.time() if now is None else float(now)
             return DepthConfirmation(
@@ -256,8 +294,20 @@ def install_matmon_policy():
                 ),
             )
 
+        micro_started = time.perf_counter()
         micro = evaluate_microstructure(direction, clean.ticks)
+        micro_ms = (time.perf_counter() - micro_started) * 1000.0
+        total_ms = (time.perf_counter() - confirmation_started) * 1000.0
         accepted = bool(micro.accepted)
+        logger.info(
+            "MATMON_LATENCY | %s | stage=CONFIRM clean_eval_ms=%.3f micro_ms=%.3f total_ms=%.3f accepted=%s coverage_s=%.3f",
+            symbol,
+            clean_ms,
+            micro_ms,
+            total_ms,
+            accepted,
+            max(0.0, (clean.last_received_at or 0.0) - (clean.first_received_at or 0.0)),
+        )
         logger.info(
             "MATMON MICROSTRUCTURE | %s | %s | accepted=%s velocity=%s w5=%s w5_change=%s | %s",
             symbol, direction, accepted, micro.ltp_velocity_per_sec,
@@ -290,8 +340,8 @@ def main():
     install_matmon_policy()
     logger.critical(
         "MATMON HAELOHIM PAPER MODE ACTIVE | capital=5000 risk=2%% max_position=20%% max_open=5 max_trades=100 | "
-        "ENTRY=EMA3/15 + DI14 + 3s FULL-PATH CLEAN + LTP velocity + W5 direction + W5 strengthening | "
-        "LEGACY ENTRY VETOES OFF | NO REAL ORDERS"
+        "REST INPUT=3m EMA3/15 + DI14 | POST-DI=3s FULL-PATH CLEAN + LTP velocity + W5 direction + W5 strengthening | "
+        "WS CANDLES=SHADOW ONLY | LEGACY ENTRY VETOES OFF | NO REAL ORDERS"
     )
     runpy.run_module("main", run_name="__main__")
 
