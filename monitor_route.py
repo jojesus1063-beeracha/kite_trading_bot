@@ -8,7 +8,7 @@ MONITOR_PAGE = """
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
-    <title>Live Trading Monitor</title>
+    <title>Matmon · Hidden Treasure Monitor</title>
     <style>
         :root { --bg:#080b12; --surface:#111722; --surface-2:#151d2a; --border:#263244; --text:#eef2f8; --muted:#91a0b5; --green:#34d399; --red:#fb7185; --yellow:#fbbf24; --blue:#60a5fa; }
         * { box-sizing: border-box; }
@@ -56,16 +56,476 @@ MONITOR_PAGE = """
             .metric .value { font-size:15px; }
         }
         @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } }
+    
+        /* ===== MATMON HEAVEN + HIDDEN TREASURE THEME ===== */
+        :root {
+            --bg:#071424;
+            --surface:#fffaf0;
+            --surface-2:#f8edd7;
+            --border:#d6a94c;
+            --text:#102748;
+            --muted:#66758b;
+            --green:#159447;
+            --red:#dc3545;
+            --yellow:#c88a16;
+            --blue:#2367b1;
+            --gold:#d4a536;
+            --gold2:#f3d98b;
+            --navy:#071b35;
+            --cream:#fffaf0;
+        }
+
+        html { background:#071424; }
+
+        body {
+            color:var(--text);
+            padding:0 22px 42px 166px;
+            background:
+                radial-gradient(circle at 48% -4%, rgba(255,222,144,.95) 0,
+                    rgba(255,226,161,.55) 10%,
+                    rgba(173,207,238,.28) 28%,
+                    transparent 48%),
+                radial-gradient(ellipse at 10% 75%,rgba(255,255,255,.52),transparent 28%),
+                radial-gradient(ellipse at 85% 82%,rgba(255,255,255,.48),transparent 30%),
+                linear-gradient(180deg,#315f92 0,#9dc8e8 20%,#e9eff3 45%,#fbf1db 100%);
+            background-attachment:fixed;
+            min-height:100vh;
+        }
+
+        body:before,
+        body:after {
+            content:"";
+            position:fixed;
+            z-index:-1;
+            border-radius:50%;
+            filter:blur(45px);
+            pointer-events:none;
+        }
+
+        body:before {
+            width:520px;height:180px;left:10%;bottom:8%;
+            background:rgba(255,255,255,.72);
+        }
+
+        body:after {
+            width:650px;height:190px;right:4%;bottom:3%;
+            background:rgba(255,251,232,.72);
+        }
+
+        .shell {
+            width:min(100%,1780px);
+            margin:0 auto;
+        }
+
+        .page-head {
+            min-height:108px;
+            align-items:center;
+            padding:18px 4px 13px;
+            border-bottom:1px solid rgba(216,168,67,.45);
+        }
+
+        .page-head h1 {
+            font-family:Georgia,"Times New Roman",serif;
+            color:#0b2a55;
+            text-transform:uppercase;
+            letter-spacing:.025em;
+            font-size:clamp(25px,3vw,38px);
+            text-shadow:0 1px 0 #fff,0 0 18px rgba(255,206,91,.35);
+        }
+
+        .subtitle {
+            color:#7d5111;
+            font-weight:650;
+        }
+
+        .live-mark {
+            color:#174d34;
+            background:rgba(255,250,240,.88);
+            border:1px solid rgba(205,157,54,.65);
+            border-radius:12px;
+            padding:12px 15px;
+            box-shadow:0 8px 30px rgba(54,78,108,.12);
+        }
+
+        .quick-nav {
+            position:fixed;
+            left:0;
+            top:0;
+            bottom:0;
+            width:146px;
+            z-index:50;
+            display:flex;
+            flex-direction:column;
+            gap:5px;
+            padding:126px 10px 18px;
+            margin:0;
+            overflow-y:auto;
+            background:
+                linear-gradient(180deg,rgba(5,25,52,.98),rgba(7,29,60,.97)),
+                #071b35;
+            border-right:1px solid rgba(222,177,75,.75);
+            box-shadow:7px 0 28px rgba(3,14,31,.25);
+        }
+
+        .quick-nav:before {
+            content:"✝\\A MATMON\\A SOLI DEO GLORIA";
+            white-space:pre;
+            position:absolute;
+            top:17px;
+            left:0;
+            right:0;
+            text-align:center;
+            color:#f6d071;
+            font-family:Georgia,serif;
+            font-size:14px;
+            line-height:1.9;
+            text-shadow:0 0 12px rgba(255,210,102,.6);
+        }
+
+        .quick-nav a {
+            border:1px solid transparent;
+            border-radius:10px;
+            padding:10px 11px;
+            color:#f5e7c1;
+            background:transparent;
+            font-size:12px;
+        }
+
+        .quick-nav a:hover,
+        .quick-nav a:first-child {
+            color:#fff5c9;
+            border-color:#c99831;
+            background:linear-gradient(90deg,#133f77,#0b2b56);
+            box-shadow:inset 3px 0 0 #f1ca69;
+        }
+
+        .section {
+            position:relative;
+            overflow:hidden;
+            color:#142843;
+            background:
+                linear-gradient(180deg,rgba(255,253,246,.96),rgba(249,239,217,.94));
+            border:1px solid rgba(200,151,49,.70);
+            border-radius:14px;
+            padding:17px;
+            margin-bottom:13px;
+            box-shadow:
+                0 8px 30px rgba(33,61,90,.12),
+                inset 0 1px 0 rgba(255,255,255,.95);
+        }
+
+        .section:before {
+            content:"";
+            position:absolute;
+            top:0;left:0;right:0;height:2px;
+            background:linear-gradient(90deg,transparent,#e5bd5c,transparent);
+            opacity:.85;
+        }
+
+        .section h2 {
+            color:#183153;
+            font-weight:800;
+            letter-spacing:.055em;
+        }
+
+        .metric {
+            background:rgba(255,255,255,.64);
+            border:1px solid rgba(196,153,64,.48);
+            box-shadow:inset 0 1px 0 #fff;
+        }
+
+        .metric .label { color:#687588; }
+        .metric .value { color:#162845; }
+
+        .green { color:#119145!important; }
+        .red { color:#d93645!important; }
+        .yellow { color:#bb7c06!important; }
+
+        .table-wrap {
+            border:1px solid rgba(191,148,60,.45);
+            background:rgba(255,255,255,.45);
+        }
+
+        table { color:#19314e; }
+
+        th {
+            color:#58687c;
+            background:#f5ead3;
+            border-bottom:1px solid rgba(190,146,57,.48);
+        }
+
+        td {
+            border-bottom:1px solid rgba(203,177,126,.32);
+        }
+
+        tbody tr:hover td { background:rgba(237,201,113,.13); }
+
+        .heaven-banner {
+            display:grid;
+            grid-template-columns:minmax(0,1.6fr) auto auto;
+            gap:10px;
+            margin-bottom:13px;
+        }
+
+        .heaven-title,
+        .heaven-clock,
+        .heaven-scripture {
+            border:1px solid rgba(196,149,52,.63);
+            border-radius:14px;
+            background:rgba(255,250,237,.88);
+            box-shadow:0 8px 26px rgba(35,57,79,.12);
+        }
+
+        .heaven-title {
+            padding:17px 20px;
+            position:relative;
+            overflow:hidden;
+        }
+
+        .heaven-title:after {
+            content:"";
+            position:absolute;
+            right:-30px;
+            top:-60px;
+            width:190px;
+            height:190px;
+            border-radius:50%;
+            background:radial-gradient(circle,#fff7cb 0,rgba(249,207,90,.4) 25%,transparent 70%);
+        }
+
+        .heaven-kicker {
+            font-family:Georgia,serif;
+            font-size:27px;
+            color:#0e2b51;
+            font-weight:700;
+        }
+
+        .heaven-motto {
+            color:#946317;
+            font-size:12px;
+            margin-top:5px;
+        }
+
+        .heaven-clock {
+            min-width:205px;
+            padding:14px 17px;
+            font-size:13px;
+            color:#233a58;
+        }
+
+        .heaven-scripture {
+            max-width:280px;
+            padding:13px 16px;
+            font-family:Georgia,serif;
+            font-size:12px;
+            color:#745015;
+            line-height:1.45;
+        }
+
+        .treasure-dashboard {
+            display:grid;
+            grid-template-columns:minmax(300px,.95fr) minmax(480px,1.65fr) minmax(280px,.82fr);
+            gap:12px;
+            margin-bottom:13px;
+        }
+
+        .treasure-card {
+            min-width:0;
+            border:1px solid rgba(198,151,54,.70);
+            border-radius:14px;
+            background:linear-gradient(180deg,rgba(255,252,243,.96),rgba(249,236,210,.94));
+            padding:16px;
+            box-shadow:0 10px 28px rgba(37,61,87,.12);
+        }
+
+        .treasure-card h3 {
+            margin:0 0 11px;
+            color:#173150;
+            text-transform:uppercase;
+            letter-spacing:.04em;
+            font-size:12px;
+        }
+
+        .pressure-wrap {
+            display:grid;
+            grid-template-columns:1fr 1fr;
+            gap:9px;
+        }
+
+        .pressure-side {
+            text-align:center;
+            border-radius:12px;
+            padding:15px 10px;
+            border:1px solid rgba(197,159,91,.35);
+            background:rgba(255,255,255,.55);
+        }
+
+        .pressure-number {
+            font-size:35px;
+            font-family:Georgia,serif;
+            font-weight:700;
+            line-height:1;
+            margin:5px 0;
+        }
+
+        .pressure-bar {
+            height:8px;
+            display:flex;
+            overflow:hidden;
+            border-radius:999px;
+            background:#eee1c9;
+            margin-top:13px;
+        }
+
+        .pressure-buy {
+            background:linear-gradient(90deg,#18974b,#63bf6d);
+            width:50%;
+            transition:width .4s ease;
+        }
+
+        .pressure-sell {
+            background:linear-gradient(90deg,#e15a4d,#c82638);
+            width:50%;
+            transition:width .4s ease;
+        }
+
+        .neural-table table { font-size:11px; }
+
+        .flow-buy {
+            color:#0d8c42;
+            font-weight:700;
+        }
+
+        .flow-sell {
+            color:#d52e3d;
+            font-weight:700;
+        }
+
+        .flow-neutral {
+            color:#ad7814;
+            font-weight:700;
+        }
+
+        .micro-list {
+            display:grid;
+            gap:7px;
+        }
+
+        .micro-row {
+            display:grid;
+            grid-template-columns:1fr auto auto;
+            gap:7px;
+            align-items:center;
+            padding:7px 8px;
+            background:rgba(255,255,255,.48);
+            border-bottom:1px solid rgba(200,164,97,.28);
+            font-size:11px;
+        }
+
+        .micro-gauge {
+            width:160px;
+            height:80px;
+            margin:8px auto 16px;
+            border-radius:160px 160px 0 0;
+            background:conic-gradient(
+                from 270deg at 50% 100%,
+                #d83a3a 0deg,
+                #eca234 54deg,
+                #e2cf46 90deg,
+                #79b957 126deg,
+                #159447 180deg,
+                transparent 180deg
+            );
+            position:relative;
+        }
+
+        .micro-gauge:after {
+            content:"";
+            position:absolute;
+            left:23px;right:23px;bottom:0;height:57px;
+            border-radius:120px 120px 0 0;
+            background:#fff7e6;
+        }
+
+        .micro-score {
+            position:relative;
+            margin-top:-47px;
+            z-index:2;
+            text-align:center;
+            font-size:27px;
+            font-weight:800;
+        }
+
+        .awaiting {
+            color:#8c6b2b;
+            padding:14px;
+            border:1px dashed rgba(172,130,49,.55);
+            border-radius:9px;
+            background:rgba(255,249,231,.62);
+            text-align:center;
+            font-size:11px;
+        }
+
+        .faith-footer {
+            margin:14px 0 4px;
+            padding:11px 15px;
+            display:flex;
+            justify-content:space-between;
+            gap:15px;
+            flex-wrap:wrap;
+            border-radius:12px;
+            color:#6e4e17;
+            border:1px solid rgba(194,146,46,.6);
+            background:rgba(255,249,232,.78);
+            font-family:Georgia,serif;
+            font-size:12px;
+        }
+
+        @media(max-width:1180px) {
+            body { padding-left:18px; }
+            .quick-nav {
+                position:sticky;
+                width:auto;
+                height:auto;
+                top:0;
+                padding:8px;
+                flex-direction:row;
+                background:rgba(7,27,53,.97);
+            }
+            .quick-nav:before { display:none; }
+            .treasure-dashboard { grid-template-columns:1fr; }
+            .heaven-banner { grid-template-columns:1fr; }
+        }
+
     </style>
 </head>
 <body>
   <div class="shell">
-    <header class="page-head">
-      <div><h1>Live Trading Monitor</h1><div class="subtitle">Last data update · {{ updated }}</div></div>
-      <div class="live-mark"><span class="dot {{ 'dot-green' if health.get('api_connection') == 'Authenticated' else 'dot-red' }}"></span>{{ health.get('trading_mode','N/A') }} · {{ health.get('api_connection','N/A') }}</div>
-    </header>
+    
+    <div class="heaven-banner">
+      <div class="heaven-title">
+        <div class="heaven-kicker">✝ MATMON LIVE TRADING DASHBOARD</div>
+        <div class="heaven-motto">
+          Real-time · Paper Trading · Trade with Wisdom · Manage with Stewardship · Soli Deo Gloria
+        </div>
+      </div>
+
+      <div class="heaven-clock">
+        <strong>Last update</strong><br>
+        {{ updated }}<br><br>
+        <span class="{{ 'green' if health.get('api_connection') == 'Authenticated' else 'red' }}">
+          ● {{ health.get('trading_mode','N/A') }} · {{ health.get('api_connection','N/A') }}
+        </span>
+      </div>
+
+      <div class="heaven-scripture">
+        ✦ “Commit to the LORD whatever you do, and he will establish your plans.”<br>
+        <strong>Proverbs 16:3</strong>
+      </div>
+    </div>
+
     <nav class="quick-nav" aria-label="Dashboard sections">
-      <a href="#system-status">System</a><a href="#portfolio-summary">Portfolio</a><a href="#pipeline-dashboard">Pipeline</a><a href="#live-positions">Positions</a><a href="#today-session">Session</a><a href="#fno-options">F&O</a><a href="#watchlist-analysis">Watchlist</a><a href="/">Settings</a>
+      <a href="#system-status">System</a><a href="#portfolio-summary">Portfolio</a><a href="#pipeline-dashboard">Pipeline</a><a href="#live-positions">Positions</a><a href="#today-session">Session</a><a href="#watchlist-analysis">Watchlist</a><a href="/">Settings</a>
     </nav>
 
     <div class="section" id="system-status">
@@ -98,6 +558,94 @@ MONITOR_PAGE = """
             <div class="metric"><div class="label">Portfolio Live Reward:Risk</div><div class="value">{{ "%.2f"|format(portfolio.get('portfolio_reward_risk', 0) or 0) }}</div></div>
         </div>
     </div>
+
+
+    <div class="treasure-dashboard" id="neural-links">
+
+      <section class="treasure-card">
+        <h3>⚖ Watchlist Order-Flow Tilt</h3>
+
+        <div class="pressure-wrap">
+          <div class="pressure-side">
+            <div class="green">BUYERS</div>
+            <div id="market-buyers" class="pressure-number green">--%</div>
+            <small>Composite strength</small>
+          </div>
+
+          <div class="pressure-side">
+            <div class="red">SELLERS</div>
+            <div id="market-sellers" class="pressure-number red">--%</div>
+            <small>Composite strength</small>
+          </div>
+        </div>
+
+        <div class="pressure-bar">
+          <div id="pressure-buy-bar" class="pressure-buy"></div>
+          <div id="pressure-sell-bar" class="pressure-sell"></div>
+        </div>
+
+        <div id="market-pressure-note" class="awaiting" style="margin-top:12px">
+          Awaiting live Matmon microstructure observations.
+        </div>
+
+        <div style="margin-top:13px;color:#775a23;font-size:11px">
+          Buyers/Sellers are calculated per stock first, then aggregated for the watchlist.
+          Observational only — not an entry gate.
+        </div>
+      </section>
+
+      <section class="treasure-card neural-table">
+        <h3>✦ Live Stock Neural Links · Observational</h3>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>LTP</th>
+                <th>Buyers</th>
+                <th>Sellers</th>
+                <th>Flow</th>
+                <th>Micro</th>
+                <th>L1</th>
+                <th>5L OBI</th>
+                <th>Bid Vel</th>
+                <th>Ask Vel</th>
+                <th>Spread</th>
+                <th>3s Path</th>
+              </tr>
+            </thead>
+            <tbody id="neural-stock-body">
+              <tr>
+                <td colspan="12" class="awaiting">
+                  Waiting for stock-specific live order-book observations.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div style="margin-top:8px;color:#7a6748;font-size:10px">
+          Strength combines available microprice, L1 imbalance, top-5 OBI,
+          depth, velocity and spread observations. Missing values are never fabricated.
+        </div>
+      </section>
+
+      <section class="treasure-card">
+        <h3>♛ Microstructure Summary · Observational</h3>
+
+        <div class="micro-gauge"></div>
+        <div id="micro-score" class="micro-score">--</div>
+
+        <div id="micro-list" class="micro-list">
+          <div class="awaiting">
+            Waiting for live microstructure feed.
+          </div>
+        </div>
+      </section>
+
+    </div>
+
 
 """ + PIPELINE_MONITOR_SECTION + """
 
@@ -163,282 +711,284 @@ MONITOR_PAGE = """
         </div>
     </div>
 
-    <div class="section" id="fno-options">
-
-        <h2>F&O Options · Professional Momentum</h2>
-
-        <div id="fno-live">
-            <div class="empty">
-                Loading F&O monitor...
-            </div>
-        </div>
-
-    </div>
-
-    <script>
-    (function () {
-        const root = document.getElementById("fno-live");
-        if (!root) return;
-
-        function n(v, d) {
-            const x = Number(v);
-            return Number.isFinite(x) ? x.toFixed(d) : "-";
-        }
-
-        function esc(v) {
-            return String(v ?? "-")
-                .replaceAll("&", "&amp;")
-                .replaceAll("<", "&lt;")
-                .replaceAll(">", "&gt;");
-        }
-
-        function render(f) {
-            if (!f) {
-                root.innerHTML =
-                    '<div class="empty">F&O data unavailable.</div>';
-                return;
-            }
-
-            const serviceClass =
-                f.service_active ? "green" : "red";
-
-            const feed =
-                f.pressure_present > 0
-                ? '<span class="green">DATA PRESENT</span>'
-                : f.evaluations > 0
-                  ? '<span class="red">DATA MISSING</span>'
-                  : '<span class="yellow">WAITING</span>';
-
-            let html = `
-            <div class="grid">
-
-              <div class="metric">
-                <div class="label">Service</div>
-                <div class="value ${serviceClass}">
-                  <span class="dot ${f.service_active ? "dot-green" : "dot-red"}"></span>
-                  ${f.service_active ? "RUNNING" : "STOPPED"}
-                </div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Mode</div>
-                <div class="value green">${esc(f.mode)}</div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Strategy</div>
-                <div class="value">${esc(f.strategy)}</div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Universe</div>
-                <div class="value">${esc(f.universe)}</div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Capital</div>
-                <div class="value">Rs${n(f.capital,2)}</div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Evaluations</div>
-                <div class="value">${esc(f.evaluations)}</div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Signals</div>
-                <div class="value">${esc(f.signals)}</div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Open Positions</div>
-                <div class="value">${(f.positions || []).length}</div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Trades Today</div>
-                <div class="value">${(f.trades || []).length}</div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Wins / Losses</div>
-                <div class="value">
-                  <span class="green">${esc(f.wins)}</span>
-                  /
-                  <span class="red">${esc(f.losses)}</span>
-                </div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Paper P&L</div>
-                <div class="value ${(Number(f.pnl || 0) >= 0) ? "green" : "red"}">
-                  Rs${n(f.pnl,2)}
-                </div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Audit Freshness</div>
-                <div class="value ${(Number(f.audit_age_seconds || 9999) < 30) ? "green" : "yellow"}">
-                  ${f.audit_age_seconds == null ? "N/A" : esc(f.audit_age_seconds) + " sec"}
-                </div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Pressure Present</div>
-                <div class="value green">${esc(f.pressure_present)}</div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Pressure Missing</div>
-                <div class="value ${f.pressure_missing ? "red" : "green"}">
-                  ${esc(f.pressure_missing)}
-                </div>
-              </div>
-
-              <div class="metric">
-                <div class="label">Pressure Feed</div>
-                <div class="value">${feed}</div>
-              </div>
-
-            </div>
-            `;
-
-
-            html += `
-              <div style="height:18px"></div>
-              <h2>Live Rejection Funnel</h2>
-            `;
-
-            if ((f.rejections || []).length) {
-
-                html += `
-                <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Reason</th>
-                      <th>Count</th>
-                      <th>%</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                `;
-
-                for (const r of f.rejections) {
-                    html += `
-                    <tr>
-                      <td>${esc(r.reason)}</td>
-                      <td>${esc(r.count)}</td>
-                      <td>${n(r.pct,2)}%</td>
-                    </tr>
-                    `;
-                }
-
-                html += "</tbody></table></div>";
-
-            } else {
-                html += '<div class="empty">No evaluations yet.</div>';
-            }
-
-
-            html += `
-              <div style="height:18px"></div>
-              <h2>Latest Professional Evaluations</h2>
-            `;
-
-            if ((f.latest || []).length) {
-
-                html += `
-                <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Time</th>
-                      <th>Symbol</th>
-                      <th>Direction</th>
-                      <th>Spot 30s %</th>
-                      <th>CE 30s %</th>
-                      <th>PE 30s %</th>
-                      <th>Volume Δ</th>
-                      <th>OI</th>
-                      <th>Pressure</th>
-                      <th>Decision</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                `;
-
-                for (const x of f.latest) {
-
-                    const pressure =
-                        x.selected_pressure == null
-                        ? '<span class="red">MISSING</span>'
-                        : esc(x.selected_pressure);
-
-                    html += `
-                    <tr>
-                      <td>${esc(x.time)}</td>
-                      <td>${esc(x.symbol)}</td>
-                      <td>${esc(x.direction)}</td>
-                      <td>${n(x.underlying_roc,3)}</td>
-                      <td>${n(x.ce_roc,3)}</td>
-                      <td>${n(x.pe_roc,3)}</td>
-                      <td>${esc(x.volume_delta)}</td>
-                      <td>${esc(x.oi)}</td>
-                      <td>${pressure}</td>
-                      <td>${esc(x.reason)}</td>
-                    </tr>
-                    `;
-                }
-
-                html += "</tbody></table></div>";
-
-            } else {
-                html += '<div class="empty">No F&O evaluations available.</div>';
-            }
-
-            root.innerHTML = html;
-        }
-
-
-        async function refreshFno() {
-            try {
-                const response = await fetch(
-                    "/api/monitor-data",
-                    {
-                        cache: "no-store",
-                        credentials: "same-origin"
-                    }
-                );
-
-                if (!response.ok) return;
-
-                const data = await response.json();
-
-                render(data.fno);
-
-            } catch (_) {
-                // Preserve last good display.
-            }
-        }
-
-        refreshFno();
-
-        const timer = setInterval(
-            refreshFno,
-            5000
-        );
-
-        window.addEventListener(
-            "pagehide",
-            () => clearInterval(timer),
-            { once: true }
-        );
-    })();
-    </script>
-
-""" + WATCHLIST_SECTION + """
+    """ + WATCHLIST_SECTION + """
   </div>
+
+<script>
+(() => {
+    const esc = (x) => {
+        const d = document.createElement("div");
+        d.textContent = (x ?? "");
+        return d.innerHTML;
+    };
+
+    const num = (v, digits=2) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n.toFixed(digits) : "--";
+    };
+
+    const arrow = (v) => {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return "→";
+        if (n > 0) return "↑";
+        if (n < 0) return "↓";
+        return "→";
+    };
+
+    function sideClass(v) {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return "flow-neutral";
+        return n > 0 ? "flow-buy" : (n < 0 ? "flow-sell" : "flow-neutral");
+    }
+
+    function normalizeStocks(micro) {
+        if (!micro) return [];
+
+        if (Array.isArray(micro.stocks))
+            return micro.stocks;
+
+        if (micro.stocks && typeof micro.stocks === "object")
+            return Object.entries(micro.stocks).map(([symbol, x]) => ({
+                symbol,
+                ...(x || {})
+            }));
+
+        if (Array.isArray(micro))
+            return micro;
+
+        return [];
+    }
+
+    function buyerPct(x) {
+        for (const k of ["buyers_pct","buyer_pct","buy_pct","buyer_strength_pct"]) {
+            const v = Number(x[k]);
+            if (Number.isFinite(v)) return Math.max(0,Math.min(100,v));
+        }
+
+        // Derive only if a normalized directional score already exists.
+        for (const k of ["composite_score","pressure_score","orderflow_score"]) {
+            const v = Number(x[k]);
+            if (Number.isFinite(v)) {
+                const clipped = Math.max(-1,Math.min(1,v));
+                return 50 + (clipped * 50);
+            }
+        }
+
+        return null;
+    }
+
+    function sellerPct(x, bp) {
+        for (const k of ["sellers_pct","seller_pct","sell_pct","seller_strength_pct"]) {
+            const v = Number(x[k]);
+            if (Number.isFinite(v)) return Math.max(0,Math.min(100,v));
+        }
+        return bp == null ? null : 100 - bp;
+    }
+
+    function flowText(bp, sp) {
+        if (bp == null || sp == null) return "WAITING";
+        const d = bp - sp;
+
+        if (d >= 30) return "↑ STRONG BUY";
+        if (d >= 10) return "↑ BUY";
+        if (d <= -30) return "↓ STRONG SELL";
+        if (d <= -10) return "↓ SELL";
+        return "→ BALANCED";
+    }
+
+    function renderMarket(stocks) {
+        const valid = stocks
+            .map(x => {
+                const bp = buyerPct(x);
+                const sp = sellerPct(x,bp);
+                return {bp,sp};
+            })
+            .filter(x => x.bp != null && x.sp != null);
+
+        const b = document.getElementById("market-buyers");
+        const s = document.getElementById("market-sellers");
+        const bb = document.getElementById("pressure-buy-bar");
+        const sb = document.getElementById("pressure-sell-bar");
+        const note = document.getElementById("market-pressure-note");
+
+        if (!valid.length) {
+            b.textContent = "--%";
+            s.textContent = "--%";
+            bb.style.width = "50%";
+            sb.style.width = "50%";
+            note.textContent = "Awaiting live Matmon microstructure observations.";
+            return;
+        }
+
+        const buyers = valid.reduce((a,x)=>a+x.bp,0)/valid.length;
+        const sellers = 100-buyers;
+
+        b.textContent = buyers.toFixed(0)+"%";
+        s.textContent = sellers.toFixed(0)+"%";
+        bb.style.width = buyers+"%";
+        sb.style.width = sellers+"%";
+
+        note.textContent =
+            buyers > 60 ? "Buyer pressure dominant across observed stocks." :
+            sellers > 60 ? "Seller pressure dominant across observed stocks." :
+            "Observed watchlist order flow is broadly balanced.";
+    }
+
+    function renderStocks(stocks) {
+        const body = document.getElementById("neural-stock-body");
+
+        if (!stocks.length) {
+            body.innerHTML =
+              '<tr><td colspan="12" class="awaiting">' +
+              'Waiting for stock-specific live order-book observations.' +
+              '</td></tr>';
+            return;
+        }
+
+        body.innerHTML = stocks.slice(0,30).map(x => {
+            const bp = buyerPct(x);
+            const sp = sellerPct(x,bp);
+            const flow = flowText(bp,sp);
+
+            const flowCls =
+              flow.includes("BUY") ? "flow-buy" :
+              flow.includes("SELL") ? "flow-sell" :
+              "flow-neutral";
+
+            const micro =
+              x.microprice_bias ?? x.micro_bias ?? x.microprice_delta ?? null;
+
+            const l1 =
+              x.l1_imbalance ?? x.l1_obi ?? null;
+
+            const obi =
+              x.weighted5_imbalance ?? x.obi5 ?? x.five_level_obi ?? null;
+
+            const bv =
+              x.bid_velocity ?? null;
+
+            const av =
+              x.ask_velocity ?? null;
+
+            const spread =
+              x.spread_bps ?? null;
+
+            const path =
+              x.clean_path == null
+                ? (x.quote_path ?? "--")
+                : (x.clean_path ? "CLEAN ✓" : "REJECT");
+
+            return `
+              <tr>
+                <td><strong>${esc(x.symbol ?? "--")}</strong></td>
+                <td>${num(x.ltp ?? x.last_price,2)}</td>
+                <td class="green">${bp == null ? "--" : bp.toFixed(0)+"%"}</td>
+                <td class="red">${sp == null ? "--" : sp.toFixed(0)+"%"}</td>
+                <td class="${flowCls}">${esc(flow)}</td>
+                <td class="${sideClass(micro)}">${arrow(micro)} ${num(micro,2)}</td>
+                <td class="${sideClass(l1)}">${num(l1,2)}</td>
+                <td class="${sideClass(obi)}">${num(obi,2)}</td>
+                <td class="${sideClass(bv)}">${arrow(bv)}</td>
+                <td class="${sideClass(av)}">${arrow(av)}</td>
+                <td>${num(spread,2)}</td>
+                <td>${esc(path)}</td>
+              </tr>
+            `;
+        }).join("");
+    }
+
+    function renderMicro(stocks) {
+        const root = document.getElementById("micro-list");
+        const score = document.getElementById("micro-score");
+
+        if (!stocks.length) {
+            score.textContent = "--";
+            root.innerHTML =
+                '<div class="awaiting">Waiting for live microstructure feed.</div>';
+            return;
+        }
+
+        const x = stocks[0] || {};
+
+        const fields = [
+            ["Microprice Bias", x.microprice_bias ?? x.micro_bias],
+            ["L1 Imbalance", x.l1_imbalance ?? x.l1_obi],
+            ["5-Level OBI", x.weighted5_imbalance ?? x.obi5 ?? x.five_level_obi],
+            ["Bid Velocity", x.bid_velocity],
+            ["Ask Velocity", x.ask_velocity],
+            ["Spread (bps)", x.spread_bps],
+            ["Bid Depth (5L)", x.bid_depth_5l ?? x.depth_bid_qty],
+            ["Ask Depth (5L)", x.ask_depth_5l ?? x.depth_ask_qty],
+            ["Last Quantity", x.last_quantity],
+            ["Volume Traded", x.volume_traded]
+        ];
+
+        const bp = buyerPct(x);
+        score.textContent =
+            bp == null ? "--" : ((bp-50)/50).toFixed(2);
+
+        root.innerHTML = fields.map(([label,v]) => `
+          <div class="micro-row">
+            <span>${esc(label)}</span>
+            <strong>${num(v,2)}</strong>
+            <span class="${sideClass(v)}">${arrow(v)}</span>
+          </div>
+        `).join("");
+    }
+
+    async function refreshNeural() {
+        try {
+            const r = await fetch(
+                "/api/monitor-data",
+                {
+                    cache:"no-store",
+                    credentials:"same-origin"
+                }
+            );
+
+            if (!r.ok) return;
+
+            const data = await r.json();
+
+            // Prefer explicit microstructure payload.
+            // Fall back to health key if status publisher places it there.
+            const micro =
+                data.microstructure ??
+                data.health?.microstructure ??
+                {};
+
+            const stocks = normalizeStocks(micro);
+
+            renderMarket(stocks);
+            renderStocks(stocks);
+            renderMicro(stocks);
+
+        } catch (_) {
+            // Fail closed: preserve previous values.
+        }
+    }
+
+    refreshNeural();
+
+    const neuralTimer = setInterval(
+        refreshNeural,
+        3000
+    );
+
+    window.addEventListener(
+        "pagehide",
+        () => clearInterval(neuralTimer),
+        {once:true}
+    );
+})();
+</script>
+
+<div class="faith-footer">
+  <span>🗝 Your treasure is in heaven · Matthew 6:20</span>
+  <span>Trade with Wisdom · Manage with Stewardship · Glory to God.</span>
+  <span>✝ Soli Deo Gloria</span>
+</div>
+
 </body>
 </html>
 """

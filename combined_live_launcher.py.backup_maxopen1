@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Explicitly acknowledged live launcher for the combined validated strategy.
+
+This module does not change user_config.json and does nothing on import. Real
+orders are possible only when main() is executed with PAPER_TRADING=False and
+the exact acknowledgement environment variable is present.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import runpy
+
+import config as cfg
+import entry_quality
+from paper_contrarian_launcher import (
+    LIVE_ACK_ENV,
+    LIVE_ACK_VALUE,
+    install_two_indicator_patch,
+)
+
+logger = logging.getLogger("combined_live_launcher")
+
+LIVE_RISK_PER_TRADE_PCT = 0.20
+LIVE_MAX_OPEN_POSITIONS = 1
+LIVE_MAX_TRADES_PER_DAY = 7
+LIVE_MAX_EMA_DISTANCE_ATR = 1.75
+LIVE_MAX_DAILY_LOSS_PCT = 0.50
+LIVE_MAX_POSITION_SIZE_PCT = 100.0
+
+
+def enforce_live_limits() -> dict:
+    """Fail closed, then apply the hard caps before importing main."""
+    if bool(getattr(cfg, "PAPER_TRADING", True)):
+        raise SystemExit(
+            "SAFETY BLOCK: combined live launcher requires paper_trading=false"
+        )
+    if os.environ.get(LIVE_ACK_ENV) != LIVE_ACK_VALUE:
+        raise SystemExit(
+            f"SAFETY BLOCK: set {LIVE_ACK_ENV}={LIVE_ACK_VALUE} to acknowledge real orders"
+        )
+    if str(getattr(cfg, "PRODUCT", "")).upper() != "MIS":
+        raise SystemExit("SAFETY BLOCK: combined live launcher requires PRODUCT=MIS")
+    if float(getattr(cfg, "CAPITAL", 0.0)) <= 0:
+        raise SystemExit("SAFETY BLOCK: TRADING_CAPITAL must be positive")
+    if getattr(cfg, "MARKET_PROTECTION", None) is None:
+        raise SystemExit("SAFETY BLOCK: MARKET_PROTECTION must be configured")
+
+    cfg.RISK_PER_TRADE_PCT = LIVE_RISK_PER_TRADE_PCT
+    cfg.MAX_OPEN_POSITIONS = LIVE_MAX_OPEN_POSITIONS
+    cfg.MAX_TRADES_PER_DAY = LIVE_MAX_TRADES_PER_DAY
+    cfg.MAX_DAILY_LOSS_PCT = LIVE_MAX_DAILY_LOSS_PCT
+    cfg.MAX_POSITION_SIZE_PCT = LIVE_MAX_POSITION_SIZE_PCT
+    cfg.CHECK_MARGIN_BEFORE_ENTRY = True
+    entry_quality.MAX_EMA_DISTANCE_ATR = LIVE_MAX_EMA_DISTANCE_ATR
+    cfg.ENABLE_FIXED_TARGET = True
+    cfg.ENABLE_TRAILING_STOP = False
+    cfg.EXIT_IMMEDIATELY_AT_TARGET = True
+
+    return {
+        "risk_per_trade_pct": cfg.RISK_PER_TRADE_PCT,
+        "max_open_positions": cfg.MAX_OPEN_POSITIONS,
+        "max_trades_per_day": cfg.MAX_TRADES_PER_DAY,
+        "max_ema_distance_atr": entry_quality.MAX_EMA_DISTANCE_ATR,
+        "max_daily_loss_pct": cfg.MAX_DAILY_LOSS_PCT,
+        "max_position_size_pct": cfg.MAX_POSITION_SIZE_PCT,
+        "check_margin_before_entry": cfg.CHECK_MARGIN_BEFORE_ENTRY,
+    }
+
+
+def main() -> None:
+    limits = enforce_live_limits()
+    install_two_indicator_patch(live_combined=True)
+    logger.critical(
+        "LIVE COMBINED REAL-ORDER MODE ACTIVE | limits=%s | "
+        "triple patterns use fixed exits; clean-candle trades use the existing hybrid exit",
+        limits,
+    )
+    runpy.run_module("main", run_name="__main__")
+
+
+if __name__ == "__main__":
+    main()

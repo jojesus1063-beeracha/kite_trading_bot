@@ -1,0 +1,188 @@
+{
+  "snapshot_id": "c6c6b113-2abc-4f2c-bd28-e460756e4fa4",
+  "generated_at": "2026-08-04T09:53:34.658022",
+  "updated": "2026-08-04 09:53:34",
+  "symbols": [],
+  "positions": [
+    {
+      "symbol": "AAVAS",
+      "exchange": "NSE",
+      "side": "BUY",
+      "quantity": 3,
+      "entry_price": 1448.8,
+      "current_price": null,
+      "status": "INVALID_DATA",
+      "validation_errors": [
+        "stop_price must be greater than zero",
+        "target_price must be greater than zero"
+      ],
+      "price_updated_at": null,
+      "quote_age_seconds": null
+    },
+    {
+      "symbol": "ASHOKLEY",
+      "exchange": "NSE",
+      "side": "BUY",
+      "quantity": 31,
+      "entry_price": 174.73,
+      "current_price": null,
+      "status": "INVALID_DATA",
+      "validation_errors": [
+        "stop_price must be greater than zero",
+        "target_price must be greater than zero"
+      ],
+      "price_updated_at": null,
+      "quote_age_seconds": null
+    },
+    {
+      "symbol": "BAJAJFINSV",
+      "exchange": "NSE",
+      "side": "BUY",
+      "quantity": 2,
+      "entry_price": 2090.1,
+      "current_price": null,
+      "status": "INVALID_DATA",
+      "validation_errors": [
+        "stop_price must be greater than zero",
+        "target_price must be greater than zero"
+      ],
+      "price_updated_at": null,
+      "quote_age_seconds": null
+    },
+    {
+      "symbol": "CHENNPETRO",
+      "exchange": "NSE",
+      "side": "BUY",
+      "quantity": 4,
+      "entry_price": 1332.6,
+      "current_price": null,
+      "status": "INVALID_DATA",
+      "validation_errors": [
+        "stop_price must be greater than zero",
+        "target_price must be greater than zero"
+      ],
+      "price_updated_at": null,
+      "quote_age_seconds": null
+    },
+    {
+      "symbol": "FSL",
+      "exchange": "NSE",
+      "side": "BUY",
+      "quantity": 10,
+      "entry_price": 327.0,
+      "current_price": null,
+      "status": "INVALID_DATA",
+      "validation_errors": [
+        "stop_price must be greater than zero",
+        "target_price must be greater than zero"
+      ],
+      "price_updated_at": null,
+      "quote_age_seconds": null
+    },
+    {
+      "symbol": "CIEINDIA",
+      "exchange": "NSE",
+      "side": "BUY",
+      "quantity": 7,
+      "entry_price": 419.5,
+      "current_price": null,
+      "status": "INVALID_DATA",
+      "validation_errors": [
+        "stop_price must be greater than zero",
+        "target_price must be greater than zero"
+      ],
+      "price_updated_at": null,
+      "quote_age_seconds": null
+    },
+    {
+      "symbol": "AJANTPHARM",
+      "exchange": "NSE",
+      "side": "BUY",
+      "quantity": 1,
+      "entry_price": 3519.6,
+      "current_price": null,
+      "status": "INVALID_DATA",
+      "validation_errors": [
+        "stop_price must be greater than zero",
+        "target_price must be greater than zero"
+      ],
+      "price_updated_at": null,
+      "quote_age_seconds": null
+    },
+    {
+      "symbol": "AMBUJACEM",
+      "exchange": "NSE",
+      "side": "BUY",
+      "quantity": 9,
+      "entry_price": 443.55,
+      "current_price": null,
+      "status": "INVALID_DATA",
+      "validation_errors": [
+        "stop_price must be greater than zero",
+        "target_price must be greater than zero"
+      ],
+      "price_updated_at": null,
+      "quote_age_seconds": null
+    }
+  ],
+  "portfolio_summary": {
+    "total_open_positions": 0,
+    "buy_positions": 0,
+    "sell_positions": 0,
+    "total_exposure": 0.0,
+    "gross_unrealized_pnl": 0.0,
+    "net_unrealized_pnl": 0.0,
+    "portfolio_profit_pct": null,
+    "largest_winning_position": null,
+    "largest_losing_position": null,
+    "total_portfolio_risk": 0.0,
+    "total_portfolio_reward": 0.0,
+    "portfolio_reward_risk": null,
+    "largest_position_size": 0.0,
+    "largest_position_risk": 0.0,
+    "average_holding_time_minutes": null,
+    "invalid_position_count": 8,
+    "available_cash": 5015.3,
+    "used_margin": 0,
+    "remaining_margin": 5015.3,
+    "margin_utilization_pct": null
+  },
+  "session_summary": {
+    "todays_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "win_rate_pct": null,
+    "gross_realized_profit": 0.0,
+    "gross_realized_loss": 0.0,
+    "net_realized_profit": 0.0,
+    "brokerage_and_charges": 0.0,
+    "average_win": null,
+    "average_loss": null,
+    "expectancy": null,
+    "profit_factor": null,
+    "largest_winner": null,
+    "largest_loser": null,
+    "current_consecutive_wins": 0,
+    "current_consecutive_losses": 0,
+    "max_drawdown_today": 0.0,
+    "peak_equity_today": 0.0,
+    "current_equity": 0.0,
+    "average_holding_time_minutes": null
+  },
+  "health": {
+    "trading_mode": "LIVE",
+    "market_alignment": "Disabled",
+    "adx_filter": "Enabled",
+    "entry_scheduler": "5 Minute Candle",
+    "position_monitor_interval_seconds": 25,
+    "watchlist_size": 80,
+    "symbols_loaded": 80,
+    "open_positions": 8,
+    "bot_uptime_seconds": 167.4377462863922,
+    "version": "1463b52",
+    "git_commit_hash": "1463b52",
+    "api_connection": "Authenticated",
+    "memory_usage_mb": 114.84375,
+    "cpu_usage_pct": 0.0
+  }
+}

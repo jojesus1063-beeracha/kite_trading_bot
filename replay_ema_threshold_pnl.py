@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""Counterfactual P&L by EMA9-distance threshold for live-combined rejects."""
+
+import argparse, csv, json
+import time as clock
+from collections import defaultdict
+from datetime import datetime, time, timedelta
+from pathlib import Path
+from statistics import mean
+
+import config
+from auth import get_kite_client
+from costs import net_pnl_for_trade
+from data_feed import get_instrument_token
+
+THRESHOLDS = (0.80, 1.00, 1.25, 1.50, 1.75, 2.00, 2.25, 2.50, 3.00)
+
+
+def num(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def dt(value):
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def rejected_candidates(log_dir, date_from, date_to):
+    found = []
+    for path in sorted(Path(log_dir).glob("*.jsonl")):
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                row = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            event_type = row.get("event_type")
+            payload = row.get("payload") or {}
+            reason_code = payload.get("reason_code")
+
+            if event_type not in (
+                "candidate_collected",
+                "candidate_rejected",
+            ):
+                continue
+
+            if (
+                event_type == "candidate_rejected"
+                and reason_code not in (
+                    "ENTRY_OVEREXTENDED",
+                    "RISK_LIMIT_REACHED",
+                )
+            ):
+                continue
+
+            signal = payload.get("signal") or payload
+            day = str(row.get("session_date") or "")
+            if date_from and day < date_from or date_to and day > date_to:
+                continue
+            detail = (
+                payload.get("entry_quality_detail")
+                or signal.get("entry_quality_detail")
+                or {}
+            )
+            stamp = dt(
+                signal.get("timestamp")
+                or payload.get("timestamp")
+                or row.get("recorded_at")
+            )
+            candidate = {
+                "date": day,
+                "timestamp": stamp,
+                "symbol": (
+                    signal.get("symbol")
+                    or payload.get("symbol")
+                ),
+                "exchange": (
+                    signal.get("exchange")
+                    or payload.get("exchange")
+                    or "NSE"
+                ),
+                "direction": str(
+                    signal.get("direction")
+                    or payload.get("direction")
+                    or ""
+                ).upper(),
+                "stop_loss": num(
+                    signal.get("stop_loss")
+                    or payload.get("stop_loss")
+                ),
+                "ema": num(detail.get("ema_distance_atr")),
+                "body": num(detail.get("signal_body_atr")),
+                "vwap": num(detail.get("vwap_distance_atr")),
+            }
+            if (candidate["timestamp"] and candidate["symbol"] and
+                    candidate["direction"] in ("BUY", "SELL") and
+                    candidate["stop_loss"] is not None and
+                    candidate["ema"] is not None):
+                found.append(candidate)
+    # De-duplicate restarts/repeated records for the same completed signal.
+    unique = {}
+    for c in found:
+        key = (c["date"], c["symbol"], c["direction"], c["timestamp"].isoformat())
+        unique[key] = c
+    return sorted(unique.values(), key=lambda c: c["timestamp"])
+
+
+def instrument_map(kite, exchanges):
+    result = {}
+    for exchange in exchanges:
+        for item in kite.instruments(exchange):
+            result[(exchange, item["tradingsymbol"])] = item["instrument_token"]
+    return result
+
+
+def candles_for(kite, token, day):
+    start = datetime.fromisoformat(day + "T09:15:00")
+    end = datetime.fromisoformat(day + "T15:30:00")
+    rows = None
+
+    for attempt in range(8):
+        try:
+            # Kite historical API permits only a few requests per second.
+            clock.sleep(0.50)
+            rows = kite.historical_data(
+                token,
+                start,
+                end,
+                "5minute",
+            )
+            break
+        except Exception as exc:
+            if "Too many requests" not in str(exc):
+                raise
+
+            wait_seconds = min(60, 2 ** attempt)
+            print(
+                f"Rate limit reached; waiting "
+                f"{wait_seconds}s before retry..."
+            )
+            clock.sleep(wait_seconds)
+
+    if rows is None:
+        print(
+            f"Unable to fetch candles for token={token}, "
+            f"date={day}"
+        )
+        return []
+
+    cleaned = []
+    for row in rows:
+        stamp = dt(row.get("date"))
+        if stamp:
+            cleaned.append({**row, "date": stamp})
+    return sorted(cleaned, key=lambda r: r["date"])
+
+
+def after_signal(candles, signal_time):
+    # Signal timestamps identify the completed signal candle. Enter no earlier
+    # than its following candle to avoid look-ahead bias.
+    cutoff = signal_time + timedelta(minutes=5)
+    return [c for c in candles if c["date"] >= cutoff]
+
+
+def replay_one(candidate, candles, capital, risk_pct, target_pct):
+    future = after_signal(candles, candidate["timestamp"])
+    if not future:
+        return None
+    entry_time = future[0]["date"]
+    entry = float(future[0]["open"])
+    stop = float(candidate["stop_loss"])
+    direction = candidate["direction"]
+    risk_per_share = abs(entry - stop)
+    if risk_per_share <= 0:
+        return None
+    qty_by_risk = int((capital * risk_pct / 100.0) / risk_per_share)
+    # Historical margin is unavailable. This conservative notional cap prevents
+    # unlimited quantities; live order_margins may allow a different quantity.
+    qty_by_notional = int((capital * 1.00) / entry)
+    qty = max(0, min(qty_by_risk, qty_by_notional))
+    if qty == 0:
+        return None
+    target = entry * (1 + target_pct / 100.0) if direction == "BUY" else entry * (1 - target_pct / 100.0)
+    exit_price, exit_time, reason = None, None, None
+    for bar in future:
+        high, low = float(bar["high"]), float(bar["low"])
+        if direction == "BUY":
+            stop_hit, target_hit = low <= stop, high >= target
+        else:
+            stop_hit, target_hit = high >= stop, low <= target
+        if stop_hit:  # conservative when both are touched in one OHLC candle
+            exit_price, exit_time, reason = stop, bar["date"], "STOP"
+            break
+        if target_hit:
+            exit_price, exit_time, reason = target, bar["date"], "TARGET"
+            break
+        if bar["date"].time() >= time(15, 10):
+            exit_price, exit_time, reason = float(bar["close"]), bar["date"], "SQUARE_OFF"
+            break
+    if exit_price is None:
+        exit_price, exit_time, reason = float(future[-1]["close"]), future[-1]["date"], "LAST_BAR"
+    pnl = net_pnl_for_trade(direction, qty, entry, exit_price)
+    return {**candidate, "entry_time": entry_time, "exit_time": exit_time,
+            "entry": entry, "exit": exit_price, "qty": qty, "exit_reason": reason,
+            **pnl}
+
+
+def simulate(candidates, candle_cache, threshold, args):
+    by_day = defaultdict(list)
+    for c in candidates:
+        if args.min_ema <= c["ema"] <= threshold and (c["body"] is None or c["body"] <= 1.50) and (c["vwap"] is None or c["vwap"] <= 2.50):
+            by_day[c["date"]].append(c)
+    trades = []
+    for day in sorted(by_day):
+        active_trades = []
+        realized_day_net = 0.0
+        day_trade_count = 0
+
+        for c in by_day[day]:
+            still_open = []
+
+            for active in active_trades:
+                if active["exit_time"] <= c["timestamp"]:
+                    realized_day_net += active["net_pnl"]
+                else:
+                    still_open.append(active)
+
+            active_trades = still_open
+
+            if day_trade_count >= args.max_trades:
+                break
+
+            if len(active_trades) >= args.max_open:
+                continue
+
+            if realized_day_net <= -(
+                args.capital
+                * args.daily_loss_pct
+                / 100.0
+            ):
+                break
+
+            result = replay_one(
+                c,
+                candle_cache.get(
+                    (
+                        c["exchange"],
+                        c["symbol"],
+                        day,
+                    ),
+                    [],
+                ),
+                args.capital,
+                args.risk_pct,
+                args.target_pct,
+            )
+
+            if result:
+                result["ema_limit"] = threshold
+                trades.append(result)
+                active_trades.append(result)
+                day_trade_count += 1
+    return trades
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--log-dir", default="validation_events")
+    p.add_argument("--from-date", default="2026-08-17")
+    p.add_argument("--to-date", default="2026-08-18")
+    p.add_argument("--capital", type=float, default=float(config.CAPITAL))
+    p.add_argument("--risk-pct", type=float, default=0.20)
+    p.add_argument("--daily-loss-pct", type=float, default=0.50)
+    p.add_argument("--target-pct", type=float, default=1.50)
+    p.add_argument("--max-trades", type=int, default=7)
+    p.add_argument("--max-open", type=int, default=5)
+    p.add_argument("--min-ema", type=float, default=0.0)
+    p.add_argument("--output-dir", type=Path, default=Path("runtime/ema_threshold_replay"))
+    args = p.parse_args()
+    candidates = rejected_candidates(args.log_dir, args.from_date, args.to_date)
+    if not candidates:
+        raise SystemExit("No ENTRY_OVEREXTENDED candidate_rejected events found in --log-dir")
+    # Download candles only for candidates capable of passing at least
+    # one tested EMA limit and the unchanged body/VWAP limits.
+    replay_candidates = [
+        c for c in candidates
+        if c["ema"] <= max(THRESHOLDS)
+        and (c["body"] is None or c["body"] <= 1.50)
+        and (c["vwap"] is None or c["vwap"] <= 2.50)
+    ]
+
+    print(f"All rejected candidates: {len(candidates)}")
+    print(f"Candidates requiring candle replay: {len(replay_candidates)}")
+
+    kite = get_kite_client()
+    tokens = instrument_map(
+        kite,
+        {c["exchange"] for c in replay_candidates},
+    )
+
+    cache = {}
+    total = len({
+        (c["exchange"], c["symbol"], c["date"])
+        for c in replay_candidates
+    })
+
+    completed = 0
+
+    for c in replay_candidates:
+        key = (c["exchange"], c["symbol"], c["date"])
+
+        if key not in cache:
+            completed += 1
+            print(
+                f"Fetching {completed}/{total}: "
+                f"{c['date']} {c['exchange']}:{c['symbol']}"
+            )
+
+            token = tokens.get(
+                (c["exchange"], c["symbol"])
+            )
+
+            cache[key] = (
+                candles_for(kite, token, c["date"])
+                if token
+                else []
+            )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    summary, all_trades = [], []
+    for threshold in THRESHOLDS:
+        trades = simulate(candidates, cache, threshold, args)
+        all_trades.extend(trades)
+        wins = sum(t["net_pnl"] > 0 for t in trades)
+        summary.append({"ema_limit_atr": threshold, "eligible_before_limits": sum(
+            args.min_ema <= c["ema"] <= threshold and (c["body"] is None or c["body"] <= 1.5) and
+            (c["vwap"] is None or c["vwap"] <= 2.5) for c in candidates),
+            "simulated_trades": len(trades), "wins": wins, "losses": len(trades)-wins,
+            "win_rate_pct": round(100*wins/len(trades), 2) if trades else 0,
+            "gross_pnl": round(sum(t["gross_pnl"] for t in trades), 2),
+            "costs": round(sum(t["costs"] for t in trades), 2),
+            "net_pnl": round(sum(t["net_pnl"] for t in trades), 2)})
+    for name, rows in (("summary.csv", summary), ("trades.csv", all_trades)):
+        if rows:
+            with (args.output_dir/name).open("w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+    print(f"Candidates loaded: {len(candidates)}")
+    for r in summary:
+        print(f"EMA {r['ema_limit_atr']:.2f} | eligible={r['eligible_before_limits']:3} | "
+              f"trades={r['simulated_trades']:2} | wins={r['wins']:2} | net=₹{r['net_pnl']:,.2f}")
+    print("Reports:", args.output_dir.resolve())
+
+
+if __name__ == "__main__":
+    main()

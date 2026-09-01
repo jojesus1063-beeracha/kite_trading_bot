@@ -20,7 +20,7 @@ IST = ZoneInfo("Asia/Kolkata")
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "user_config.json"
 RUNTIME = ROOT / "runtime" / "matmon" / "preopen"
-TOP_N = 120
+TOP_N = 60
 
 # Broad safety/liquidity constraints only.
 MIN_PRICE = 20.0
@@ -285,7 +285,7 @@ def main():
 
     report = {
         "generated_at": datetime.now(IST).isoformat(),
-        "strategy": "MATMON_PREOPEN_TOP120",
+        "strategy": "MATMON_PREOPEN_TOP60",
         "cleaning": cleaning,
         "valid_candidates": len(candidates),
         "selected_count": len(selected),
@@ -311,7 +311,7 @@ def main():
         json.dumps(report, indent=2) + "\n"
     )
 
-    print("MATMON PREOPEN TOP-120")
+    print("MATMON PREOPEN TOP-60")
     print("Clean universe :", len(rows))
     print("Valid candidates:", len(candidates))
     print("Selected       :", len(selected))
@@ -333,7 +333,7 @@ def main():
         )
 
     print()
-    print("MATMON_PREOPEN_TOP120=PASS")
+    print("MATMON_PREOPEN_TOP60=PASS")
     print("PAPER_ONLY=TRUE")
     print("NO_ORDERS_PLACED")
 

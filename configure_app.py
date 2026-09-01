@@ -33,6 +33,158 @@ import pyotp
 TOTP_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "totp_config.json")
 
 
+
+# ------------------------------------------------------------------
+# MATMON DASHBOARD MICROSTRUCTURE FEED
+# READ-ONLY / OBSERVATIONAL ONLY.
+# This data must never participate in entry/exit authorization.
+# ------------------------------------------------------------------
+def _matmon_dashboard_microstructure():
+    try:
+        import json as _json
+        from datetime import datetime as _datetime
+        from pathlib import Path as _Path
+
+        day = _datetime.now().astimezone().date().isoformat()
+        path = (
+            _Path(__file__).resolve().parent
+            / "runtime"
+            / "matmon"
+            / "observations"
+            / f"{day}.jsonl"
+        )
+
+        if not path.exists():
+            return {}
+
+        # Dashboard only needs recent/latest observations.
+        # Limit read size so a growing session file cannot make the
+        # monitor progressively expensive.
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 2_000_000))
+            raw = fh.read().decode("utf-8", errors="ignore")
+
+        if size > 2_000_000:
+            raw = raw.split("\n", 1)[-1]
+
+        latest = {}
+
+        for line in raw.splitlines():
+            try:
+                row = _json.loads(line)
+            except Exception:
+                continue
+
+            symbol = row.get("symbol")
+            if not symbol:
+                continue
+
+            q = row.get("quote_evidence") or {}
+
+            # Do not replace a useful observation with a later empty
+            # NO_FRESH_START_QUOTE row for the same stock.
+            useful = bool(
+                q.get("available")
+                or q.get("microstructure_samples")
+                or q.get("sample_count")
+            )
+
+            old = latest.get(symbol)
+            if useful or old is None:
+                latest[symbol] = row
+
+        stocks = []
+
+        def _num(v):
+            return v if isinstance(v, (int, float)) else None
+
+        for symbol, row in latest.items():
+            q = row.get("quote_evidence") or {}
+
+            l1 = _num(q.get("last_l1_imbalance"))
+            obi = _num(q.get("last_weighted_5_imbalance"))
+            micro = _num(q.get("last_microprice"))
+            bid_vel = _num(q.get("bid_velocity_per_sec"))
+            ask_vel = _num(q.get("ask_velocity_per_sec"))
+            spread = _num(q.get("last_spread"))
+            spread_bps = _num(q.get("last_spread_bps"))
+            ltp = _num(q.get("last_ltp"))
+
+            # Composite is DISPLAY ONLY.
+            components = [x for x in (l1, obi) if x is not None]
+            strength = (
+                sum(components) / len(components)
+                if components else None
+            )
+
+            stocks.append({
+                "symbol": symbol,
+                "direction": row.get("direction"),
+                "ltp": ltp,
+                "microprice": micro,
+                "l1_imbalance": l1,
+                "weighted_5_imbalance": obi,
+                "bid_velocity": bid_vel,
+                "ask_velocity": ask_vel,
+                "spread": spread,
+                "spread_bps": spread_bps,
+                "strength": strength,
+                "samples": q.get("microstructure_samples", 0),
+                "available": bool(q.get("available")),
+                "recorded_at": row.get("recorded_at"),
+            })
+
+        useful_stocks = [
+            x for x in stocks
+            if x["available"] or x["samples"]
+        ]
+
+        # Put stocks with actual microstructure first.
+        useful_stocks.sort(
+            key=lambda x: (
+                x.get("recorded_at") or "",
+                x.get("samples") or 0,
+            ),
+            reverse=True,
+        )
+
+        vals = [
+            x["strength"] for x in useful_stocks
+            if x["strength"] is not None
+        ]
+
+        aggregate = (
+            sum(vals) / len(vals)
+            if vals else None
+        )
+
+        buyers = None
+        sellers = None
+        if aggregate is not None:
+            buyers = max(0.0, min(100.0, (aggregate + 1.0) * 50.0))
+            sellers = 100.0 - buyers
+
+        return {
+            "available": bool(useful_stocks),
+            "observation_only": True,
+            "source": "matmon_observation_jsonl",
+            "buyers_pct": buyers,
+            "sellers_pct": sellers,
+            "strength": aggregate,
+            "stocks": useful_stocks[:120],
+            "updated_at": (
+                useful_stocks[0]["recorded_at"]
+                if useful_stocks else None
+            ),
+        }
+
+    except Exception:
+        # Dashboard must fail open visually and must never affect trading.
+        return {}
+
+
 def get_available_balance():
     """
     Fetches real available cash from Zerodha via kite.margins(). Returns
@@ -1061,7 +1213,6 @@ def backtest_comparison():
 
 
 from monitor_route import MONITOR_PAGE
-from fno_monitor_reader import load_fno_monitor
 from trade_log import load_bot_status
 from watchlist_range_analytics import load_watchlist_snapshot
 from watchlist_dashboard_helpers import compute_summary_cards, classify_report_freshness
@@ -1087,12 +1238,12 @@ def api_monitor_data():
         "portfolio": status.get("portfolio_summary", {}),
         "session": session_data,
         "health": status.get("health", {}),
+        "microstructure": _matmon_dashboard_microstructure(),
         "watchlist_snapshot": watchlist_snapshot,
         "freshness": freshness,
         "summary_cards": summary_cards,
         "watchlist_symbols": watchlist_snapshot.get("symbols", []) if watchlist_snapshot else [],
         "pipeline": load_pipeline_dashboard(),
-        "fno": load_fno_monitor(),
     }
 
 
@@ -1129,7 +1280,6 @@ def monitor():
         summary_cards=summary_cards,
         watchlist_symbols_json=watchlist_symbols_json,
         pipeline=load_pipeline_dashboard(),
-        fno=load_fno_monitor(),
     )
 
 

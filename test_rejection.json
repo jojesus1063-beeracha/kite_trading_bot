@@ -1,0 +1,15 @@
+{
+  "symbol": "KRONOX",
+  "gate": "BREAKOUT_VALIDATION",
+  "status": "REJECTED",
+  "breakout_metrics": {
+    "structure_break": false,
+    "volume_ratio": 2.13,
+    "volume_pass": true,
+    "atr_multiple": 1.255,
+    "atr_pass": true,
+    "clv_value": 0.289,
+    "clv_pass": false
+  },
+  "primary_rejection_reason": "CLV_BELOW_THRESHOLD_AND_NO_STRUCTURE_BREAK"
+}

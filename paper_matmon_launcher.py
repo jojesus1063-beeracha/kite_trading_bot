@@ -19,6 +19,7 @@ import pandas as pd
 import config as cfg
 import strategy
 import depth_confirmation
+import matmon_strategy_config as strategy_def
 from depth_confirmation import DepthConfirmation
 from indicators import directional_indicators, ema
 from matmon_entry_policy import evaluate_direction
@@ -37,13 +38,17 @@ MATMON_REQUIRED = {
     "ENABLE_WS_CANDLES": True,
     "WS_CANDLE_MODE": "shadow",
     "MATMON_MODE": True,
-    "MATMON_EMA_FAST": 3,
-    "MATMON_EMA_SLOW": 15,
-    "MATMON_DI_PERIOD": 14,
-    "MATMON_QUOTE_WINDOW_SECONDS": 3.0,
-    "MATMON_QUOTE_MAX_AGE_SECONDS": 2.0,
-    "ENTRY_TIMEFRAME": "3minute",
-    "ENTRY_SCAN_SHORTLIST_SIZE": 120,
+    # STRATEGY definition -- sourced from matmon_strategy_config, not
+    # redefined here. Runtime validation should catch drift, not create it.
+    "MATMON_EMA_FAST": strategy_def.MATMON_EMA_FAST,
+    "MATMON_EMA_SLOW": strategy_def.MATMON_EMA_SLOW,
+    "MATMON_DI_PERIOD": strategy_def.MATMON_DI_PERIOD,
+    "MATMON_QUOTE_WINDOW_SECONDS": strategy_def.MATMON_QUOTE_WINDOW_SECONDS,
+    "MATMON_QUOTE_MAX_AGE_SECONDS": strategy_def.MATMON_QUOTE_MAX_AGE_SECONDS,
+    "ENTRY_TIMEFRAME": strategy_def.MATMON_ENTRY_TIMEFRAME,
+    "ENTRY_SCAN_SHORTLIST_SIZE": strategy_def.MATMON_WATCHLIST_SIZE,
+    # RISK/EXECUTION -- paper-mode risk policy, deliberately separate from
+    # the strategy definition above.
     "CAPITAL": 5000.0,
     "RISK_PER_TRADE_PCT": 2.0,
     "MAX_POSITION_SIZE_PCT": 20.0,
@@ -79,14 +84,16 @@ def enforce_settings():
     # candles while WS_CANDLE_MODE == "shadow".
     cfg.WS_CANDLE_MODE = "shadow"
     cfg.MATMON_MODE = True
-    cfg.MATMON_EMA_FAST = 3
-    cfg.MATMON_EMA_SLOW = 15
-    cfg.MATMON_DI_PERIOD = 14
-    cfg.MATMON_QUOTE_WINDOW_SECONDS = 3.0
-    cfg.MATMON_QUOTE_MAX_AGE_SECONDS = 2.0
-    cfg.ENTRY_TIMEFRAME = "3minute"
-    cfg.ENTRY_SCAN_SHORTLIST_SIZE = 120
+    # STRATEGY definition -- single source of truth.
+    cfg.MATMON_EMA_FAST = strategy_def.MATMON_EMA_FAST
+    cfg.MATMON_EMA_SLOW = strategy_def.MATMON_EMA_SLOW
+    cfg.MATMON_DI_PERIOD = strategy_def.MATMON_DI_PERIOD
+    cfg.MATMON_QUOTE_WINDOW_SECONDS = strategy_def.MATMON_QUOTE_WINDOW_SECONDS
+    cfg.MATMON_QUOTE_MAX_AGE_SECONDS = strategy_def.MATMON_QUOTE_MAX_AGE_SECONDS
+    cfg.ENTRY_TIMEFRAME = strategy_def.MATMON_ENTRY_TIMEFRAME
+    cfg.ENTRY_SCAN_SHORTLIST_SIZE = strategy_def.MATMON_WATCHLIST_SIZE
 
+    # RISK/EXECUTION -- paper-mode policy, kept separate from strategy.
     cfg.CAPITAL = 5000.0
     cfg.RISK_PER_TRADE_PCT = 2.0
     cfg.MAX_POSITION_SIZE_PCT = 20.0

@@ -12,6 +12,7 @@ from dataclasses import dataclass, asdict
 import logging
 
 import config as cfg
+import matmon_strategy_config as strategy_def
 from matmon_entry_policy import evaluate_direction
 from matmon_quote_confirmation import evaluate_quote_window
 from matmon_microstructure import evaluate_microstructure
@@ -82,8 +83,12 @@ def authorize_candidate(*, tick_buffer, symbol, ema3, ema15, plus_di, minus_di,
         tick_buffer,
         symbol,
         ema_di.direction,
-        window_seconds=float(getattr(cfg_obj, "MATMON_QUOTE_WINDOW_SECONDS", 3.0)),
-        max_age_seconds=float(getattr(cfg_obj, "MATMON_QUOTE_MAX_AGE_SECONDS", 2.0)),
+        window_seconds=float(getattr(
+            cfg_obj, "MATMON_QUOTE_WINDOW_SECONDS", strategy_def.MATMON_QUOTE_WINDOW_SECONDS
+        )),
+        max_age_seconds=float(getattr(
+            cfg_obj, "MATMON_QUOTE_MAX_AGE_SECONDS", strategy_def.MATMON_QUOTE_MAX_AGE_SECONDS
+        )),
         now=now,
         not_before=not_before,
     )

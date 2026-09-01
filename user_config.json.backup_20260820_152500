@@ -1,0 +1,270 @@
+{
+  "watchlist": [
+    {
+      "symbol": "TFCILTD",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "INDOMIM",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MILKYMIST",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BLEL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BANDHANBNK",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ORIENTHOT",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "STYLEBAAZA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ASTERDM",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SIGMAADV",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "PINELABS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ZAGGLE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MMTC",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BAJAJHIND",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GENUSPOWER",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "WELSPUNLIV",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "DHOOTTRANS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "RENUKA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "LEAPIND",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "STAR",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KOLTEPATIL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MRPL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MOREPENLAB",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SHIPROCKET",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MANAPPURAM",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "JINDRILL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CHENNPETRO",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HSCL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "PARAS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CUPID",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TECHNOCRAF",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "DCBBANK",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "EMMVEE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "AVADHSUGAR",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "LCL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "REGAAL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "DHAMPURSUG",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KFINTECH",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "DECNGOLD",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SEAMECLTD",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MANINDS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SIGACHI",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MARKSANS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HDBFS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KIRIINDUS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CANTABIL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SILVERAXIS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HINDCOPPER",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "IFCI",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "EMSLIMITED",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "XTRANET",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HINDALCO",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BLUECLOUDS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KABRAEXTRU",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "RPTECH",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "NAM-INDIA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TURTLEMINT",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "DWARKESH",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GOLDAXIS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ASHAPURMIN",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SHADOWFAX",
+      "exchange": "NSE"
+    }
+  ],
+  "capital": 5000.0,
+  "risk_per_trade_pct": 0.5,
+  "sl_buffer_pct": 0.45,
+  "risk_reward_min": 2.5,
+  "max_trades_per_day": 100,
+  "max_daily_loss_pct": 2.0,
+  "trend_ema_fast": 9,
+  "trend_ema_slow": 35,
+  "entry_ema": 9,
+  "paper_trading": false,
+  "use_adx_filter": false,
+  "adx_threshold": 22.0,
+  "max_position_size_pct": 50.0,
+  "adx_mode": "off",
+  "enable_market_alignment_filter": true,
+  "enable_news_filter": false,
+  "enable_price_action": true,
+  "profit_target_percent": 0.7,
+  "enable_fixed_target": true,
+  "no_entry_before": "09:30",
+  "no_entry_after": "15:05",
+  "enable_candle_aligned_polling": true,
+  "trend_gate_mode": "observe",
+  "pullback_gate_mode": "observe",
+  "experimental_paper_only": true,
+  "experiment_observation_file": "runtime/strategy_experiment.jsonl"
+}

@@ -188,8 +188,8 @@ FORCE_SQUARE_OFF_TIME = "15:08"
 NO_ENTRY_BEFORE = "09:25"
 NO_ENTRY_AFTER = "15:00"
 
-# Live vs paper mode. ALWAYS start with PAPER_TRADING = True.
-PAPER_TRADING = True
+# Live vs paper mode. ALWAYS start with PAPER_TRADING = False.
+PAPER_TRADING = False
 
 # ---------------------------------------------------------------------
 # Candle-aligned scheduler (opt-in infrastructure change)
@@ -452,3 +452,20 @@ if ENABLE_PROPOSED_DIRECTION_POLICY:
     ENTRY_EMA = 9
     USE_ADX_FILTER = False
     ADX_MODE = "off"
+
+# ===== MATMON MANUAL APPROVAL =====
+# PAPER  = simulation only
+# MANUAL = real-market proposal generation; human approval required
+MATMON_EXECUTION_MODE = "AUTO"
+
+MATMON_MANUAL_APPROVAL_REQUIRED = False
+MATMON_APPROVAL_TIMEOUT_SECONDS = 45
+MATMON_REVALIDATE_BEFORE_APPROVAL = True
+MATMON_SINGLE_USE_APPROVAL = True
+MATMON_EXPIRE_ON_PRICE_CHANGE = True
+MATMON_MAX_APPROVAL_PRICE_DRIFT_PCT = 0.20
+MATMON_PREVENT_DUPLICATE_PROPOSALS = True
+MATMON_LOG_APPROVAL_EVENTS = True
+
+# Fail closed: automatic real-money execution is unavailable.
+MATMON_AUTO_EXECUTION_ENABLED = True

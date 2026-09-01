@@ -1,0 +1,511 @@
+{
+  "watchlist": [
+    {
+      "symbol": "HCC",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TATAPOWER",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "VISL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MILKYMIST",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "RAMBHAJO",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "VOGL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TMCV",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "RGL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MOSCHIP",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "DCBBANK",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "IOLCP",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "JINDALSAW",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CORDELIA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GKENERGY",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "LICHSGFIN",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "JNPR",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TANLA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BLEL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TRITURBINE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "WEL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SAPPHIRE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "VINCOFE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BBTC",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "JINDWORLD",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "FILATEX",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "DEVYANI",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TDPOWERSYS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BAJAJHIND",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TCC",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KSHINTL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "IFCI",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CGCL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MOREPENLAB",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ROSSELLIND",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "AYE",
+      "exchange": "BSE"
+    },
+    {
+      "symbol": "GAJA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CYIENT",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GENESYS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TFCILTD",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "VBL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "URBANCO",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "PVP",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SBFC",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "INDSWFTLAB",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TBZ",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MEESHO",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HINDCOPPER",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GIPCL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "NSLNISP",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KOTAKBANK",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SHANTIGOLD",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "OAL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CGPOWER",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "PINELABS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BIKAJI",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SHANKESH",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ATHERENERG",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GOLDAXIS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BOROLTD",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "INOXINDIA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HDFCBANK",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GCSL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CLEANMAX",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BHEL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "FMGOETZE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "LALITHAA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "WALCHANNAG",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MANIPALHOS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "VEDL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TECHNOCRAF",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SAIL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BAJFINANCE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ELLEN",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "JISLJALEQS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BEPL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ADANIENSOL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "NITCO",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SAGILITY",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HFCL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CEIGALL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "WSTCSTPAPR",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "VEDPOWER",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SHRIRAMFIN",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "FCL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BLUESTONE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TECHM",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ASHOKLEY",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HORIZONIND",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KWIL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "RAMRAT",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "DECNGOLD",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "AEROFLEX",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "VAML",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TRAVELFOOD",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KROSS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "UTTAMSUGAR",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CAPITALSFB",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GMRAIRPORT",
+      "exchange": "BSE"
+    },
+    {
+      "symbol": "PANAMAPET",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HONASA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ALIVUS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "EPL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "JSWSTEEL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "LCL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "QUADFUTURE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BHARTIARTL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "WEBELSOLAR",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BOMDYEING",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "FINCABLES",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "PARADEEP",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "RAIN",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "FACT",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HSCL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "PFC",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "QPOWER",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KRN",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "STYL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KAJARIACER",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CANBK",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ZEEL",
+      "exchange": "NSE"
+    }
+  ],
+  "capital": 5000.0,
+  "risk_per_trade_pct": 2.0,
+  "sl_buffer_pct": 0.45,
+  "risk_reward_min": 2.5,
+  "max_trades_per_day": 999,
+  "max_daily_loss_pct": 2.0,
+  "trend_ema_fast": 9,
+  "trend_ema_slow": 35,
+  "entry_ema": 9,
+  "paper_trading": true,
+  "use_adx_filter": false,
+  "adx_threshold": 22.0,
+  "max_position_size_pct": 50.0,
+  "adx_mode": "off",
+  "enable_market_alignment_filter": true,
+  "enable_news_filter": false,
+  "enable_price_action": true,
+  "profit_target_percent": 0.7,
+  "enable_fixed_target": true,
+  "no_entry_before": "09:30",
+  "no_entry_after": "15:05",
+  "enable_candle_aligned_polling": true,
+  "trend_gate_mode": "observe",
+  "pullback_gate_mode": "observe",
+  "experimental_paper_only": true,
+  "experiment_observation_file": "runtime/strategy_experiment.jsonl",
+  "max_open_positions": 120
+}

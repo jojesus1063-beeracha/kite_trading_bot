@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""
+Matmon Production Live Launcher
+===============================
+Dedicated production entry point for the Matmon strategy.
+Connects Matmon strategy signals directly to live order execution via executor.py
+and manages protective exits through protective_stop.py.
+"""
+
+import sys
+import os
+import time
+import logging
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+import config as cfg
+import main as bot_main
+import matmon_entry_policy
+import executor
+import protective_stop
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("matmon_production_launcher")
+
+def enforce_production_settings():
+    logger.info("Enforcing Matmon Live Production runtime settings...")
+    cfg.PAPER_TRADING = False
+    cfg.EMA_FAST = 3
+    cfg.EMA_SLOW = 15
+    cfg.ADX_PERIOD = 14
+    cfg.WS_CANDLE_MODE = "shadow"
+    cfg.CHECK_MARGIN_BEFORE_ENTRY = True
+    cfg.MAX_OPEN_POSITIONS = getattr(cfg, "MAX_OPEN_POSITIONS", 1)
+    cfg.MAX_DAILY_LOSS_PCT = getattr(cfg, "MAX_DAILY_LOSS_PCT", 0.5)
+
+def main():
+    logger.info("==================================================")
+    logger.info("   MATMON LIVE PRODUCTION LAUNCHER INITIALIZING   ")
+    logger.info("==================================================")
+    
+    enforce_production_settings()
+    logger.info("Loaded matmon_entry_policy successfully.")
+    
+    # Initialize main execution loop
+    logger.info("Starting main Matmon execution engine...")
+    if hasattr(bot_main, "run"):
+        bot_main.run()
+    elif hasattr(bot_main, "main"):
+        bot_main.main()
+    else:
+        logger.error("Could not find standard entry point (run/main) in main.py")
+
+if __name__ == "__main__":
+    main()

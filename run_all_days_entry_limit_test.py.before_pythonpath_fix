@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+DATES = [
+    "2026-07-23",
+    "2026-07-24",
+    "2026-07-27",
+    "2026-07-28",
+    "2026-07-29",
+    "2026-07-30",
+    "2026-07-31",
+    "2026-08-03",
+    "2026-08-04",
+    "2026-08-06",
+    "2026-08-10",
+    "2026-08-11",
+    "2026-08-12",
+    "2026-08-13",
+    "2026-08-14",
+]
+
+ROOT = Path(__file__).resolve().parent
+PYTHON = ROOT / "venv/bin/python3"
+
+SCREEN_TEMPLATE = (
+    ROOT / "screen_all_nse_stocks_20260814.py"
+)
+REPLAY_TEMPLATE = (
+    ROOT / "replay_genuine_watchlist_no_breakout.py"
+)
+
+GENERATED = ROOT / "runtime/all_days_limit_test/generated"
+LOGS = ROOT / "runtime/all_days_limit_test/logs"
+REPORTS = ROOT / "runtime/all_days_limit_test/reports"
+
+for directory in (GENERATED, LOGS, REPORTS):
+    directory.mkdir(parents=True, exist_ok=True)
+
+
+def run_and_tee(command, log_path):
+    print("\nRUNNING:")
+    print(" ".join(map(str, command)))
+    print(f"LOG={log_path}")
+
+    with log_path.open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            list(map(str, command)),
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=os.environ.copy(),
+        )
+
+        assert process.stdout is not None
+
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            log.write(line)
+            log.flush()
+
+        return_code = process.wait()
+
+    if return_code:
+        raise SystemExit(
+            f"COMMAND_FAILED={return_code} "
+            f"LOG={log_path}"
+        )
+
+
+def dated_screen_script(session_date):
+    compact = session_date.replace("-", "")
+    year, month, day = map(int, session_date.split("-"))
+
+    destination = (
+        GENERATED / f"screen_all_nse_{compact}.py"
+    )
+
+    text = SCREEN_TEMPLATE.read_text(encoding="utf-8")
+
+    replacements = [
+        (
+            re.compile(r"date\(2026,\s*8,\s*14\)"),
+            f"date({year}, {month}, {day})",
+        ),
+        (
+            re.compile(
+                r"datetime\(2026,\s*8,\s*14,"
+            ),
+            f"datetime({year}, {month}, {day},",
+        ),
+    ]
+
+    for pattern, replacement in replacements:
+        text = pattern.sub(replacement, text)
+
+    text = text.replace("2026-08-14", session_date)
+    text = text.replace("20260814", compact)
+
+    if "2026-08-14" in text or "20260814" in text:
+        raise SystemExit(
+            f"SCREEN_DATE_PATCH_INCOMPLETE={session_date}"
+        )
+
+    destination.write_text(text, encoding="utf-8")
+    return destination
+
+
+def create_uncapped_replay():
+    destination = GENERATED / "replay_uncapped.py"
+    text = REPLAY_TEMPLATE.read_text(encoding="utf-8")
+
+    settings = {
+        "MAX_TRADES_PER_DAY": "999999",
+        "PAPER_MAX_ENTRIES_PER_DAY": "999999",
+        "MAX_OPEN_POSITIONS": "2",
+        "PAPER_MAX_TRADES_PER_SYMBOL": "1",
+    }
+
+    for name, value in settings.items():
+        pattern = re.compile(
+            rf"(?m)^(\s*cfg\.{re.escape(name)}\s*=\s*).*$"
+        )
+
+        text, count = pattern.subn(
+            lambda match: match.group(1) + value,
+            text,
+            count=1,
+        )
+
+        if count != 1:
+            raise SystemExit(
+                f"REPLAY_PATCH_FAILED: "
+                f"{name} matches={count}"
+            )
+
+    destination.write_text(text, encoding="utf-8")
+    return destination
+
+
+def watchlist_path(session_date):
+    compact = session_date.replace("-", "")
+    return (
+        ROOT / "runtime"
+        / f"historical_all_nse_watchlist_{compact}_0927.json"
+    )
+
+
+def replay_path(session_date):
+    compact = session_date.replace("-", "")
+    return REPORTS / f"uncapped_{compact}.json"
+
+
+if not PYTHON.exists():
+    raise SystemExit(f"PYTHON_NOT_FOUND={PYTHON}")
+
+if not SCREEN_TEMPLATE.exists():
+    raise SystemExit(
+        f"SCREEN_TEMPLATE_NOT_FOUND={SCREEN_TEMPLATE}"
+    )
+
+if not REPLAY_TEMPLATE.exists():
+    raise SystemExit(
+        f"REPLAY_TEMPLATE_NOT_FOUND={REPLAY_TEMPLATE}"
+    )
+
+replay_script = create_uncapped_replay()
+
+run_and_tee(
+    [PYTHON, "-m", "py_compile", replay_script],
+    LOGS / "compile_replay.log",
+)
+
+for index, session_date in enumerate(DATES, start=1):
+    compact = session_date.replace("-", "")
+    watchlist = watchlist_path(session_date)
+    report = replay_path(session_date)
+
+    print("\n" + "=" * 80)
+    print(
+        f"DATE {index}/{len(DATES)}: {session_date}"
+    )
+    print("=" * 80)
+
+    if watchlist.exists():
+        print(f"WATCHLIST_ALREADY_EXISTS={watchlist}")
+    else:
+        screen_script = dated_screen_script(session_date)
+
+        run_and_tee(
+            [PYTHON, "-m", "py_compile", screen_script],
+            LOGS / f"compile_screen_{compact}.log",
+        )
+
+        run_and_tee(
+            [PYTHON, "-u", screen_script],
+            LOGS / f"screen_{compact}.log",
+        )
+
+        if not watchlist.exists():
+            raise SystemExit(
+                f"WATCHLIST_NOT_CREATED={watchlist}"
+            )
+
+    if report.exists():
+        print(f"REPLAY_ALREADY_EXISTS={report}")
+        continue
+
+    run_and_tee(
+        [
+            PYTHON,
+            "-u",
+            replay_script,
+            "--date",
+            session_date,
+            "--watchlist-report",
+            watchlist,
+            "--universe-label",
+            "genuine_preopen",
+            "--output",
+            report,
+        ],
+        LOGS / f"replay_{compact}.log",
+    )
+
+    if not report.exists():
+        raise SystemExit(
+            f"REPLAY_REPORT_NOT_CREATED={report}"
+        )
+
+print("\nALL_DAYS_COMPLETE=True")
+print(f"REPORT_DIRECTORY={REPORTS}")
+print("LIVE_STRATEGY_CHANGED=False")

@@ -23,22 +23,17 @@ import os
 import runpy
 
 import config as cfg
+import matmon_strategy_config as strategy_def
 import paper_matmon_launcher as paper_matmon
 from paper_contrarian_launcher import LIVE_ACK_ENV, LIVE_ACK_VALUE
 from paper_matmon_launcher import install_matmon_hooks
 
 logger = logging.getLogger("matmon_live_launcher")
 
-# Core Matmon signal parameters -- UNCHANGED from paper mode. These describe
-# the strategy itself, not execution, and must stay identical to what was
-# paper-validated.
-LIVE_MATMON_EMA_FAST = 3
-LIVE_MATMON_EMA_SLOW = 15
-LIVE_MATMON_DI_PERIOD = 14
-LIVE_MATMON_QUOTE_WINDOW_SECONDS = 3.0
-LIVE_MATMON_QUOTE_MAX_AGE_SECONDS = 2.0
-LIVE_ENTRY_TIMEFRAME = "3minute"
-LIVE_ENTRY_SCAN_SHORTLIST_SIZE = 120
+# Core Matmon signal parameters now come from matmon_strategy_config -- the
+# single source of truth shared with paper mode. No independent LIVE_*
+# strategy copy is kept here anymore; only risk/execution caps (below) are
+# legitimately live-specific.
 
 # Live-specific risk caps -- deliberately tighter than paper mode's
 # (capital=5000, risk=2%, max_position=20%, max_open=5, max_trades=100),
@@ -76,16 +71,17 @@ def enforce_live_limits() -> dict:
             "(Matmon's post-DI CLEAN quote confirmation needs live tick/depth data)"
         )
 
-    # Matmon-specific runtime wiring -- identical values to paper mode.
+    # Matmon-specific runtime wiring -- sourced from matmon_strategy_config,
+    # identical to what paper mode consumes.
     cfg.WS_CANDLE_MODE = "shadow"
     cfg.MATMON_MODE = True
-    cfg.MATMON_EMA_FAST = LIVE_MATMON_EMA_FAST
-    cfg.MATMON_EMA_SLOW = LIVE_MATMON_EMA_SLOW
-    cfg.MATMON_DI_PERIOD = LIVE_MATMON_DI_PERIOD
-    cfg.MATMON_QUOTE_WINDOW_SECONDS = LIVE_MATMON_QUOTE_WINDOW_SECONDS
-    cfg.MATMON_QUOTE_MAX_AGE_SECONDS = LIVE_MATMON_QUOTE_MAX_AGE_SECONDS
-    cfg.ENTRY_TIMEFRAME = LIVE_ENTRY_TIMEFRAME
-    cfg.ENTRY_SCAN_SHORTLIST_SIZE = LIVE_ENTRY_SCAN_SHORTLIST_SIZE
+    cfg.MATMON_EMA_FAST = strategy_def.MATMON_EMA_FAST
+    cfg.MATMON_EMA_SLOW = strategy_def.MATMON_EMA_SLOW
+    cfg.MATMON_DI_PERIOD = strategy_def.MATMON_DI_PERIOD
+    cfg.MATMON_QUOTE_WINDOW_SECONDS = strategy_def.MATMON_QUOTE_WINDOW_SECONDS
+    cfg.MATMON_QUOTE_MAX_AGE_SECONDS = strategy_def.MATMON_QUOTE_MAX_AGE_SECONDS
+    cfg.ENTRY_TIMEFRAME = strategy_def.MATMON_ENTRY_TIMEFRAME
+    cfg.ENTRY_SCAN_SHORTLIST_SIZE = strategy_def.MATMON_WATCHLIST_SIZE
     cfg.CHECK_MARGIN_BEFORE_ENTRY = True
 
     # Live risk caps.

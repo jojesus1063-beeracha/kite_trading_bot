@@ -1,0 +1,346 @@
+{
+  "watchlist": [
+    {
+      "symbol": "KAYNES",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BLS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "FORTIS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GLAND",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "EMMVEE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CEMPRO",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "PAYTM",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "COFORGE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "RAMCOCEM",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ICICIBANK",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "VIJAYA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "INFY",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CONCORDBIO",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "PPLPHARMA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "AXISBANK",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GALLANTT",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "LTM",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "AAVAS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CPPLUS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "UNITDSPR",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "IDFCFIRSTB",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "VBL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SBICARD",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KPITTECH",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CASTROLIND",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "POLYMED",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KIMS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TATAPOWER",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GRAPHITE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ZYDUSLIFE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CIPLA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "DLF",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HYUNDAI",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "LATENTVIEW",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MANKIND",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "NATCOPHARM",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "AJANTPHARM",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "IKS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CYIENT",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "IGL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GABRIEL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BRIGADE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SBFC",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ICICIAMC",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "EIHOTEL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "BIKAJI",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "KAJARIACER",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TEGA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "DELHIVERY",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "OLAELEC",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "OIL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "INOXWIND",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "PFC",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "NLCINDIA",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HBLENGINE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GVT&D",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "PGEL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "NAUKRI",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "HINDALCO",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ABFRL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "RECLTD",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SBIN",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SAPPHIRE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "AFCONS",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "GPIL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CHENNPETRO",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "JKTYRE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "PVRINOX",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SAILIFE",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ENRIN",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "TITAN",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "ZEEL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "CARBORUNIV",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "EIDPARRY",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "REDINGTON",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "RPOWER",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "JYOTICNC",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "IIFL",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "MOTHERSON",
+      "exchange": "NSE"
+    },
+    {
+      "symbol": "SCI",
+      "exchange": "NSE"
+    }
+  ],
+  "capital": 5000.0,
+  "risk_per_trade_pct": 0.5,
+  "sl_buffer_pct": 0.45,
+  "risk_reward_min": 2.5,
+  "max_trades_per_day": 100,
+  "max_daily_loss_pct": 2.0,
+  "trend_ema_fast": 20,
+  "trend_ema_slow": 50,
+  "entry_ema": 9,
+  "paper_trading": false,
+  "use_adx_filter": false,
+  "adx_threshold": 22.0,
+  "max_position_size_pct": 50.0,
+  "adx_mode": "off",
+  "enable_market_alignment_filter": false,
+  "enable_news_filter": false,
+  "enable_price_action": true,
+  "profit_target_percent": 0.7,
+  "enable_fixed_target": true,
+  "no_entry_before": "09:30",
+  "no_entry_after": "15:05",
+  "enable_candle_aligned_polling": true
+}
