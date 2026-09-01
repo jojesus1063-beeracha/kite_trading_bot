@@ -230,9 +230,14 @@ def _matmon_signal(symbol, df_entry, cfg_obj):
     )
 
 
-def install_matmon_policy():
-    """Install only the Matmon direction and confirmation hooks; no legacy strategy patch."""
-    enforce_settings()
+def install_matmon_hooks():
+    """Install only the Matmon direction/confirmation hooks (no config enforcement).
+
+    Split out from install_matmon_policy() so a live launcher can reuse the
+    exact same signal and confirmation logic validated in paper mode without
+    triggering enforce_settings()'s hard PAPER_TRADING=True requirement.
+    Strategy logic here is byte-identical to what paper mode has always run.
+    """
 
     def evaluate_matmon(symbol, df_15m, df_entry, df_index, cfg_obj):
         del df_15m, df_index
@@ -332,6 +337,12 @@ def install_matmon_policy():
         )
 
     depth_confirmation.evaluate_live_depth = evaluate_matmon_quote
+
+
+def install_matmon_policy():
+    """Paper-mode entry point: enforce paper settings, then install hooks."""
+    enforce_settings()
+    install_matmon_hooks()
     assert_runtime_contract()
 
 

@@ -306,8 +306,12 @@ def test_28_paper_period_contract_is_3_15_14():
 
 
 def test_29_paper_confirmation_requires_microstructure():
-    source = inspect.getsource(paper_matmon.install_matmon_policy)
+    # install_matmon_policy() delegates to install_matmon_hooks(), which is
+    # also reused unchanged by the live launcher -- inspect where the logic
+    # actually lives.
+    source = inspect.getsource(paper_matmon.install_matmon_hooks)
     assert "evaluate_quote_window" in source
+    assert "install_matmon_hooks" in inspect.getsource(paper_matmon.install_matmon_policy)
     assert "evaluate_microstructure(direction, clean.ticks)" in source
     assert source.index("evaluate_quote_window") < source.index("evaluate_microstructure(direction, clean.ticks)")
 
@@ -343,7 +347,7 @@ def test_32_paper_contract_forces_rest_authoritative_shadow_mode():
 
 
 def test_33_paper_confirmation_consumes_post_di_timestamp():
-    source = inspect.getsource(paper_matmon.install_matmon_policy)
+    source = inspect.getsource(paper_matmon.install_matmon_hooks)
     assert "_MATMON_DI_PASSED_AT[symbol] = time.time()" in source
     assert "_MATMON_DI_PASSED_AT.pop(symbol, None)" in source
     assert "not_before=di_passed_at" in source
