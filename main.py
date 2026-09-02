@@ -29,6 +29,8 @@ from data_feed import (
 )
 from candle_cache import LIVE_CANDLE_CACHE
 import candle_provider
+import matmon_post_di_freeze
+import paper_matmon_launcher
 from watchlist_filters import classify_direction_eligibility, format_watchlist_log, NOT_ENABLED
 from rvol import passes_rvol_threshold, format_rvol_log
 from indicators import add_indicators, atr as atr_indicator
@@ -560,6 +562,18 @@ def run_full_scan(
         signal = evaluate(symbol, df_15m, df_5m, market_df_15m, cfg)
 
         if signal:
+            # Matmon-only, no-op for every other strategy/signal: start
+            # freezing this symbol's post-DI tick evidence immediately at
+            # T0, before any of the intermediate per-symbol checks below
+            # (market regime, watchlist filters, RVOL, EMA-distance, margin
+            # lookup) can delay confirmation and cost it fresh evidence.
+            matmon_post_di_freeze.maybe_start_capture(
+                symbol,
+                signal,
+                ws_engine=ws_shadow_engine,
+                cfg=cfg,
+                di_passed_at=paper_matmon_launcher.get_di_passed_at(symbol),
+            )
             raw_direction = signal.direction
             if bool(getattr(cfg, "DEPTH_RAW_DIRECTION_ONLY", False)):
                 resolution = {

@@ -13,6 +13,11 @@ from __future__ import annotations
 import logging
 import runpy
 import time
+from matmon_post_di_research import (
+    capture_post_di_window,
+    current_monotonic_clean,
+    consistency_clean,
+)
 
 import pandas as pd
 
@@ -25,6 +30,7 @@ from indicators import directional_indicators, ema
 from matmon_entry_policy import evaluate_direction
 from matmon_quote_confirmation import evaluate_quote_window
 from matmon_microstructure import evaluate_microstructure
+import matmon_post_di_freeze
 
 logger = logging.getLogger("paper_matmon_launcher")
 
@@ -32,6 +38,15 @@ logger = logging.getLogger("paper_matmon_launcher")
 # passed. The confirmation hook consumes this timestamp so ticks received
 # before EMA/DI authorization can never satisfy the 3-second CLEAN gate.
 _MATMON_DI_PASSED_AT: dict[str, float] = {}
+
+
+def get_di_passed_at(symbol):
+    """Public read-only accessor for the T0 timestamp evaluate_matmon recorded.
+
+    Used by the scan loop to start post-DI evidence capture immediately at
+    T0, without reaching into the private module-level map above.
+    """
+    return _MATMON_DI_PASSED_AT.get(symbol)
 
 MATMON_REQUIRED = {
     "PAPER_TRADING": True,
@@ -268,6 +283,7 @@ def install_matmon_hooks():
             return DepthConfirmation(False, "UNAVAILABLE", "MATMON_NO_TICKS")
 
         clean_started = time.perf_counter()
+        frozen_ticks = matmon_post_di_freeze.pop_frozen_evidence(symbol, di_passed_at)        
         clean = evaluate_quote_window(
             buffer,
             symbol,
@@ -276,8 +292,87 @@ def install_matmon_hooks():
             max_age_seconds=float(getattr(cfg_obj, "MATMON_QUOTE_MAX_AGE_SECONDS", 2.0)),
             now=now,
             not_before=di_passed_at,
+            frozen_ticks=frozen_ticks,
         )
         clean_ms = (time.perf_counter() - clean_started) * 1000.0
+
+        # ------------------------------------------------------
+        # POST-DI SHADOW RESEARCH
+        #
+        # OBSERVATIONAL ONLY.
+        # This must never change clean.confirmed, accepted,
+        # direction, quantity, risk, execution or order routing.
+        # ------------------------------------------------------
+        try:
+            _research_points = capture_post_di_window(
+                clean.ticks,
+                di_passed_at=di_passed_at,
+                window_seconds=float(
+                    getattr(
+                        cfg_obj,
+                        "MATMON_QUOTE_WINDOW_SECONDS",
+                        3.0,
+                    )
+                ),
+            )
+
+            _research_current = current_monotonic_clean(
+                _research_points,
+                direction,
+                required_coverage_seconds=float(
+                    getattr(
+                        cfg_obj,
+                        "MATMON_QUOTE_WINDOW_SECONDS",
+                        3.0,
+                    )
+                ),
+            )
+
+            _research_80 = consistency_clean(
+                _research_points,
+                direction,
+                required_coverage_seconds=float(
+                    getattr(
+                        cfg_obj,
+                        "MATMON_QUOTE_WINDOW_SECONDS",
+                        3.0,
+                    )
+                ),
+                minimum_directional_fraction=0.80,
+            )
+
+            logger.info(
+                "MATMON_POST_DI_SHADOW | %s | %s "
+                "| production_reason=%s "
+                "| production_confirmed=%s "
+                "| samples=%s "
+                "| coverage=%.3f "
+                "| strict=%s "
+                "| consistency80=%s "
+                "| directional_fraction=%.3f "
+                "| bid_change=%+.6f "
+                "| ask_change=%+.6f",
+                symbol,
+                direction,
+                clean.reason,
+                clean.confirmed,
+                len(_research_points),
+                _research_80.coverage_seconds,
+                _research_current.accepted,
+                _research_80.accepted,
+                _research_80.directional_fraction,
+                _research_80.bid_change,
+                _research_80.ask_change,
+            )
+
+        except Exception:
+            # Research instrumentation must never affect Matmon.
+            logger.exception(
+                "MATMON_POST_DI_SHADOW_ERROR | %s | %s",
+                symbol,
+                direction,
+            )
+
         if not clean.confirmed:
             total_ms = (time.perf_counter() - confirmation_started) * 1000.0
             logger.info(
