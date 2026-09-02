@@ -1,0 +1,10 @@
+[Unit]
+Description=Stop all Kite trading bots after market session
+
+[Service]
+Type=oneshot
+# Stop both mutually-exclusive units. Stopping an inactive unit is harmless.
+ExecStart=/usr/bin/systemctl stop kitebot-paper-contrarian.service
+ExecStart=/usr/bin/systemctl stop kitebot.service
+ExecStart=/usr/bin/systemctl stop kitebot-live-combined.service
+ExecStart=/usr/bin/systemctl stop kitebot-equity-socket-shadow.service

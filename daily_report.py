@@ -38,22 +38,71 @@ def load_signals(iso_date):
 
 
 def match_trade_to_signal(trade, signals):
-    """Best-effort match by symbol + entry price -- signal logging predates
-    a fully reliable join key, so this is approximate, not guaranteed exact.
-    Defensively skips any signal whose entry_price isn'''t numeric (a real
-    stale-data artifact existed briefly before the json_safe fix, where a
-    numpy value got stringified instead of converted -- treat as no match
-    rather than crash)."""
+    """Match by signal ID, then entry operation ID, with a legacy fallback.
+
+    New records never fall back from a present durable ID to a price guess: a
+    missing exact match is reported as unmatched. Older records that predate
+    both join keys may use symbol/direction/price only when exactly one signal
+    qualifies. This prevents two nearby entries from silently reusing the same
+    signal attribution. signal_id also provides exact linkage in paper mode,
+    where no broker entry operation is created.
+    """
+    signal_id = trade.get("signal_id")
+
+    if signal_id:
+        exact_signal = [
+            signal
+            for signal in signals
+            if signal.get("signal_id") == signal_id
+        ]
+
+        return exact_signal[0] if len(exact_signal) == 1 else None
+
+    operation_id = trade.get("entry_operation_id")
+
+    if operation_id:
+        exact = [
+            signal
+            for signal in signals
+            if signal.get("entry_operation_id") == operation_id
+        ]
+
+        if len(exact) == 1:
+            return exact[0]
+
+        executed = [
+            signal
+            for signal in exact
+            if signal.get("executed") is True
+        ]
+
+        return executed[0] if len(executed) == 1 else None
+
     candidates = []
     for s in signals:
-        if s["symbol"] != trade["symbol"]:
+        if s.get("symbol") != trade.get("symbol"):
+            continue
+        if (
+            trade.get("direction")
+            and s.get("direction")
+            and s.get("direction") != trade.get("direction")
+        ):
             continue
         ep = s.get("entry_price", -1e9)
         if not isinstance(ep, (int, float)):
             continue
-        if abs(ep - trade["entry"]) < 0.5:
+        if abs(ep - trade.get("entry", -1e9)) < 0.5:
             candidates.append(s)
-    return candidates[0] if candidates else None
+
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _entry_metric(trade, signal, key, default="N/A (pre-fix)"):
+    if trade.get(key) is not None:
+        return trade[key]
+    if signal and signal.get(key) is not None:
+        return signal[key]
+    return default
 
 
 def build_trade_reasons(iso_date):
@@ -64,6 +113,21 @@ def build_trade_reasons(iso_date):
     rows = []
     for t in trades:
         sig = match_trade_to_signal(t, signals)
+        signal_id = t.get("signal_id")
+        operation_id = t.get("entry_operation_id")
+        if sig and signal_id:
+            signal_match = "EXACT_SIGNAL_ID"
+        elif sig and operation_id:
+            signal_match = "EXACT_OPERATION_ID"
+        elif sig:
+            signal_match = "LEGACY_SYMBOL_PRICE"
+        elif signal_id:
+            signal_match = "UNMATCHED_SIGNAL_ID"
+        elif operation_id:
+            signal_match = "UNMATCHED_OPERATION_ID"
+        else:
+            signal_match = "UNMATCHED_LEGACY"
+
         rows.append({
             "time": t["time"], "symbol": t["symbol"], "direction": t["direction"],
             "result": t["result"], "gross_pnl": t.get("gross_pnl", t["pnl"]),
@@ -73,6 +137,24 @@ def build_trade_reasons(iso_date):
             "news_sentiment": sig.get("news_sentiment", "N/A (pre-fix)") if sig else "N/A",
             "price_action_score": sig.get("price_action_score", "N/A (pre-fix)") if sig else "N/A",
             "raw_adx": sig.get("raw_adx", "N/A (pre-fix)") if sig else "N/A",
+            "entry_operation_id": operation_id,
+            "signal_id": signal_id,
+            "signal_match": signal_match,
+            "candidate_rank": _entry_metric(t, sig, "candidate_rank"),
+            "candidate_count": _entry_metric(t, sig, "candidate_count"),
+            "ranking_score": _entry_metric(t, sig, "ranking_score"),
+            "entry_quality_score": _entry_metric(
+                t, sig, "entry_quality_score"
+            ),
+            "entry_context_score": _entry_metric(
+                t, sig, "entry_context_score"
+            ),
+            "confirmation_count": _entry_metric(
+                t, sig, "confirmation_count"
+            ),
+            "adx_state": _entry_metric(t, sig, "adx_state"),
+            "mfe_pct": t.get("mfe_pct", "N/A (pre-fix)"),
+            "mae_pct": t.get("mae_pct", "N/A (pre-fix)"),
         })
     return rows
 
@@ -110,6 +192,16 @@ def build_filter_effectiveness(iso_date, min_group_size=5):
         [r for r in rows if isinstance(r["price_action_score"], (int, float))],
         lambda r: "positive" if r["price_action_score"] > 0 else ("negative" if r["price_action_score"] < 0 else "zero"),
         min_group_size)
+    by_adx_state = _group_stats(
+        [r for r in rows if r["adx_state"] not in ("N/A", "N/A (pre-fix)")],
+        lambda r: r["adx_state"],
+        min_group_size,
+    )
+    by_confirmation_count = _group_stats(
+        [r for r in rows if isinstance(r["confirmation_count"], (int, float))],
+        lambda r: r["confirmation_count"],
+        min_group_size,
+    )
 
     return {
         "trade_count": len(rows),
@@ -117,6 +209,8 @@ def build_filter_effectiveness(iso_date, min_group_size=5):
         "by_market_alignment": by_alignment,
         "by_news_sentiment": by_news,
         "by_price_action_sign": by_pa_sign,
+        "by_adx_state": by_adx_state,
+        "by_confirmation_count": by_confirmation_count,
     }
 
 
@@ -138,6 +232,13 @@ def format_report(iso_date):
                      f"| result={r['result']}")
         lines.append(f"    confidence={r['technical_confidence']} | alignment={r['market_alignment']} | "
                      f"news={r['news_sentiment']} | price_action={r['price_action_score']} | ADX={r['raw_adx']}")
+        lines.append(
+            f"    signal_match={r['signal_match']} | rank={r['candidate_rank']}/"
+            f"{r['candidate_count']} | ranking={r['ranking_score']} | "
+            f"quality={r['entry_quality_score']} | context={r['entry_context_score']} | "
+            f"confirmations={r['confirmation_count']} | ADX_state={r['adx_state']} | "
+            f"MFE={r['mfe_pct']} | MAE={r['mae_pct']}"
+        )
 
     lines.append("")
     lines.append("--- Filter Effectiveness ---")
@@ -149,6 +250,8 @@ def format_report(iso_date):
             ("By Market Alignment", effectiveness["by_market_alignment"]),
             ("By News Sentiment", effectiveness["by_news_sentiment"]),
             ("By Price Action Score Sign", effectiveness["by_price_action_sign"]),
+            ("By ADX Direction", effectiveness["by_adx_state"]),
+            ("By Confirmation Count", effectiveness["by_confirmation_count"]),
         ]:
             lines.append(f"\n{label}:")
             if not data:
@@ -160,7 +263,7 @@ def format_report(iso_date):
 
     lines.append("")
     lines.append("--- Known Gaps (not yet tracked) ---")
-    lines.append("MFE/MAE: N/A (not yet implemented)")
+    lines.append("MFE/MAE: captured for new trades; older records show N/A")
     lines.append("Counterfactual outcomes for rejected signals: N/A (not yet implemented)")
 
     return "\n".join(lines)

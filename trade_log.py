@@ -17,13 +17,50 @@ from datetime import datetime
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_history.jsonl")
 STATUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_status.json")
 
+TRADE_ANALYTICS_FIELDS = {
+    "signal_id",
+    "entry_operation_id",
+    "entry_order_id",
+    "entry_time",
+    "candidate_rank",
+    "candidate_count",
+    "ranking_score",
+    "entry_quality_score",
+    "entry_quality_detail",
+    "entry_context_score",
+    "entry_context_detail",
+    "confirmation_count",
+    "adx_state",
+    "adx_current",
+    "adx_previous",
+    "adx_delta",
+    "relative_strength_score",
+    "relative_strength_detail",
+    "market_trend_reason",
+    "sector_trend",
+    "sector_trend_reason",
+    "signal_candle_start",
+    "signal_candle_close",
+    "scan_started_at",
+    "order_submitted_at",
+    "entry_delay_seconds",
+    "mfe_pct",
+    "mae_pct",
+}
+
 
 def record_trade(symbol, direction, qty, entry, exit_price, pnl, result, exchange="NSE",
-                  gross_pnl=None, costs=None, log_path=None):
+                  gross_pnl=None, costs=None, analytics=None, log_path=None):
     """
     pnl is the TRUE NET result (costs deducted) -- the authoritative
     field kill-switch/dashboard/stats should use. gross_pnl/costs are
     optional extra detail (default to pnl/0 for backward compat).
+
+    analytics is an optional, reporting-only mapping copied from the
+    position that produced this exit.  It carries the durable entry
+    operation ID and entry-quality context into the closed-trade record,
+    allowing daily reports to join a trade to its exact signal without
+    changing any trading decision.
     """
     path = log_path if log_path is not None else LOG_PATH
     record = {
@@ -40,6 +77,13 @@ def record_trade(symbol, direction, qty, entry, exit_price, pnl, result, exchang
         "costs": costs if costs is not None else 0.0,
         "result": result,
     }
+    if analytics:
+        record.update({
+            key: value
+            for key, value in analytics.items()
+            if key in TRADE_ANALYTICS_FIELDS
+            and value is not None
+        })
     with open(path, "a") as f:
         f.write(json.dumps(json_safe(record)) + "\n")
 

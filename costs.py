@@ -1,6 +1,6 @@
 """
 Approximate round-trip trading costs for Zerodha intraday equity
-(MIS) trades, based on their published rate structure as of mid-2026.
+(MIS) trades, based on Zerodha's published equity-intraday rate structure as verified in August 2026.
 
 This is an ESTIMATE for backtesting purposes, not an exact
 reproduction of your contract note — exchange transaction charges in
@@ -14,7 +14,7 @@ bigger error than being a few rupees off on the exact fee.
 BROKERAGE_RATE = 0.0003    # 0.03% of turnover
 BROKERAGE_CAP = 20.0       # or Rs 20 per executed order, whichever is LOWER
 STT_SELL_RATE = 0.00025    # 0.025% on sell-side turnover only (intraday equity)
-EXCHANGE_TXN_RATE = 0.0000297  # approx NSE exchange transaction charge, both sides
+EXCHANGE_TXN_RATE = 0.0000307  # NSE equity transaction charge, both sides
 SEBI_CHARGES_RATE = 0.000001   # approx Rs 10/crore, both sides
 GST_RATE = 0.18            # on brokerage + exchange txn charges + SEBI charges
 STAMP_DUTY_BUY_RATE = 0.00003  # 0.003% on buy-side turnover only (intraday)

@@ -1,0 +1,20 @@
+[Unit]
+Description=Build frozen full-universe top-120 LIVE watchlist and start guarded combined bot
+Wants=network-online.target
+After=network-online.target
+Conflicts=kite-paper-watchlist.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+EnvironmentFile=/etc/kitebot.env
+WorkingDirectory=/home/ubuntu/kite_trading_bot
+# Ignore "unit not found/inactive" while ensuring no competing bot remains.
+ExecStartPre=-+/usr/bin/systemctl stop kitebot-paper-contrarian.service kitebot.service kitebot-live-combined.service
+ExecStart=/bin/bash /home/ubuntu/kite_trading_bot/run_live_combined_watchlist_daily.sh
+ExecStartPost=+/usr/bin/systemctl start kitebot-live-combined.service
+TimeoutStartSec=1800
+UMask=0027
+StandardOutput=journal
+StandardError=journal

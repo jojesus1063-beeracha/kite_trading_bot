@@ -1,5 +1,5 @@
 WATCHLIST_SECTION = """
-    <div class="section">
+    <div class="section" id="watchlist-analysis">
         <h2>Watchlist Daily High/Low Analysis</h2>
 
         {% if freshness.status == 'NO_REPORT_AVAILABLE' %}
@@ -83,7 +83,7 @@ WATCHLIST_SECTION = """
             <button onclick="exportWatchlistCSV()" style="padding:6px 14px; border-radius:6px; border:none; background:var(--accent, #22c55e); color:#0f1117; font-weight:600; cursor:pointer;">Export CSV</button>
         </div>
 
-        <table id="wl-table">
+        <div class="table-wrap"><table id="wl-table">
             <thead>
             <tr>
                 <th>Symbol</th><th>Open</th><th>Low</th><th>Low Time</th><th>High</th><th>High Time</th>
@@ -91,7 +91,7 @@ WATCHLIST_SECTION = """
             </tr>
             </thead>
             <tbody id="wl-tbody"></tbody>
-        </table>
+        </table></div>
         <div id="wl-empty" class="empty" style="display:none;">No symbols match the current search/filter.</div>
 
         <script>
@@ -270,12 +270,12 @@ WATCHLIST_SECTION = """
                 search: document.getElementById("wl-search").value,
                 sort: document.getElementById("wl-sort").value,
                 filter: document.getElementById("wl-filter").value,
-                scrollY: window.scrollY,
             };
             try {
-                const resp = await fetch("/api/monitor-data");
+                const resp = await fetch("/api/monitor-data", {cache: "no-store"});
                 if (resp.ok === false) throw new Error("HTTP " + resp.status);
                 const fresh = await resp.json();
+                window.dispatchEvent(new CustomEvent("monitorData", {detail: fresh}));
 
                 WATCHLIST_DATA.length = 0;
                 WATCHLIST_DATA.push.apply(WATCHLIST_DATA, fresh.watchlist_symbols || []);
@@ -287,7 +287,6 @@ WATCHLIST_SECTION = """
                 document.getElementById("wl-filter").value = currentState.filter;
 
                 renderWatchlistTable();
-                window.scrollTo(0, currentState.scrollY);
                 setLastRefreshIndicator(true);
             } catch (e) {
                 setLastRefreshIndicator(false);

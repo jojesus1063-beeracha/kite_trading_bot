@@ -1,0 +1,14 @@
+[Unit]
+Description=Build frozen full-universe PAPER top-120 each weekday at the 09:27 snapshot
+
+[Timer]
+# Fire 20 seconds before the policy boundary. The runner stops the old PAPER
+# process, waits 20 seconds, then begins quote collection at about 09:27:10 IST.
+OnCalendar=Mon..Fri *-*-* 09:26:50 Asia/Kolkata
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=kite-paper-watchlist.service
+
+[Install]
+WantedBy=timers.target

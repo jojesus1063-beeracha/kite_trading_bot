@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PROJECT="/home/ubuntu/kite_trading_bot"
+PYTHON="$PROJECT/venv/bin/python3"
+RUNTIME="$PROJECT/runtime/live_watchlist"
+LOCK_FILE="$RUNTIME/live_daily.lock"
+EXPECTED_ACK="I_ACCEPT_REAL_ORDERS"
+
+cd "$PROJECT"
+mkdir -p "$RUNTIME"
+exec 9>"$LOCK_FILE"
+
+if ! flock -n 9; then
+    echo "Another LIVE automatic-watchlist run is active."
+    exit 1
+fi
+
+if [[ "${KITE_LIVE_COMBINED_ACK:-}" != "$EXPECTED_ACK" ]]; then
+    echo "SAFETY BLOCK: KITE_LIVE_COMBINED_ACK acknowledgement is missing."
+    exit 1
+fi
+
+"$PYTHON" - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("user_config.json")
+if not path.exists():
+    raise SystemExit("SAFETY BLOCK: user_config.json not found")
+data = json.loads(path.read_text(encoding="utf-8"))
+if data.get("paper_trading") is not False:
+    raise SystemExit("SAFETY BLOCK: live selector requires paper_trading=false")
+print("PASS: LIVE mode confirmed")
+PY
+
+# Timer fires at 09:26:50. Begin the first quote request at approximately
+# 09:27:10, matching the validated frozen top-120 selection boundary.
+echo "Waiting 20 seconds for the 09:27:10 selector boundary..."
+sleep 20
+
+echo "Read-only full-universe LIVE top-120 selection started:"
+TZ=Asia/Kolkata date
+
+"$PYTHON" live_momentum_rvol_selector.py \
+  --top 120 \
+  --min-selected 120 \
+  --output runtime/live_watchlist/latest_watchlist.json \
+  --report runtime/live_watchlist/latest_report.json
+
+# This step is the only config write. It first verifies today's selector
+# contract, local journals, broker MIS flatness, and the exact live acknowledgement.
+"$PYTHON" live_combined_preflight.py \
+  --check-broker-flat \
+  --apply-watchlist
+
+echo "Combined LIVE top-120 handoff completed:"
+TZ=Asia/Kolkata date

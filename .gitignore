@@ -28,6 +28,14 @@ bot.log
 watchlist_daily_range.json
 pending_orders.json
 pending_orders.json.lock
+runtime/auto_watchlist/
+runtime/
+
+# Paper-validation runtime ledger
+validation_events/
+protective_stops.json
+protective_stops.json.lock
+ws_shadow_logs/
 
 # fno_bot runtime state (production data, not code) -- distinct filenames
 # from the equity bot's own by design (isolation), so needs its own entries

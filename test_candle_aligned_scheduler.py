@@ -16,6 +16,7 @@ def check(name, condition):
 
 print("--- candle_interval_minutes ---")
 check("'5minute' parses to 5", candle_interval_minutes("5minute") == 5)
+check("'3minute' parses to 3", candle_interval_minutes("3minute") == 3)
 check("'15minute' parses to 15", candle_interval_minutes("15minute") == 15)
 check("Unrecognized format defaults to 5", candle_interval_minutes("garbage") == 5)
 
@@ -104,7 +105,15 @@ scan_calls = []
 position_check_calls = []
 exit_orders_placed = []
 
-def fake_run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
+def fake_run_full_scan(
+    kite,
+    symbols,
+    tokens,
+    exchange_map,
+    open_positions,
+    risk,
+    **_kwargs,
+):
     scan_calls.append(FakeDateTime._current)
     return [{"symbol": "TEST", "status": "no signal"}]
 
@@ -140,6 +149,8 @@ def fake_place_exit_order(*args, **kwargs):
 # Wire everything up
 cfg.ENABLE_CANDLE_ALIGNED_POLLING = True
 cfg.PAPER_TRADING = True
+original_ws_candles = cfg.ENABLE_WS_CANDLES
+cfg.ENABLE_WS_CANDLES = False
 main_module.datetime = FakeDateTime
 main_module.time.sleep = fake_sleep
 main_module.get_kite_client = lambda: MagicMock()
@@ -162,7 +173,7 @@ original_watchlist = cfg.WATCHLIST
 cfg.WATCHLIST = [{"symbol": "TEST", "exchange": "NSE"}]
 
 # Start the simulated clock at 14:50:00 -- gives us several scan
-# cycles before crossing FORCE_SQUARE_OFF_TIME (15:10)
+# cycles before crossing FORCE_SQUARE_OFF_TIME (15:08)
 FakeDateTime._current = FakeDateTime(2026, 7, 31, 14, 50, 0)
 
 try:
@@ -178,9 +189,18 @@ cfg.ENABLE_CANDLE_ALIGNED_POLLING = False
 check("Simulation ran to completion without crashing", ran_to_completion)
 check("At least 3 full scans occurred over the simulated window", len(scan_calls) >= 3)
 
-# Every scan timestamp should land at a 5-min candle boundary + 8s buffer
-all_aligned = all(t.minute % 5 == 0 and t.second == 8 for t in scan_calls)
-check("Every scan occurred exactly at a completed candle boundary + buffer (:X0/:X5 + 8s)", all_aligned)
+# Every scan timestamp should land at a configured entry-candle boundary plus the
+# configured broker-finalisation safety buffer.
+entry_minutes = candle_interval_minutes(cfg.ENTRY_TIMEFRAME)
+all_aligned = all(
+    t.minute % entry_minutes == 0
+    and t.second == cfg.SCAN_BUFFER_SECONDS
+    for t in scan_calls
+)
+check(
+    "Every scan occurred at a completed candle boundary plus the configured buffer",
+    all_aligned,
+)
 
 # No duplicate scans for the same candle
 scan_minutes = [t.minute for t in scan_calls]
@@ -189,8 +209,11 @@ check("No duplicate scans for the same candle", len(scan_minutes) == len(set(sca
 check("Position monitoring occurred between scans (multiple checks recorded)",
       len(position_check_calls) > len(scan_calls))
 
-check("End-of-day square-off correctly fired (exit order placed past 15:10)",
-      len(exit_orders_placed) >= 1 and all(t.hour == 15 and t.minute >= 10 for t in exit_orders_placed))
+check("End-of-day square-off correctly fired in the 15:08 safety window",
+      len(exit_orders_placed) >= 1 and all(
+          t.hour == 15 and 8 <= t.minute < 10
+          for t in exit_orders_placed
+      ))
 
 print("")
 print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
@@ -206,10 +229,14 @@ print("\n--- Real stop-loss responsiveness within the candle-aligned sub-loop --
 import pandas as pd
 from risk_manager import RiskManager as RiskManagerReal
 
-def make_df_5m(closes):
+def make_entry_df(closes):
     n = len(closes)
     return pd.DataFrame({
-        "date": pd.date_range("2026-07-31 09:15", periods=n, freq="5min"),
+        "date": pd.date_range(
+            "2026-07-31 09:15",
+            periods=n,
+            freq=f"{entry_minutes}min",
+        ),
         "open": closes, "high": [c+1 for c in closes], "low": [c-1 for c in closes],
         "close": closes, "volume": [1000]*n,
     })
@@ -217,7 +244,15 @@ def make_df_5m(closes):
 real_position_check_calls = []
 original_check_position_exit = None
 
-def fake_run_full_scan_2(kite, symbols, tokens, exchange_map, open_positions, risk):
+def fake_run_full_scan_2(
+    kite,
+    symbols,
+    tokens,
+    exchange_map,
+    open_positions,
+    risk,
+    **_kwargs,
+):
     scan_calls.append(FakeDateTime._current)
     return [{"symbol": "TEST", "status": "no signal"}]
 
@@ -229,7 +264,7 @@ call_counter = {"n": 0}
 def fake_fetch_candles(kite, token, interval, lookback_days=1, trim_incomplete=True):
     idx = min(call_counter["n"], len(price_sequence) - 1)
     call_counter["n"] += 1
-    return make_df_5m([price_sequence[idx]])
+    return make_entry_df([price_sequence[idx]])
 
 cfg.ENABLE_FIXED_TARGET = True
 cfg.ENABLE_CANDLE_ALIGNED_POLLING = True
@@ -272,6 +307,7 @@ except Exception as e:
 
 cfg.WATCHLIST = original_watchlist
 cfg.ENABLE_CANDLE_ALIGNED_POLLING = False
+cfg.ENABLE_WS_CANDLES = original_ws_candles
 
 check("Real stop-loss test: simulation ran without crashing", ran_ok)
 check("Real stop-loss test: a genuine exit order was placed (stop-loss actually fired)",
@@ -279,8 +315,8 @@ check("Real stop-loss test: a genuine exit order was placed (stop-loss actually 
 if exit_orders_placed:
     exit_time = exit_orders_placed[0]
     check("Real stop-loss test: fired BEFORE square-off time (genuine mid-cycle responsiveness, not end-of-day)",
-          exit_time.hour == 14 and exit_time.minute < 60 or (exit_time.hour == 15 and exit_time.minute < 10))
-    print(f'  (exit fired at {exit_time.strftime("%H:%M:%S")}, square-off is 15:10:00)')
+          exit_time.hour == 14 and exit_time.minute < 60 or (exit_time.hour == 15 and exit_time.minute < 8))
+    print(f'  (exit fired at {exit_time.strftime("%H:%M:%S")}, square-off is 15:08:00)')
 
 print("")
 print("Results: " + str(passed) + " passed, " + str(failed) + " failed")

@@ -223,6 +223,15 @@ def test_partial_to_complete(tmp):
                 operation_id
             )["resolved"] is False,
         )
+        check(
+            "1g. Remaining quantity stays blocked from automatic retry",
+            positions["FORCERECOVER"][
+                "automated_exit_blocked"
+            ] is True
+            and positions["FORCERECOVER"][
+                "manual_reconciliation_required"
+            ] is True,
+        )
 
         # The same cumulative broker state must apply nothing twice.
         main_module.recover_unresolved_force_exits(
@@ -365,6 +374,15 @@ def test_rejected(tmp):
                 operation_id
             )["resolved"] is True,
         )
+        check(
+            "4d. Rejected FORCE_EXIT keeps the position blocked",
+            positions["FORCEREJECT"][
+                "automated_exit_blocked"
+            ] is True
+            and positions["FORCEREJECT"][
+                "manual_reconciliation_required"
+            ] is True,
+        )
 
     finally:
         main_module.save_positions = original_save
@@ -424,6 +442,13 @@ def test_no_order_id(tmp):
         pending_order_store.get_order(
             operation_id
         )["resolved"] is False,
+    )
+    check(
+        "5d. Unknown FORCE_EXIT outcome blocks automatic retry",
+        positions["FORCENOID"]["automated_exit_blocked"] is True
+        and positions["FORCENOID"][
+            "manual_reconciliation_required"
+        ] is True,
     )
 
 

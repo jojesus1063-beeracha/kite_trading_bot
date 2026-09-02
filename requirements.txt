@@ -2,3 +2,4 @@ kiteconnect>=5.2.0
 pandas>=2.0.0
 flask>=3.0.0
 psutil
+TA-Lib==0.7.1

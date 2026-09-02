@@ -3,7 +3,37 @@ import tempfile
 from types import SimpleNamespace
 
 import pending_order_store
-from executor import place_exit_order
+from executor import place_exit_order as _place_exit_order
+
+
+def place_exit_order(
+    kite,
+    symbol,
+    direction,
+    quantity,
+    exchange,
+    cfg,
+):
+    """Exercise executor verification after stop clearance."""
+
+    clearance = {
+        "safe_to_submit_exit": True,
+        "paper": False,
+        "symbol": symbol,
+        "exchange": exchange,
+        "quantity": quantity,
+        "exit_action": "EXIT",
+        "protective_stop_state": "CANCELLED",
+    }
+    return _place_exit_order(
+        kite,
+        symbol,
+        direction,
+        quantity,
+        exchange,
+        cfg,
+        protection_clearance=clearance,
+    )
 
 
 passed = 0

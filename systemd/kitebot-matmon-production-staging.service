@@ -1,0 +1,15 @@
+[Unit]
+Description=Matmon HaElohim production staging boundary (no broker execution)
+Wants=network-online.target
+After=network-online.target
+Conflicts=kitebot-live-combined.service kitebot-matmon-paper.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/kite_trading_bot
+ExecStart=/home/ubuntu/kite_trading_bot/venv/bin/python3 /home/ubuntu/kite_trading_bot/matmon_production_staging.py
+UMask=0027
+StandardOutput=journal
+StandardError=journal

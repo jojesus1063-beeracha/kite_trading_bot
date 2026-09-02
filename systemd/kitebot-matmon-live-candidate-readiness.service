@@ -1,0 +1,17 @@
+[Unit]
+Description=Matmon production-candidate read-only readiness check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+EnvironmentFile=/etc/kitebot.env
+WorkingDirectory=/home/ubuntu/kite_trading_bot
+ExecStart=/home/ubuntu/kite_trading_bot/venv/bin/python /home/ubuntu/kite_trading_bot/matmon_live_readiness.py
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0027
+StandardOutput=journal
+StandardError=journal

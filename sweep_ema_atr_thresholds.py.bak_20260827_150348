@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+BASE = Path("replay_depth_upto100_historical_ema_atr.py")
+
+THRESHOLDS = [
+    0.10,
+    0.15,
+    0.20,
+    0.25,
+    0.30,
+    0.35,
+    0.40,
+    0.50,
+    0.60,
+    0.75,
+    1.00,
+    1.50,
+    2.00,
+]
+
+if not BASE.exists():
+    raise SystemExit(
+        f"ABORT: {BASE} not found"
+    )
+
+original = BASE.read_text()
+
+pattern = re.compile(
+    r"^MAX_EMA_DISTANCE_ATR\s*=\s*[0-9.]+",
+    re.MULTILINE,
+)
+
+if not pattern.search(original):
+    raise SystemExit(
+        "ABORT: MAX_EMA_DISTANCE_ATR not found"
+    )
+
+
+def extract_number(label, text):
+    m = re.search(
+        rf"{re.escape(label)}\s*:\s*"
+        r"(?:₹)?([+-]?[0-9,.]+)",
+        text,
+    )
+
+    if not m:
+        return None
+
+    return float(
+        m.group(1).replace(",", "")
+    )
+
+
+def extract_percent(label, text):
+    m = re.search(
+        rf"{re.escape(label)}\s*:\s*"
+        r"([+-]?[0-9.]+)%",
+        text,
+    )
+
+    if not m:
+        return None
+
+    return float(m.group(1))
+
+
+results = []
+
+print("=" * 110)
+print("EMA9 / ATR THRESHOLD SWEEP")
+print("=" * 110)
+
+for threshold in THRESHOLDS:
+
+    temp = Path(
+        f"replay_threshold_{threshold:.2f}.py"
+    )
+
+    modified = pattern.sub(
+        f"MAX_EMA_DISTANCE_ATR = {threshold}",
+        original,
+        count=1,
+    )
+
+    temp.write_text(modified)
+
+    compile_result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "py_compile",
+            str(temp),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    if compile_result.returncode != 0:
+        print(
+            f"{threshold:.2f} ATR -> COMPILE FAILED"
+        )
+        print(compile_result.stderr)
+        continue
+
+    print(
+        f"\nRunning threshold "
+        f"{threshold:.2f} ATR..."
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(temp),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    output = (
+        proc.stdout
+        + "\n"
+        + proc.stderr
+    )
+
+    output_file = Path(
+        "runtime/"
+        f"threshold_{threshold:.2f}_"
+        "replay_2026-08-27.txt"
+    )
+
+    output_file.write_text(output)
+
+    if proc.returncode != 0:
+
+        print(
+            f"{threshold:.2f} ATR -> "
+            f"REPLAY FAILED"
+        )
+
+        print(
+            "\n".join(
+                output.splitlines()[-20:]
+            )
+        )
+
+        continue
+
+    trades = extract_number(
+        "Trades",
+        output,
+    )
+
+    wins = extract_number(
+        "Wins",
+        output,
+    )
+
+    losses = extract_number(
+        "Losses",
+        output,
+    )
+
+    win_rate = extract_percent(
+        "Win rate",
+        output,
+    )
+
+    gross = extract_number(
+        "Gross P&L",
+        output,
+    )
+
+    costs = extract_number(
+        "Costs",
+        output,
+    )
+
+    net = extract_number(
+        "NET P&L",
+        output,
+    )
+
+    ret = extract_percent(
+        "Return",
+        output,
+    )
+
+    row = {
+        "threshold": threshold,
+        "trades": int(trades or 0),
+        "wins": int(wins or 0),
+        "losses": int(losses or 0),
+        "win_rate": win_rate or 0.0,
+        "gross": gross or 0.0,
+        "costs": costs or 0.0,
+        "net": net or 0.0,
+        "return": ret or 0.0,
+    }
+
+    results.append(row)
+
+    print(
+        f"{threshold:>4.2f} ATR | "
+        f"trades={row['trades']:>3} | "
+        f"W/L={row['wins']}/{row['losses']} | "
+        f"WR={row['win_rate']:>6.2f}% | "
+        f"net=₹{row['net']:>+8.2f} | "
+        f"return={row['return']:>+6.2f}%"
+    )
+
+
+print()
+print("=" * 110)
+print("FINAL THRESHOLD COMPARISON")
+print("=" * 110)
+
+print(
+    f"{'ATR':>6} "
+    f"{'TRADES':>7} "
+    f"{'W':>4} "
+    f"{'L':>4} "
+    f"{'WIN%':>8} "
+    f"{'GROSS':>11} "
+    f"{'COST':>10} "
+    f"{'NET':>11} "
+    f"{'RETURN':>9}"
+)
+
+print("-" * 110)
+
+for r in results:
+
+    print(
+        f"{r['threshold']:>6.2f} "
+        f"{r['trades']:>7} "
+        f"{r['wins']:>4} "
+        f"{r['losses']:>4} "
+        f"{r['win_rate']:>7.2f}% "
+        f"₹{r['gross']:>+9.2f} "
+        f"₹{r['costs']:>8.2f} "
+        f"₹{r['net']:>+9.2f} "
+        f"{r['return']:>+8.2f}%"
+    )
+
+
+if results:
+
+    best = max(
+        results,
+        key=lambda x: x["net"],
+    )
+
+    print()
+    print("=" * 110)
+    print("BEST NET-PNL THRESHOLD TODAY")
+    print("=" * 110)
+
+    print(
+        f"Threshold : {best['threshold']:.2f} ATR"
+    )
+    print(
+        f"Trades    : {best['trades']}"
+    )
+    print(
+        f"Wins      : {best['wins']}"
+    )
+    print(
+        f"Losses    : {best['losses']}"
+    )
+    print(
+        f"Win rate  : {best['win_rate']:.2f}%"
+    )
+    print(
+        f"Net P&L   : ₹{best['net']:+.2f}"
+    )
+    print(
+        f"Return    : {best['return']:+.2f}%"
+    )
+
+print("=" * 110)
+

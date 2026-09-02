@@ -34,13 +34,23 @@ d_sell = compute_distances("SELL", current=95, stop=105, target=85)
 check("SELL distance to stop (INR): 105-95=10", d_sell["distance_to_stop_inr"] == 10)
 check("SELL distance to target (INR): 95-85=10", d_sell["distance_to_target_inr"] == 10)
 
-# --- Reward:Risk (remaining, from current price) ---
+# --- Reward:Risk (entry plan and remaining from current price) ---
 rr = compute_reward_risk("BUY", entry=100, current=105, stop=95, target=115)
+check("BUY entry reward: 115-100=15", rr["entry_reward"] == 15)
+check("BUY entry risk: 100-95=5", rr["entry_risk"] == 5)
+check("BUY entry reward:risk ratio: 15/5=3.0", rr["entry_reward_risk"] == 3.0)
 check("BUY reward remaining: 115-105=10", rr["reward_remaining"] == 10)
 check("BUY risk remaining: 105-95=10", rr["risk_remaining"] == 10)
-check("BUY reward:risk ratio: 10/10=1.0", rr["reward_risk"] == 1.0)
+check("BUY live reward:risk ratio: 10/10=1.0", rr["remaining_reward_risk"] == 1.0)
+check("Legacy reward_risk remains the live ratio", rr["reward_risk"] == 1.0)
 rr_zero_risk = compute_reward_risk("BUY", entry=100, current=95, stop=95, target=115)
 check("Reward:risk is None when risk_remaining is 0 (fail-safe, no div-by-zero)", rr_zero_risk["reward_risk"] is None)
+
+rr_marine = compute_reward_risk("BUY", entry=383.80, current=382.45, stop=380.92, target=385.53)
+check("MARINE entry R:R is reported as 0.60, not the misleading live 2.01",
+      abs(rr_marine["entry_reward_risk"] - 0.6007) < 0.001)
+check("MARINE live remaining R:R is independently reported as about 2.01",
+      abs(rr_marine["remaining_reward_risk"] - 2.0131) < 0.001)
 
 # --- Spread ---
 s = compute_spread(bid=99.5, ask=100.0)
@@ -51,10 +61,19 @@ check("Missing bid/ask returns None spread (fail-safe)", s_none["spread"] is Non
 
 # --- MFE/MAE ---
 pos = {}
+update_mfe_mae(pos, -1.0)
+check("First losing update: MFE remains zero and MAE becomes -1.0",
+      pos["mfe_pct"] == 0.0 and pos["mae_pct"] == -1.0)
+legacy_pos = {"mfe_pct": -0.14, "mae_pct": -0.36}
+update_mfe_mae(legacy_pos, -0.20)
+check("Legacy negative MFE is repaired to zero without losing MAE history",
+      legacy_pos["mfe_pct"] == 0.0 and legacy_pos["mae_pct"] == -0.36)
+pos = {}
 update_mfe_mae(pos, 2.0)
-check("First update: MFE=MAE=2.0", pos["mfe_pct"] == 2.0 and pos["mae_pct"] == 2.0)
+check("First winning update: MFE=2.0 and MAE remains zero",
+      pos["mfe_pct"] == 2.0 and pos["mae_pct"] == 0.0)
 update_mfe_mae(pos, 5.0)
-check("New high: MFE updates to 5.0, MAE stays 2.0", pos["mfe_pct"] == 5.0 and pos["mae_pct"] == 2.0)
+check("New high: MFE updates to 5.0, MAE stays zero", pos["mfe_pct"] == 5.0 and pos["mae_pct"] == 0.0)
 update_mfe_mae(pos, -1.5)
 check("New low: MAE updates to -1.5, MFE stays 5.0", pos["mfe_pct"] == 5.0 and pos["mae_pct"] == -1.5)
 update_mfe_mae(pos, 3.0)

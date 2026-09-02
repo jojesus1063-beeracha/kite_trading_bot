@@ -60,7 +60,13 @@ def _snapshot(fname):
     with open(fname, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
 
-_PROD_FILES = ["bot_status.json", "open_positions.json", "trade_history.jsonl", "pending_orders.json"]
+_PROD_FILES = [
+    "bot_status.json",
+    "open_positions.json",
+    "trade_history.jsonl",
+    "pending_orders.json",
+    "protective_stops.json",
+]
 _BASELINE = {f: _snapshot(f) for f in _PROD_FILES}
 
 cfg.PAPER_TRADING = False
@@ -271,17 +277,23 @@ check("18b. Paper mode: average_price is None (so callers fall back to signal.en
       result_paper["average_price"] is None)
 cfg.PAPER_TRADING = False
 
-# --- 19: Stop/target values remain based on signal, never recomputed from fill price ---
+# --- 19: Fixed levels use the confirmed broker fill ---
 print("\n--- Stop/Target Preservation ---")
-with open("main.py") as f:
-    main_src = f.read()
-check("19. main.py's target_price/stop calculation still reads from signal.entry_price/signal.stop_loss "
-      "(not from the confirmed fill price) -- stop/target strategy logic untouched",
-      'target_price = (signal.entry_price * (1 + pct)' in main_src and '"stop": signal.stop_loss,' in main_src)
+with open("entry_protection.py") as f:
+    protection_src = f.read()
+check(
+    "19. confirmed-position builder recalculates fixed stop and target from the broker fill",
+    "fixed_levels_from_fill(" in protection_src
+    and "confirmed_entry_price" in protection_src
+    and '"stop": stop_price,' in protection_src,
+)
 
 # --- 20: main.py never adds requested_quantity when filled_quantity is lower ---
-check("20. main.py's position dict uses confirmed_qty (== filled_quantity), never the raw requested qty",
-      '"qty": confirmed_qty,' in main_src and 'confirmed_qty = result["filled_quantity"]' in main_src)
+check(
+    "20. position builder uses confirmed_qty, never requested quantity",
+    '"qty": confirmed_qty,' in protection_src
+    and 'confirmed_qty = int(entry_result.get("filled_quantity") or 0)' in protection_src,
+)
 
 # --- 21: Production state files remain untouched (real hash comparison) ---
 print("\n--- Production File Integrity ---")

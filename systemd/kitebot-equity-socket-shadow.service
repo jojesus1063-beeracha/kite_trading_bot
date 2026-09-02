@@ -1,0 +1,17 @@
+[Unit]
+Description=Kite equity socket-only PAPER shadow recorder and simulator
+Wants=network-online.target
+After=network-online.target
+Conflicts=kitebot.service kitebot-live-combined.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+EnvironmentFile=/etc/kitebot.env
+WorkingDirectory=/home/ubuntu/kite_trading_bot
+ExecStart=/home/ubuntu/kite_trading_bot/venv/bin/python3 /home/ubuntu/kite_trading_bot/equity_socket_shadow.py
+Restart=no
+UMask=0027
+StandardOutput=journal
+StandardError=journal

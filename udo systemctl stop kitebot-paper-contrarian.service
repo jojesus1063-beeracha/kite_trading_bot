@@ -1,0 +1,4 @@
+MainPID=107558
+ExecStart={ path=/home/ubuntu/kite_trading_bot/venv/bin/python3 ; argv[]=/home/ubuntu/kite_trading_bot/venv/bin/python3 /home/ubuntu/kite_trading_bot/paper_cp9_eod_launcher.py ; ignore_errors=no ; start_time=[Thu 2026-08-13 09:18:27 IST] ; stop_time=[n/a] ; pid=107558 ; code=(null) ; status=0/0 }
+ActiveState=active
+SubState=running

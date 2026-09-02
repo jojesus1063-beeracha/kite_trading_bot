@@ -1,0 +1,12 @@
+
+# ---------------------------------------------------------------------
+# Dynamic watchlist EMA200 classification (opt-in, distinct from
+# ENABLE_200_EMA_FILTER above -- this runs BEFORE evaluate() decides
+# anything, as a coarse eligibility gate; ENABLE_200_EMA_FILTER is a
+# stricter, slope+distance-aware check applied after a direction is
+# already determined. Both can run together as a two-stage funnel.
+# ---------------------------------------------------------------------
+ENABLE_EMA200_WATCHLIST = False
+ENABLE_RVOL_FILTER = False
+RVOL_LOOKBACK = 20
+RVOL_THRESHOLD = 1.5

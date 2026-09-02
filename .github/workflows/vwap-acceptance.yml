@@ -1,0 +1,46 @@
+name: VWAP Acceptance Checks
+
+on:
+  push:
+    branches:
+      - fix-live-strategy-consistency
+      - feature/filter-rejection-diagnostics
+  pull_request:
+    branches:
+      - fix-live-strategy-consistency
+  workflow_dispatch:
+
+jobs:
+  focused-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile changed modules
+        run: |
+          python -m py_compile strategy.py vwap_acceptance.py filter_diagnostics.py show_filter_diagnostics.py test_vwap_acceptance.py test_filter_diagnostics.py
+
+      - name: Run VWAP acceptance tests
+        run: python test_vwap_acceptance.py
+
+      - name: Run filter diagnostics tests
+        run: python test_filter_diagnostics.py
+
+      - name: Run existing EMA200 and RVOL focused tests
+        run: |
+          python test_watchlist_filters.py
+          python test_rvol.py
+          python test_watchlist_gate_integration.py
+
+      - name: Import production entrypoint
+        run: |
+          python -c "import main; print('MAIN IMPORT: PASS')"

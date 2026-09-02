@@ -5,29 +5,62 @@ Run each trading day AFTER auth.py has generated a fresh access token:
     python auth.py
     python main.py
 
-This polls for new completed candles roughly every 5 minutes, evaluates
+This polls for each configured completed entry candle, evaluates
 the strategy on your watchlist, and places (paper or live) orders.
 
 Open positions are persisted to disk (position_store.py) after every
 change, so a crash or restart mid-day picks up exactly where it left
 off instead of "forgetting" a live position.
 """
+import pandas as pd
 
 import logging
 import time
+import uuid
 from datetime import datetime
 
 import config as cfg
 from auth import get_kite_client
-from data_feed import get_instrument_token, fetch_candles, get_company_name
+from data_feed import (
+    fetch_candles,
+    get_cached_instrument_tick_size,
+    get_company_name,
+    get_instrument_token,
+)
+from candle_cache import LIVE_CANDLE_CACHE
+import candle_provider
+import matmon_post_di_freeze
+import paper_matmon_launcher
+from watchlist_filters import classify_direction_eligibility, format_watchlist_log, NOT_ENABLED
+from rvol import passes_rvol_threshold, format_rvol_log
 from indicators import add_indicators, atr as atr_indicator
+from history_requirements import (
+    entry_indicator_lookback_days,
+    entry_trend_lookback_days,
+)
 from strategy import (evaluate, latest_completed_15m_trend,
                       latest_completed_15m_row, rebuild_signal_for_direction)
 from market_direction_policy import resolve_market_direction
 from patterns import is_bear_trap, is_bull_trap
 from news_filter import evaluate_news, get_news_confidence
 from price_action import evaluate_price_action
-from market_trend import get_market_trend, get_sector_trend, sector_for_symbol, compute_market_alignment
+from entry_quality import assess_entry_quality, fetch_live_prices, rank_entry_candidates, validate_live_price
+from entry_confirmation import assess_entry_context
+from market_trend import (
+    clear_relative_strength_cache,
+    compute_market_alignment,
+    get_cached_market_candles,
+    get_cached_sector_candles,
+    get_market_trend_diagnostic,
+    get_sector_trend_diagnostic,
+    sector_for_symbol,
+)
+from relative_strength import assess_relative_strength
+from validation_recorder import (
+    candidate_snapshot,
+    record_validation_event,
+    signal_snapshot,
+)
 from signal_log import log_signal
 from risk_manager import RiskManager
 from executor import place_entry_order, place_exit_order, place_force_exit_order, cap_quantity_by_margin
@@ -35,13 +68,83 @@ from trade_log import record_trade, save_bot_status, load_bot_status
 from position_analytics import build_full_analytics_snapshot
 from daily_report import load_trades as load_todays_trades
 from costs import net_pnl_for_trade
+from trade_levels import fixed_levels_from_fill
+from hybrid_exit import (
+    RUNNER_PENDING,
+    SCALP_PENDING,
+    apply_confirmed_hybrid_fill,
+    requested_exit_quantity,
+)
+from entry_protection import (
+    apply_protective_stop_result,
+    build_confirmed_position,
+    build_entry_plan,
+    build_recovered_position,
+    needs_initial_stop_recovery,
+    protect_confirmed_position,
+)
+from protective_stop import recover_protective_stop
+from protective_stop_exit import (
+    coordinate_protective_stop_for_exit,
+    inspect_protective_stop,
+)
+from protective_stop_store import (
+    get_protective_stop,
+    list_unresolved_protective_stops,
+    mark_protective_stop_fill_applied,
+    mark_protective_stop_resolved,
+)
 from position_store import save_positions, load_positions, clear_positions
 from scheduler import candle_interval_minutes, last_completed_candle_close, next_scan_time, ScanGuard
+from scan_latency import build_entry_timing, select_scan_universe
+from cooperative_position_monitor import CooperativeScanMonitor
+from delayed_entry_confirmation import assess_delayed_entry
+from depth_confirmation import evaluate_live_depth
+from pipeline_dashboard import record_pipeline_event
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("main")
 
-POLL_SECONDS = 60  # check every minute; candles only close every 5, but this keeps stop/target checks responsive
+POLL_SECONDS = 60  # legacy polling fallback; aligned mode uses ENTRY_TIMEFRAME
+
+
+def market_alignment_blocks_entry(alignment: str) -> bool:
+    """Block only genuine opposition to the final BUY/SELL signal."""
+    return alignment in ("MISALIGNED", "STRONG_MISALIGNMENT")
+
+
+def price_action_blocks_entry(score: float, cfg_module=cfg) -> bool:
+    """
+    PAPER-only Price Action hard gate.
+
+    The Aug-12 replay classified a signal as PA-confirmed only when its
+    aggregate Price Action score was positive.  Preserve that exact
+    experiment rule here:
+
+        score > 0  -> PASS
+        score <= 0 -> BLOCK
+
+    Live trading is deliberately unaffected.
+    """
+    if not getattr(cfg_module, "PAPER_TRADING", False):
+        return False
+
+    # PAPER observational mode:
+    # Price Action is still calculated, logged and audited,
+    # but it must never reject/block an entry.
+    if getattr(cfg_module, "PAPER_PRICE_ACTION_OBSERVATIONAL", False):
+        return False
+
+    if not getattr(cfg_module, "ENABLE_PRICE_ACTION", False):
+        return False
+
+    try:
+        return float(score) <= 0.0
+    except (TypeError, ValueError):
+        # PA is explicitly enabled as a hard safety gate in PAPER mode.
+        # An unusable score therefore fails closed rather than allowing
+        # an unconfirmed entry.
+        return True
 
 
 def within_trading_window() -> bool:
@@ -57,7 +160,192 @@ def past_square_off() -> bool:
     return now >= cutoff
 
 
-def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
+_TRADE_ANALYTICS_FIELDS = (
+    "signal_id",
+    "entry_operation_id",
+    "entry_order_id",
+    "entry_time",
+    "candidate_rank",
+    "candidate_count",
+    "ranking_score",
+    "entry_quality_score",
+    "entry_quality_detail",
+    "entry_context_score",
+    "entry_context_detail",
+    "confirmation_count",
+    "adx_state",
+    "adx_current",
+    "adx_previous",
+    "adx_delta",
+    "relative_strength_score",
+    "relative_strength_detail",
+    "breakout_validation",
+    "market_trend_reason",
+    "sector_trend",
+    "sector_trend_reason",
+    "signal_candle_start",
+    "signal_candle_close",
+    "scan_started_at",
+    "order_submitted_at",
+    "entry_delay_seconds",
+    "mfe_pct",
+    "mae_pct",
+)
+
+
+def _trade_analytics_from_position(position):
+    """Copy reporting-only entry context into a closed-trade record."""
+
+    return {
+        field: position.get(field)
+        for field in _TRADE_ANALYTICS_FIELDS
+        if position.get(field) is not None
+    }
+
+
+
+def _cooperative_position_check_if_due(
+    kite,
+    tokens,
+    exchange_map,
+    open_positions,
+    risk,
+    monitor,
+):
+    """
+    Run the existing position-exit checks between scan operations.
+
+    This stays single-threaded, preventing concurrent mutation of
+    positions, risk state, broker orders and persistence files.
+    """
+
+    if not open_positions:
+        return []
+
+    if not monitor.due():
+        return []
+
+    started_at = time.monotonic()
+    checked_symbols = []
+
+    for position_symbol in list(
+        open_positions.keys()
+    ):
+        if position_symbol not in open_positions:
+            continue
+
+        if position_symbol not in tokens:
+            logger.error(
+                "Cooperative position check skipped "
+                f"{position_symbol}: token unavailable"
+            )
+            continue
+
+        try:
+            check_position_exit(
+                kite,
+                position_symbol,
+                tokens,
+                exchange_map,
+                open_positions,
+                risk,
+                check_trend=False,
+            )
+
+            checked_symbols.append(
+                position_symbol
+            )
+        except Exception as exc:
+            logger.exception(
+                "Cooperative position check failed "
+                f"for {position_symbol}: {exc}"
+            )
+
+    monitor.mark_checked()
+
+    elapsed = (
+        time.monotonic()
+        - started_at
+    )
+
+    warning_seconds = float(
+        getattr(
+            cfg,
+            "POSITION_CHECK_WARNING_SECONDS",
+            5,
+        )
+    )
+
+    critical_seconds = float(
+        getattr(
+            cfg,
+            "POSITION_CHECK_CRITICAL_SECONDS",
+            15,
+        )
+    )
+
+    if elapsed > critical_seconds:
+        logger.error(
+            "CRITICAL: cooperative position check "
+            f"took {elapsed:.1f}s"
+        )
+    elif elapsed > warning_seconds:
+        logger.warning(
+            "Cooperative position check "
+            f"took {elapsed:.1f}s"
+        )
+
+    logger.info(
+        "Cooperative position check during scan "
+        f"| checked={len(checked_symbols)} "
+        f"| remaining_open={len(open_positions)} "
+        f"| elapsed={elapsed:.1f}s "
+        f"| completed_checks="
+        f"{monitor.completed_checks}"
+    )
+
+    return checked_symbols
+
+
+def _wait_for_delayed_entry_confirmation(
+    seconds,
+    kite,
+    tokens,
+    exchange_map,
+    open_positions,
+    risk,
+    monitor,
+):
+    """Wait without suspending the existing open-position exit monitoring."""
+    delay = max(0.0, float(seconds or 0.0))
+    deadline = time.monotonic() + delay
+
+    while True:
+        _cooperative_position_check_if_due(
+            kite,
+            tokens,
+            exchange_map,
+            open_positions,
+            risk,
+            monitor,
+        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return delay
+        time.sleep(min(1.0, remaining))
+
+
+def run_full_scan(
+    kite,
+    symbols,
+    tokens,
+    exchange_map,
+    open_positions,
+    risk,
+    *,
+    scan_started_at=None,
+    ws_shadow_engine=None,
+):
     """
     One full pass over the watchlist: manage open positions (via
     check_position_exit) and look for new entries on everything else.
@@ -69,8 +357,59 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
     Returns status_this_cycle (list of per-symbol status dicts), same
     as the original loop produced for save_bot_status().
     """
-    symbols_to_check = list(dict.fromkeys(symbols + list(open_positions.keys())))
+    scan_started_at = scan_started_at or datetime.now()
+    (
+        shortlisted_symbols,
+        symbols_to_check,
+        excluded_symbols,
+    ) = select_scan_universe(
+        symbols,
+        open_positions.keys(),
+        getattr(
+            cfg,
+            "ENTRY_SCAN_SHORTLIST_SIZE",
+            30,
+        ),
+    )
     status_this_cycle = []
+    status_this_cycle.extend(
+        {
+            "symbol": symbol,
+            "status": "not in current priority shortlist",
+        }
+        for symbol in excluded_symbols
+    )
+
+    logger.info(
+        "Entry scan universe "
+        f"| watchlist={len(symbols)} "
+        f"| shortlisted={len(shortlisted_symbols)} "
+        f"| open_positions={len(open_positions)}"
+    )
+
+    # Symbols with positions at scan start cannot be reopened during
+    # the same scan if a cooperative stop/target check closes them.
+    protected_position_symbols = set(
+        open_positions.keys()
+    )
+
+    cooperative_monitor = CooperativeScanMonitor(
+        interval_seconds=getattr(
+            cfg,
+            "POSITION_CHECK_SECONDS",
+            25,
+        )
+    )
+    entry_candidates = []
+
+    live_entry_safety_block = (
+        not cfg.PAPER_TRADING
+        and any(
+            position.get("automated_exit_blocked", False)
+            or position.get("manual_reconciliation_required", False)
+            for position in open_positions.values()
+        )
+    )
 
 
     # Step 4c: market/sector trend, fetched/cached ONCE per scan cycle.
@@ -78,14 +417,59 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
     sector_fetches = 0
     sector_cache_hits = 0
     sector_cache = {}
+    sector_reason_cache = {}
+    sector_candle_cache = {}
+
+    clear_relative_strength_cache()
+    market_df_15m = pd.DataFrame()
+
     try:
-        market_trend = get_market_trend(kite, cfg)
+        (
+            market_trend,
+            market_trend_reason,
+        ) = get_market_trend_diagnostic(
+            kite,
+            cfg,
+        )
+        market_df_15m = get_cached_market_candles()
         nifty_fetches = 1
+        if market_trend_reason != "OK":
+            logger.warning(
+                "Market trend diagnostic fallback "
+                f"| trend={market_trend} "
+                f"| reason={market_trend_reason}"
+            )
     except Exception as e:
         logger.warning(f"Market trend fetch failed, using UNKNOWN: {e}")
         market_trend = "UNKNOWN"
+        market_trend_reason = "FETCH_ERROR"
+        market_df_15m = pd.DataFrame()
 
     for symbol in symbols_to_check:
+        _cooperative_position_check_if_due(
+            kite,
+            tokens,
+            exchange_map,
+            open_positions,
+            risk,
+            cooperative_monitor,
+        )
+
+        if (
+            symbol in protected_position_symbols
+            and symbol not in open_positions
+        ):
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": (
+                        "position closed during "
+                        "cooperative scan monitoring"
+                    ),
+                }
+            )
+            continue
+
         if symbol not in tokens:
             continue
         token = tokens[symbol]
@@ -98,6 +482,16 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
         if symbol not in symbols:
             continue
 
+        if live_entry_safety_block:
+            status_this_cycle.append({
+                "symbol": symbol,
+                "status": (
+                    "new entries blocked: an existing live position "
+                    "requires broker-stop exit coordination or reconciliation"
+                ),
+            })
+            continue
+
         if not within_trading_window():
             status_this_cycle.append({"symbol": symbol, "status": "outside trading window"})
             continue
@@ -106,31 +500,110 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             continue
 
         exchange = exchange_map[symbol]
-        df_15m = fetch_candles(kite, token, cfg.TREND_TIMEFRAME, lookback_days=5)
-        time.sleep(0.5)
-        df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=5)
-        time.sleep(0.5)
+        candle_fetch_time = datetime.now()
+        trend_lookback_days = entry_trend_lookback_days(cfg)
+        entry_lookback_days = entry_indicator_lookback_days(cfg)
+
+        if getattr(
+            cfg,
+            "ENABLE_CANDLE_ALIGNED_POLLING",
+            False,
+        ):
+            df_15m = LIVE_CANDLE_CACHE.get(
+                kite,
+                token,
+                cfg.TREND_TIMEFRAME,
+                lookback_days=trend_lookback_days,
+                now=candle_fetch_time,
+                fetcher=fetch_candles,
+            )
+            df_5m = LIVE_CANDLE_CACHE.get(
+                kite,
+                token,
+                cfg.ENTRY_TIMEFRAME,
+                lookback_days=entry_lookback_days,
+                now=candle_fetch_time,
+                require_advance=True,
+                fetcher=fetch_candles,
+            )
+        else:
+            df_15m = fetch_candles(
+                kite,
+                token,
+                cfg.TREND_TIMEFRAME,
+                lookback_days=trend_lookback_days,
+            )
+            df_5m = fetch_candles(
+                kite,
+                token,
+                cfg.ENTRY_TIMEFRAME,
+                lookback_days=entry_lookback_days,
+            )
+
+        # --- Unified candle provider: optional WS augmentation ---
+        # Scoped deliberately to ONLY this entry-scan fetch. Position
+        # exit monitoring and force square-off pricing (elsewhere in
+        # this file) use their own fetch_candles() calls, untouched --
+        # WS augmentation was only ever validated against this entry
+        # path, and extending it to exit/square-off pricing would be a
+        # genuine behavior change to safety-critical code that has not
+        # been reviewed or tested. See candle_provider.py for the
+        # full fail-safe contract.
+        df_15m = candle_provider.augment_with_ws(df_15m, symbol=symbol, interval=cfg.TREND_TIMEFRAME,
+                                                  ws_engine=ws_shadow_engine)
+        df_5m = candle_provider.augment_with_ws(df_5m, symbol=symbol, interval=cfg.ENTRY_TIMEFRAME,
+                                                 ws_engine=ws_shadow_engine)
+
         if df_15m.empty or df_5m.empty:
             status_this_cycle.append({"symbol": symbol, "status": "no candle data"})
             continue
 
         df_15m, df_5m = add_indicators(df_15m, df_5m, cfg)
-        signal = evaluate(symbol, df_15m, df_5m, cfg)
+        signal = evaluate(symbol, df_15m, df_5m, market_df_15m, cfg)
 
         if signal:
+            # Matmon-only, no-op for every other strategy/signal: start
+            # freezing this symbol's post-DI tick evidence immediately at
+            # T0, before any of the intermediate per-symbol checks below
+            # (market regime, watchlist filters, RVOL, EMA-distance, margin
+            # lookup) can delay confirmation and cost it fresh evidence.
+            matmon_post_di_freeze.maybe_start_capture(
+                symbol,
+                signal,
+                ws_engine=ws_shadow_engine,
+                cfg=cfg,
+                di_passed_at=paper_matmon_launcher.get_di_passed_at(symbol),
+            )
             raw_direction = signal.direction
-            resolution = resolve_market_direction(market_trend, raw_direction)
+            if bool(getattr(cfg, "DEPTH_RAW_DIRECTION_ONLY", False)):
+                resolution = {
+                    "decision": "DEPTH_GATE",
+                    "direction": raw_direction,
+                    "reason": "RAW_EMA_DIRECTION_AWAITS_FIVE_LEVEL_DEPTH",
+                    "market": market_trend,
+                }
+            else:
+                resolution = resolve_market_direction(
+                    market_trend,
+                    raw_direction,
+                )
             if resolution["decision"] == "SKIP":
+                record_pipeline_event(
+                    symbol=symbol,
+                    market=market_trend,
+                    raw_direction=raw_direction,
+                    decision="SKIP",
+                    final_direction=None,
+                    status="UNKNOWN_MARKET_REGIME",
+                )
                 logger.error(
                     f"PROPOSED_DIRECTION symbol={symbol} market={market_trend} "
                     f"raw={raw_direction} decision=SKIP final=None "
                     f"reason={resolution['reason']} block_layer=UNKNOWN_MARKET_REGIME"
                 )
-                status_this_cycle.append({
-                    "symbol": symbol,
-                    "status": "blocked: unknown market regime",
-                    "block_layer": "UNKNOWN_MARKET_REGIME",
-                })
+                status_this_cycle.append({"symbol": symbol,
+                                          "status": "blocked: unknown market regime",
+                                          "block_layer": "UNKNOWN_MARKET_REGIME"})
                 continue
             signal.raw_direction = raw_direction
             signal.policy_decision = resolution["decision"]
@@ -138,55 +611,144 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             signal.market_trend = resolution["market"]
             try:
                 signal = rebuild_signal_for_direction(
-                    signal, resolution["direction"], df_5m.iloc[-1], cfg
+                    signal, resolution["direction"], df_5m.iloc[-2], cfg
                 )
             except (ValueError, KeyError, TypeError) as exc:
+                record_pipeline_event(
+                    symbol=symbol,
+                    market=resolution["market"],
+                    raw_direction=raw_direction,
+                    decision=resolution["decision"],
+                    final_direction=None,
+                    status="INVALID_FINAL_GEOMETRY",
+                )
                 logger.error(
                     f"PROPOSED_DIRECTION symbol={symbol} market={resolution['market']} "
                     f"raw={raw_direction} decision={resolution['decision']} final=None "
                     f"reason=INVALID_FINAL_GEOMETRY block_layer=SAFETY_STOP_GEOMETRY: {exc}"
                 )
-                status_this_cycle.append({
-                    "symbol": symbol,
-                    "status": "blocked: invalid final stop geometry",
-                    "block_layer": "SAFETY_STOP_GEOMETRY",
-                })
                 continue
+            record_pipeline_event(
+                symbol=symbol,
+                market=resolution["market"],
+                raw_direction=raw_direction,
+                decision=resolution["decision"],
+                final_direction=signal.direction,
+                status="CANDIDATE",
+            )
             logger.info(
                 f"PROPOSED_DIRECTION symbol={symbol} market={resolution['market']} "
                 f"raw={raw_direction} decision={resolution['decision']} "
                 f"final={signal.direction} reason={resolution['reason']}"
             )
-            _snapshot_row = latest_completed_15m_row(df_15m, signal.timestamp)
+
+        if signal:
+            eligibility, elig_detail = classify_direction_eligibility(df_15m, cfg)
+            if eligibility not in (NOT_ENABLED, signal.direction):
+                logger.info(format_watchlist_log(symbol, eligibility, elig_detail) +
+                            f" | final direction={signal.direction} OBSERVATION_ONLY -- watchlist eligibility")
+
+        if signal:
+            rvol_passes, rvol_value, rvol_detail = passes_rvol_threshold(
+                df_5m,
+                cfg,
+            )
+            if not rvol_passes:
+                logger.info(
+                    format_rvol_log(symbol, rvol_value, rvol_detail)
+                    + f" | signal direction={signal.direction} REJECTED -- "
+                      "RVOL confirmation failed; OBSERVATION_ONLY"
+                )
+            elif getattr(cfg, "ENABLE_RVOL_FILTER", False):
+                logger.info(
+                    format_rvol_log(symbol, rvol_value, rvol_detail)
+                    + f" | signal direction={signal.direction} ACCEPTED"
+                )
+
+        if signal:
+            _snapshot_row = latest_completed_15m_row(
+                df_15m,
+                pd.Timestamp(signal.timestamp) + pd.Timedelta(
+                    minutes=candle_interval_minutes(cfg.ENTRY_TIMEFRAME)
+                ),
+            )
+            sector = None
+            sector_df_15m = pd.DataFrame()
+            sector_trend_reason = "UNMAPPED"
+
             try:
                 sector = sector_for_symbol(symbol)
                 if sector is None:
-                    sector_trend = "Sideways"
+                    sector_trend = "UNKNOWN"
                 elif sector in sector_cache:
                     sector_trend = sector_cache[sector]
+                    sector_trend_reason = sector_reason_cache[sector]
+                    sector_df_15m = sector_candle_cache.get(
+                        sector,
+                        pd.DataFrame(),
+                    )
                     sector_cache_hits += 1
                 else:
-                    sector_trend = get_sector_trend(kite, symbol, cfg)
+                    (
+                        sector_trend,
+                        sector_trend_reason,
+                    ) = get_sector_trend_diagnostic(
+                        kite,
+                        symbol,
+                        cfg,
+                    )
+                    sector_df_15m = get_cached_sector_candles(
+                        sector
+                    )
                     sector_cache[sector] = sector_trend
+                    sector_reason_cache[sector] = sector_trend_reason
+                    sector_candle_cache[sector] = sector_df_15m
                     sector_fetches += 1
-                signal.market_alignment = compute_market_alignment(signal.direction, market_trend, sector_trend)
+                if sector_trend_reason != "OK":
+                    logger.info(
+                        f"{symbol}: sector trend diagnostic fallback "
+                        f"| sector={sector} "
+                        f"| trend={sector_trend} "
+                        f"| reason={sector_trend_reason}"
+                    )
+                signal.market_alignment = (
+                    "UNKNOWN"
+                    if sector_trend == "UNKNOWN"
+                    else compute_market_alignment(
+                        signal.direction,
+                        market_trend,
+                        sector_trend,
+                    )
+                )
             except Exception as e:
                 logger.warning(f"Market alignment computation failed for {symbol}, using UNKNOWN: {e}")
                 signal.market_alignment = "UNKNOWN"
+                sector_trend = "UNKNOWN"
+                sector_trend_reason = "FETCH_ERROR"
 
-            old_live_decision = (
-                "REJECT"
-                if (getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and
-                    signal.market_alignment in ("MISALIGNED", "STRONG_MISALIGNMENT"))
-                else "ALLOW"
-            )
-
-            if (getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and
-                    signal.market_alignment in ("MISALIGNED", "STRONG_MISALIGNMENT")):
-                logger.info(
-                    f"{symbol}: legacy market_alignment would reject "
-                    f"{signal.market_alignment}; OBSERVATION_ONLY under proposed policy"
+            if (not getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) and
+                    getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) and
+                    market_alignment_blocks_entry(signal.market_alignment)):
+                logger.info(f"{symbol}: skipped -- market_alignment={signal.market_alignment} "
+                            f"(trading against market/sector trend)")
+                status_this_cycle.append({"symbol": symbol,
+                                          "status": f"skipped, misaligned ({signal.market_alignment})"})
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **signal_snapshot(signal),
+                        "reason_code": "MARKET_ALIGNMENT_FILTER",
+                        "reason": "market/sector alignment filter rejected signal",
+                        "market_trend": market_trend,
+                        "market_trend_reason": market_trend_reason,
+                        "sector": sector,
+                        "sector_trend": sector_trend,
+                        "sector_trend_reason": sector_trend_reason,
+                        "market_alignment": signal.market_alignment,
+                    },
                 )
+
+                logger.info(f"{symbol}: legacy market alignment rejection is OBSERVATION_ONLY")
 
             # News filter: additional risk layer only -- never generates
             # BUY/SELL signals, only evaluates whether this existing signal
@@ -197,6 +759,156 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
             _base_score += pa_score
             signal.price_action_score = pa_score
             signal.price_action_detail = pa_detail
+
+            if (
+                not getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+                and price_action_blocks_entry(pa_score)
+            ):
+                logger.info(
+                    f"{symbol}: skipped -- Price Action hard gate "
+                    f"| score={pa_score} "
+                    f"| detail={pa_detail}"
+                )
+
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "skipped, Price Action hard gate "
+                            f"(score={pa_score})"
+                        ),
+                    }
+                )
+
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **signal_snapshot(signal),
+                        "reason_code": "PRICE_ACTION_HARD_FILTER",
+                        "reason": (
+                            "Price Action score must be greater than zero"
+                        ),
+                        "price_action_score": pa_score,
+                        "price_action_detail": pa_detail,
+                        "market_trend": market_trend,
+                        "market_trend_reason": market_trend_reason,
+                        "sector": sector,
+                        "sector_trend": sector_trend,
+                        "sector_trend_reason": sector_trend_reason,
+                        "market_alignment": signal.market_alignment,
+                    },
+                )
+
+                continue
+
+            quality = assess_entry_quality(
+                signal,
+                df_5m,
+            )
+
+            signal.entry_quality_score = quality.score
+            signal.entry_quality_detail = quality.detail
+
+            if (
+                not quality.accepted
+                and not getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+            ):
+                logger.info(
+                    f"{symbol}: skipped -- poor entry location "
+                    f"| quality_score={quality.score:.2f} "
+                    f"| {quality.reason} "
+                    f"| detail={quality.detail}"
+                )
+
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "skipped, poor entry location: "
+                            + quality.reason
+                        ),
+                    }
+                )
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **signal_snapshot(signal),
+                        "reason_code": "ENTRY_OVEREXTENDED",
+                        "reason": quality.reason,
+                        "entry_quality_score": quality.score,
+                        "entry_quality_detail": quality.detail,
+                        "market_trend": market_trend,
+                        "market_trend_reason": market_trend_reason,
+                        "sector": sector,
+                        "sector_trend": sector_trend,
+                        "sector_trend_reason": sector_trend_reason,
+                    },
+                )
+
+                logger.info(f"{symbol}: entry quality rejection is OBSERVATION_ONLY")
+
+            entry_context = assess_entry_context(
+                signal,
+                df_15m,
+            )
+
+            signal.entry_confirmation_score = (
+                entry_context.score_adjustment
+            )
+            signal.entry_confirmation_detail = (
+                entry_context.detail
+            )
+
+            if (
+                not entry_context.accepted
+                and not getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+            ):
+                logger.info(
+                    f"{symbol}: skipped -- opposing CHoCH "
+                    f"| {entry_context.reason} "
+                    f"| detail={entry_context.detail}"
+                )
+
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "skipped, opposing CHoCH"
+                        ),
+                    }
+                )
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **signal_snapshot(signal),
+                        "reason_code": "OPPOSING_CHOCH",
+                        "reason": entry_context.reason,
+                        "entry_context_score": entry_context.score_adjustment,
+                        "entry_context_detail": entry_context.detail,
+                        "market_trend": market_trend,
+                        "market_trend_reason": market_trend_reason,
+                        "sector": sector,
+                        "sector_trend": sector_trend,
+                        "sector_trend_reason": sector_trend_reason,
+                    },
+                )
+
+                logger.info(f"{symbol}: opposing CHoCH rejection is OBSERVATION_ONLY")
+
+            relative_strength = assess_relative_strength(
+                signal,
+                df_15m,
+                market_df_15m,
+                sector_df_15m,
+            )
+
+            signal.relative_strength_score = (
+                relative_strength.score_adjustment
+            )
+            signal.relative_strength_detail = (
+                relative_strength.detail
+            )
+
             if getattr(cfg, "ENABLE_NEWS_FILTER", False):
                 try:
                     company_name = get_company_name(kite, symbol, exchange)
@@ -209,14 +921,21 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                 signal.news_sentiment = news_result["sentiment"]
                 signal.news_headline = news_result["headline"]
                 signal.news_confidence_score = news_score
-                if news_decision == "REJECT":
+                if (
+                    news_decision == "REJECT"
+                    and not getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+                ):
                     logger.info(f"{symbol}: skipped -- news={signal.news_sentiment} ({news_reason}) "
                                 f"headline: {signal.news_headline}")
                     status_this_cycle.append({"symbol": symbol,
                                               "status": f"skipped, negative news ({signal.news_headline})"})
                     log_signal({
                         "timestamp": str(signal.timestamp), "symbol": symbol,
-                        "market_trend": market_trend, "sector": sector_for_symbol(symbol),
+                        "market_trend": market_trend,
+                        "market_trend_reason": market_trend_reason,
+                        "sector": sector,
+                        "sector_trend": sector_trend,
+                        "sector_trend_reason": sector_trend_reason,
                         "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
                         "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
                         "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
@@ -232,128 +951,971 @@ def run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk):
                         "bos": (signal.price_action_detail or {}).get("bos"),
                         "choch": (signal.price_action_detail or {}).get("choch"),
                     })
+                    record_validation_event(
+                        "candidate_rejected",
+                        {
+                            **signal_snapshot(signal),
+                            "reason_code": "NEWS_FILTER",
+                            "reason": news_reason,
+                            "news_sentiment": signal.news_sentiment,
+                            "news_headline": signal.news_headline,
+                            "news_confidence_score": signal.news_confidence_score,
+                            "market_trend": market_trend,
+                            "market_trend_reason": market_trend_reason,
+                            "sector": sector,
+                            "sector_trend": sector_trend,
+                            "sector_trend_reason": sector_trend_reason,
+                        },
+                    )
+
                     continue
 
 
-            qty = risk.position_size(signal.entry_price, signal.stop_loss)
-            if qty > 0 and not cfg.PAPER_TRADING:
-                qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
-            result = place_entry_order(kite, symbol, signal.direction, qty, exchange, cfg)
-            if result["success"]:
-                confirmed_qty = result["filled_quantity"]
-                # Confirmed average fill price is the REAL entry price used for the
-                # position/qty tracked below -- but stop/target stay computed from
-                # the ORIGINAL signal price, per explicit requirement: never
-                # silently redesign strategy-derived stop/target because the
-                # actual fill differs from the signal price.
-                confirmed_entry_price = result["average_price"] if result["average_price"] is not None else signal.entry_price
-                target_price = signal.target
-                if getattr(cfg, "ENABLE_FIXED_TARGET", False):
-                    try:
-                        pct = getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5) / 100
-                        target_price = (signal.entry_price * (1 + pct) if signal.direction == "BUY"
-                                        else signal.entry_price * (1 - pct))
-                    except Exception as e:
-                        logger.warning(f"{symbol}: fixed target calculation failed, "
-                                        f"using strategy-computed target instead: {e}")
-                        target_price = signal.target
-                open_positions[symbol] = {
-                    "direction": signal.direction,
-                    "raw_direction": signal.raw_direction,
-                    "final_direction": signal.final_direction,
-                    "market_trend": signal.market_trend,
-                    "policy_decision": signal.policy_decision,
-                    "policy_reason": signal.policy_reason,
-                    "old_live_decision": old_live_decision,
-                    "qty": confirmed_qty,
-                    "entry": confirmed_entry_price,
-                    "stop": signal.stop_loss,
-                    "target": target_price,
-                    "exchange": exchange,
-                    "peak_price": confirmed_entry_price,
-                    "tight_mode": False,
-                    "entry_time": str(signal.timestamp),
-                    "entry_order_id": result.get("order_id"),
-                    "entry_operation_id": result.get("operation_id"),
-                    "requested_quantity": result.get("requested_quantity", confirmed_qty),
-                    "filled_quantity": confirmed_qty,
-                    "entry_fill_status": result.get("status"),
-                    "entry_average_price": result.get("average_price"),
-                    "entry_confirmation_pending": result.get("entry_confirmation_pending", False),
-                    "entry_status_message": result.get("reason"),
-                }
-                save_positions(open_positions)
-                logger.info(f"ENTRY {signal.direction} {exchange}:{symbol} qty={confirmed_qty} "
-                            f"entry={confirmed_entry_price:.2f} stop={signal.stop_loss:.2f} "
-                            f"target={signal.target:.2f} | {signal.reason} "
-                            f"[market_alignment: {signal.market_alignment}] "
-                            f"[fill_status: {result.get('status')}]")
-                status_this_cycle.append({
+            ranking_score = (
+                0.0
+                if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+                else round(
+                    float(_base_score)
+                    + float(quality.score)
+                    + float(entry_context.score_adjustment)
+                    + float(relative_strength.score_adjustment),
+                    2,
+                )
+            )
+
+            entry_candidates.append(
+                {
                     "symbol": symbol,
-                    "status": f"ENTRY {signal.direction} @ {confirmed_entry_price:.2f}",
-                    "confidence": signal.confidence,
-                    "confidence": signal.confidence,
-                    "market_alignment": signal.market_alignment,
-                })
-                log_signal({
-                    "timestamp": str(signal.timestamp), "symbol": symbol,
-                    "market_trend": market_trend, "sector": sector_for_symbol(symbol),
-                    "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
-                    "entry_price": signal.entry_price, "direction": signal.direction, "executed": True,
-                    "raw_direction": signal.raw_direction,
-                    "final_direction": signal.final_direction,
-                    "new_policy_decision": signal.policy_decision,
-                    "old_live_decision": old_live_decision,
-                    "policy_reason": signal.policy_reason,
-                    "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
-                    "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
-                    "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
-                    "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
-                    "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
-                    "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
-                    "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
-                    "news_confidence_score": signal.news_confidence_score,
-                    "price_action_score": signal.price_action_score,
-                    "market_structure": (signal.price_action_detail or {}).get("market_structure"),
-                    "support": (signal.price_action_detail or {}).get("support"),
-                    "resistance": (signal.price_action_detail or {}).get("resistance"),
-                    "breakout": (signal.price_action_detail or {}).get("breakout"),
-                    "pullback": (signal.price_action_detail or {}).get("pullback"),
-                    "bos": (signal.price_action_detail or {}).get("bos"),
-                    "choch": (signal.price_action_detail or {}).get("choch"),
-                })
-            else:
-                status_this_cycle.append({"symbol": symbol, "status": "signal found, order failed"})
-                log_signal({
-                    "timestamp": str(signal.timestamp), "symbol": symbol,
-                    "market_trend": market_trend, "sector": sector_for_symbol(symbol),
-                    "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
-                    "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
-                    "raw_direction": signal.raw_direction,
-                    "final_direction": signal.final_direction,
-                    "new_policy_decision": signal.policy_decision,
-                    "old_live_decision": old_live_decision,
-                    "policy_reason": signal.policy_reason,
-                    "rejection_reason": result["reason"],
-                    "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
-                    "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
-                    "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
-                    "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
-                    "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
-                    "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
-                    "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
-                    "news_confidence_score": signal.news_confidence_score,
-                    "price_action_score": signal.price_action_score,
-                    "market_structure": (signal.price_action_detail or {}).get("market_structure"),
-                    "support": (signal.price_action_detail or {}).get("support"),
-                    "resistance": (signal.price_action_detail or {}).get("resistance"),
-                    "breakout": (signal.price_action_detail or {}).get("breakout"),
-                    "pullback": (signal.price_action_detail or {}).get("pullback"),
-                    "bos": (signal.price_action_detail or {}).get("bos"),
-                    "choch": (signal.price_action_detail or {}).get("choch"),
-                })
+                    "exchange": exchange,
+                    "signal": signal,
+                    "df_5m": df_5m,
+                    "snapshot_row": _snapshot_row,
+                    "ranking_score": ranking_score,
+                    "quality_score": (
+                        0.0
+                        if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
+                        else quality.score
+                    ),
+                    "quality_detail": quality.detail,
+                    "entry_context_score": (
+                        entry_context.score_adjustment
+                    ),
+                    "entry_context_detail": (
+                        entry_context.detail
+                    ),
+                    "relative_strength_score": (
+                        relative_strength.score_adjustment
+                    ),
+                    "relative_strength_detail": (
+                        relative_strength.detail
+                    ),
+                    "market_trend": market_trend,
+                    "market_trend_reason": market_trend_reason,
+                    "sector": sector,
+                    "sector_trend": sector_trend,
+                    "sector_trend_reason": sector_trend_reason,
+                }
+            )
+
+            logger.info(
+                f"{symbol}: valid candidate collected "
+                f"| ranking_score={ranking_score:.2f} "
+                f"| technical_confidence={signal.confidence} "
+                f"| price_action={pa_score} "
+                f"| entry_quality={quality.score:.2f} "
+                f"| entry_context="
+                f"{entry_context.score_adjustment:+.2f} "
+                f"| confirmations="
+                f"{entry_context.detail.get('confirmation_count')} "
+                f"| adx_state="
+                f"{entry_context.detail.get('adx_state')} "
+                f"| relative_strength="
+                f"{relative_strength.score_adjustment:+.2f} "
+                f"| market_edge="
+                f"{relative_strength.detail.get('market_edge_pct')} "
+                f"| sector_edge="
+                f"{relative_strength.detail.get('sector_edge_pct')}"
+            )
+
+            record_validation_event(
+                "candidate_collected",
+                {
+                    **candidate_snapshot(
+                        entry_candidates[-1]
+                    ),
+                    "market_trend": market_trend,
+                    "market_trend_reason": market_trend_reason,
+                    "sector": sector,
+                    "sector_trend": sector_trend,
+                    "sector_trend_reason": sector_trend_reason,
+                    "exchange": exchange,
+                },
+            )
         else:
             status_this_cycle.append({"symbol": symbol, "status": "no signal"})
+
+    # A complete watchlist pass can exceed the configured monitoring
+    # interval, so check existing positions before ranking candidates.
+    _cooperative_position_check_if_due(
+        kite,
+        tokens,
+        exchange_map,
+        open_positions,
+        risk,
+        cooperative_monitor,
+    )
+
+    ranked_candidates = rank_entry_candidates(entry_candidates)
+    if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False):
+        # Preserve the Momentum/RVOL Top-120 order. Legacy analytical scores
+        # must not influence which simultaneous EMA signal executes first.
+        ranked_candidates = list(entry_candidates)
+
+    batch_live_prices = fetch_live_prices(
+        kite,
+        ranked_candidates,
+    )
+
+    if ranked_candidates:
+        logger.info(
+            "Candidate ranking complete "
+            f"| valid_candidates={len(ranked_candidates)} "
+            f"| ranking="
+            f"{[(item['symbol'], item['ranking_score']) for item in ranked_candidates]}"
+        )
+
+    for candidate_rank, candidate in enumerate(
+        ranked_candidates,
+        start=1,
+    ):
+        # Entry verification can take several seconds. Recheck existing
+        # positions before processing each ranked entry candidate.
+        _cooperative_position_check_if_due(
+            kite,
+            tokens,
+            exchange_map,
+            open_positions,
+            risk,
+            cooperative_monitor,
+        )
+
+        symbol = candidate["symbol"]
+
+        if (
+            symbol in protected_position_symbols
+            and symbol not in open_positions
+        ):
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": (
+                        "candidate skipped after "
+                        "same-scan position exit"
+                    ),
+                }
+            )
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    "symbol": symbol,
+                    "candidate_rank": candidate_rank,
+                    "candidate_count": len(ranked_candidates),
+                    "ranking_score": candidate.get("ranking_score"),
+                    "reason_code": "SAME_SCAN_POSITION_EXIT",
+                    "reason": "position exited earlier in the same scan",
+                },
+            )
+
+            continue
+        exchange = candidate["exchange"]
+        signal = candidate["signal"]
+        df_5m = candidate["df_5m"]
+        _snapshot_row = candidate["snapshot_row"]
+        pre_order_timing = build_entry_timing(
+            signal.timestamp,
+            cfg.ENTRY_TIMEFRAME,
+            scan_started_at=scan_started_at,
+            order_submitted_at=scan_started_at,
+        )
+
+        candidate_event_context = {
+            "symbol": symbol,
+            "direction": signal.direction,
+            "candidate_rank": candidate_rank,
+            "candidate_count": len(ranked_candidates),
+            "ranking_score": candidate.get("ranking_score"),
+            "entry_quality_score": candidate.get("quality_score"),
+            "entry_quality_detail": candidate.get("quality_detail"),
+            "entry_context_score": candidate.get(
+                "entry_context_score"
+            ),
+            "entry_context_detail": candidate.get(
+                "entry_context_detail"
+            ),
+            "relative_strength_score": candidate.get(
+                "relative_strength_score"
+            ),
+            "relative_strength_detail": candidate.get(
+                "relative_strength_detail"
+            ),
+            "signal_price": signal.entry_price,
+            "signal_stop": signal.stop_loss,
+            "signal_target": signal.target,
+            "signal_timestamp": signal.timestamp,
+            "signal_candle_start": pre_order_timing[
+                "signal_candle_start"
+            ],
+            "signal_candle_close": pre_order_timing[
+                "signal_candle_close"
+            ],
+            "scan_started_at": pre_order_timing[
+                "scan_started_at"
+            ],
+            "technical_confidence": signal.confidence,
+            "market_alignment": signal.market_alignment,
+            "market_trend": candidate.get("market_trend"),
+            "market_trend_reason": candidate.get(
+                "market_trend_reason"
+            ),
+            "sector": candidate.get("sector"),
+            "sector_trend": candidate.get("sector_trend"),
+            "sector_trend_reason": candidate.get(
+                "sector_trend_reason"
+            ),
+            "exchange": exchange,
+            "breakout_validation": (
+                signal.price_action_detail or {}
+            ).get("breakout_validation"),
+        }
+
+        entry_context_detail = (
+            candidate.get("entry_context_detail")
+            if isinstance(candidate.get("entry_context_detail"), dict)
+            else {}
+        )
+        signal_analytics = {
+            "signal_id": str(uuid.uuid4()),
+            "raw_direction": signal.raw_direction,
+            "final_direction": signal.final_direction,
+            "policy_decision": signal.policy_decision,
+            "policy_reason": signal.policy_reason,
+            "policy_market_trend": signal.market_trend,
+            "candidate_rank": candidate_rank,
+            "candidate_count": len(ranked_candidates),
+            "ranking_score": candidate.get("ranking_score"),
+            "entry_quality_score": candidate.get("quality_score"),
+            "entry_quality_detail": candidate.get("quality_detail"),
+            "entry_context_score": candidate.get("entry_context_score"),
+            "entry_context_detail": entry_context_detail,
+            "confirmation_count": entry_context_detail.get(
+                "confirmation_count"
+            ),
+            "adx_state": entry_context_detail.get("adx_state"),
+            "adx_current": entry_context_detail.get("adx_current"),
+            "adx_previous": entry_context_detail.get("adx_previous"),
+            "adx_delta": entry_context_detail.get("adx_delta"),
+            "relative_strength_score": candidate.get(
+                "relative_strength_score"
+            ),
+            "relative_strength_detail": candidate.get(
+                "relative_strength_detail"
+            ),
+            "breakout_validation": (
+                signal.price_action_detail or {}
+            ).get("breakout_validation"),
+            "market_trend_reason": candidate.get(
+                "market_trend_reason"
+            ),
+            "sector_trend": candidate.get("sector_trend"),
+            "sector_trend_reason": candidate.get(
+                "sector_trend_reason"
+            ),
+            "signal_candle_start": pre_order_timing[
+                "signal_candle_start"
+            ],
+            "signal_candle_close": pre_order_timing[
+                "signal_candle_close"
+            ],
+            "scan_started_at": pre_order_timing[
+                "scan_started_at"
+            ],
+        }
+
+        if (
+            not cfg.PAPER_TRADING
+            and any(
+                position.get("automated_exit_blocked", False)
+                or position.get("manual_reconciliation_required", False)
+                for position in open_positions.values()
+            )
+        ):
+            status_this_cycle.append({
+                "symbol": symbol,
+                "status": (
+                    "candidate blocked: live protection lifecycle "
+                    "requires reconciliation or exit coordination"
+                ),
+            })
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    **candidate_event_context,
+                    "reason_code": "LIVE_PROTECTION_SAFETY_BLOCK",
+                    "reason": (
+                        "existing live position blocks further entries"
+                    ),
+                },
+            )
+            continue
+
+        if not within_trading_window():
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": (
+                        "outside trading window "
+                        "after candidate ranking"
+                    ),
+                }
+            )
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    **candidate_event_context,
+                    "reason_code": "OUTSIDE_TRADING_WINDOW",
+                    "reason": "trading window closed after ranking",
+                },
+            )
+
+            continue
+
+        if not risk.can_take_new_trade(
+            current_open_count=len(
+                open_positions
+            )
+        ):
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": (
+                        "risk limit reached "
+                        "after candidate ranking"
+                    ),
+                }
+            )
+
+            logger.info(
+                f"{symbol}: ranked candidate not executed "
+                f"| rank={candidate_rank} "
+                "| existing risk limit reached"
+            )
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    **candidate_event_context,
+                    "reason_code": "RISK_LIMIT_REACHED",
+                    "reason": "risk manager rejected candidate after ranking",
+                },
+            )
+
+            continue
+
+        logger.info(
+            f"{symbol}: executing ranked candidate "
+            f"| rank={candidate_rank}/"
+            f"{len(ranked_candidates)} "
+            f"| ranking_score="
+            f"{candidate['ranking_score']:.2f}"
+        )
+
+        delayed_confirmation_seconds = (
+            float(
+                getattr(
+                    cfg,
+                    "PAPER_DELAYED_ENTRY_CONFIRMATION_SECONDS",
+                    0.0,
+                )
+                or 0.0
+            )
+            if cfg.PAPER_TRADING
+            else 0.0
+        )
+        if delayed_confirmation_seconds > 0:
+            logger.info(
+                f"{symbol}: paper delayed entry confirmation started "
+                f"| direction={signal.direction} "
+                f"| wait_seconds={delayed_confirmation_seconds:.0f}"
+            )
+            _wait_for_delayed_entry_confirmation(
+                delayed_confirmation_seconds,
+                kite,
+                tokens,
+                exchange_map,
+                open_positions,
+                risk,
+                cooperative_monitor,
+            )
+
+            refreshed_prices = fetch_live_prices(kite, [candidate])
+            delayed_decision = assess_delayed_entry(
+                signal.direction,
+                df_5m,
+                refreshed_prices.get(symbol),
+            )
+            delayed_detail = delayed_decision.detail()
+            logger.info(
+                f"{symbol}: paper delayed entry confirmation complete "
+                f"| accepted={delayed_decision.accepted} "
+                f"| trend={delayed_decision.projected_trend} "
+                f"| live={delayed_decision.live_price} "
+                f"| ema9={delayed_decision.ema9} "
+                f"| ema21={delayed_decision.ema21} "
+                f"| reason={delayed_decision.reason}"
+            )
+
+            if not delayed_decision.accepted:
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "skipped after delayed trend recheck: "
+                            + delayed_decision.reason
+                        ),
+                    }
+                )
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **candidate_event_context,
+                        "reason_code": "DELAYED_DIRECTION_REJECTED",
+                        "reason": delayed_decision.reason,
+                        "delayed_confirmation_seconds": (
+                            delayed_confirmation_seconds
+                        ),
+                        "delayed_confirmation": delayed_detail,
+                    },
+                )
+                continue
+
+            if not within_trading_window() or not risk.can_take_new_trade(
+                current_open_count=len(open_positions)
+            ):
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "skipped after delayed confirmation: "
+                            "time window or risk limit changed"
+                        ),
+                    }
+                )
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **candidate_event_context,
+                        "reason_code": "POST_DELAY_SAFETY_REJECTED",
+                        "reason": (
+                            "time window or risk limit changed during delay"
+                        ),
+                        "delayed_confirmation_seconds": (
+                            delayed_confirmation_seconds
+                        ),
+                        "delayed_confirmation": delayed_detail,
+                    },
+                )
+                continue
+
+            batch_live_prices[symbol] = delayed_decision.live_price
+
+        planned_stop_price = signal.stop_loss
+        if getattr(cfg, "ENABLE_FIXED_TARGET", False):
+            planned_stop_price, _ = (
+                fixed_levels_from_fill(
+                    signal.direction,
+                    signal.entry_price,
+                    getattr(cfg, "STOP_LOSS_PERCENT", 0.45),
+                    getattr(cfg, "PROFIT_TARGET_PERCENT", 1.5),
+                )
+            )
+        fresh_live_price = batch_live_prices.get(
+            symbol
+        )
+
+        fresh_validation = validate_live_price(
+            signal,
+            fresh_live_price,
+        )
+
+        if not fresh_validation.accepted:
+            record_pipeline_event(
+                symbol=symbol,
+                market=signal.market_trend,
+                raw_direction=signal.raw_direction,
+                decision=signal.policy_decision,
+                final_direction=signal.direction,
+                status="FRESH_PRICE_REJECTED",
+            )
+            logger.info(
+                f"{symbol}: skipped -- stale or "
+                f"adverse entry price | "
+                f"signal={fresh_validation.signal_price} "
+                f"live={fresh_validation.live_price} "
+                f"drift={fresh_validation.drift_pct} "
+                f"| {fresh_validation.reason}"
+            )
+
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": (
+                        "skipped, stale entry price: "
+                        + fresh_validation.reason
+                    ),
+                }
+            )
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    **candidate_event_context,
+                    "reason_code": "FRESH_PRICE_REJECTED",
+                    "reason": fresh_validation.reason,
+                    "validated_signal_price": fresh_validation.signal_price,
+                    "live_price": fresh_validation.live_price,
+                    "drift_pct": fresh_validation.drift_pct,
+                    "adverse_slippage_pct": (
+                        fresh_validation.adverse_slippage_pct
+                    ),
+                },
+            )
+
+            continue
+
+        if fresh_validation.live_price is None:
+            logger.warning(
+                f"{symbol}: fresh quote unavailable; "
+                "continuing with signal price"
+            )
+        else:
+            logger.info(
+                f"{symbol}: fresh price validated "
+                f"| signal={fresh_validation.signal_price} "
+                f"live={fresh_validation.live_price} "
+                f"drift={fresh_validation.drift_pct:+.4f}%"
+            )
+
+        # -------------------------------------------------
+        # FINAL PAPER EMA9 / ATR EXECUTION GATE
+        #
+        # Re-check EMA9 proximity immediately before
+        # depth/order execution.
+        #
+        # Enabled only by the PAPER launcher.
+        # -------------------------------------------------
+        if bool(
+            getattr(
+                cfg,
+                "ENABLE_FINAL_EMA_DISTANCE_GATE",
+                False,
+            )
+        ):
+            quality_detail = (
+                signal_analytics.get(
+                    "entry_quality_detail"
+                )
+                or {}
+            )
+
+            ema_entry = quality_detail.get("ema_entry")
+            atr_value = quality_detail.get("atr")
+
+            execution_price = (
+                fresh_validation.live_price
+                if fresh_validation.live_price is not None
+                else signal.entry_price
+            )
+
+            try:
+                ema_entry = float(ema_entry)
+                atr_value = float(atr_value)
+                execution_price = float(execution_price)
+
+            except (TypeError, ValueError):
+
+                logger.warning(
+                    "%s: FINAL EMA DISTANCE gate blocked: "
+                    "EMA9/ATR data unavailable "
+                    "| ema9=%s atr=%s price=%s",
+                    symbol,
+                    ema_entry,
+                    atr_value,
+                    execution_price,
+                )
+
+                record_pipeline_event(
+                    symbol=symbol,
+                    market=signal.market_trend,
+                    raw_direction=signal.raw_direction,
+                    decision=signal.policy_decision,
+                    final_direction=signal.direction,
+                    status="FINAL_EMA_DISTANCE_REJECTED",
+                )
+
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "blocked: final EMA9/ATR "
+                            "data unavailable"
+                        ),
+                    }
+                )
+
+                continue
+
+            if atr_value <= 0:
+
+                logger.warning(
+                    "%s: FINAL EMA DISTANCE gate blocked: "
+                    "invalid ATR=%s",
+                    symbol,
+                    atr_value,
+                )
+
+                continue
+
+            final_ema_distance_atr = (
+                abs(execution_price - ema_entry)
+                / atr_value
+            )
+
+            max_final_ema_distance = float(
+                getattr(
+                    cfg,
+                    "FINAL_EMA_DISTANCE_ATR_MAX",
+                    0.25,
+                )
+            )
+
+            signal_analytics[
+                "final_execution_ema_distance_atr"
+            ] = round(final_ema_distance_atr, 6)
+
+            signal_analytics[
+                "final_execution_ema_price"
+            ] = execution_price
+
+            signal_analytics[
+                "final_execution_ema9"
+            ] = ema_entry
+
+            signal_analytics[
+                "final_execution_atr"
+            ] = atr_value
+
+            logger.info(
+                "%s: FINAL EMA DISTANCE CHECK "
+                "| live=%.4f ema9=%.4f atr=%.4f "
+                "| distance_atr=%.4f max=%.4f "
+                "| result=%s",
+                symbol,
+                execution_price,
+                ema_entry,
+                atr_value,
+                final_ema_distance_atr,
+                max_final_ema_distance,
+                (
+                    "PASS"
+                    if final_ema_distance_atr
+                    <= max_final_ema_distance
+                    else "BLOCK"
+                ),
+            )
+
+            if (
+                final_ema_distance_atr
+                > max_final_ema_distance
+            ):
+
+                record_pipeline_event(
+                    symbol=symbol,
+                    market=signal.market_trend,
+                    raw_direction=signal.raw_direction,
+                    decision=signal.policy_decision,
+                    final_direction=signal.direction,
+                    status="FINAL_EMA_DISTANCE_REJECTED",
+                )
+
+                status_this_cycle.append(
+                    {
+                        "symbol": symbol,
+                        "status": (
+                            "blocked: final EMA9 distance "
+                            f"{final_ema_distance_atr:.3f} "
+                            "ATR > "
+                            f"{max_final_ema_distance:.3f}"
+                        ),
+                    }
+                )
+
+                record_validation_event(
+                    "candidate_rejected",
+                    {
+                        **candidate_event_context,
+                        "reason_code":
+                            "FINAL_EMA_DISTANCE_REJECTED",
+                        "live_price": execution_price,
+                        "ema9": ema_entry,
+                        "atr": atr_value,
+                        "ema_distance_atr":
+                            final_ema_distance_atr,
+                        "max_ema_distance_atr":
+                            max_final_ema_distance,
+                    },
+                )
+
+                continue
+
+        qty = risk.position_size(signal.entry_price, planned_stop_price)
+        if qty > 0 and not cfg.PAPER_TRADING:
+            qty = cap_quantity_by_margin(kite, symbol, signal.direction, qty, exchange, cfg)
+
+        depth_confirmation = evaluate_live_depth(
+            ws_shadow_engine,
+            symbol,
+            signal.direction,
+            qty,
+            cfg,
+        )
+        depth_detail = depth_confirmation.to_dict()
+        signal_analytics["depth_confirmation"] = depth_detail
+        logger.info(
+            "%s: five-level depth confirmation | direction=%s "
+            "| accepted=%s | classification=%s | median_imbalance=%s "
+            "| buy_fraction=%s | sell_fraction=%s | spread_bps=%s "
+            "| samples=%s | coverage=%ss | reason=%s",
+            symbol,
+            signal.direction,
+            depth_confirmation.accepted,
+            depth_confirmation.classification,
+            depth_confirmation.median_imbalance,
+            depth_confirmation.buy_pressure_fraction,
+            depth_confirmation.sell_pressure_fraction,
+            depth_confirmation.latest_spread_bps,
+            depth_confirmation.sample_count,
+            depth_confirmation.coverage_seconds,
+            depth_confirmation.reason,
+        )
+        if not depth_confirmation.accepted:
+            record_pipeline_event(
+                symbol=symbol,
+                market=signal.market_trend,
+                raw_direction=signal.raw_direction,
+                decision=signal.policy_decision,
+                final_direction=signal.direction,
+                status="DEPTH_CONFIRMATION_REJECTED",
+            )
+            status_this_cycle.append(
+                {
+                    "symbol": symbol,
+                    "status": "skipped, five-level depth: " + depth_confirmation.reason,
+                }
+            )
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    **candidate_event_context,
+                    "reason_code": "DEPTH_CONFIRMATION_REJECTED",
+                    "reason": depth_confirmation.reason,
+                    "depth_confirmation": depth_detail,
+                },
+            )
+            continue
+
+        tick_size = get_cached_instrument_tick_size(
+            symbol,
+            exchange,
+        )
+        order_timing = build_entry_timing(
+            signal.timestamp,
+            cfg.ENTRY_TIMEFRAME,
+            scan_started_at=scan_started_at,
+            order_submitted_at=datetime.now(),
+        )
+        signal_analytics.update(order_timing)
+        logger.info(
+            f"{symbol}: entry submission timing "
+            f"| signal_close="
+            f"{order_timing['signal_candle_close']} "
+            f"| scan_started="
+            f"{order_timing['scan_started_at']} "
+            f"| order_submitted="
+            f"{order_timing['order_submitted_at']} "
+            f"| delay_seconds="
+            f"{order_timing['entry_delay_seconds']:.3f}"
+        )
+        entry_plan = build_entry_plan(
+            signal,
+            cfg,
+            tick_size=tick_size,
+            signal_analytics=signal_analytics,
+        )
+        result = place_entry_order(
+            kite,
+            symbol,
+            signal.direction,
+            qty,
+            exchange,
+            cfg,
+            entry_plan=entry_plan,
+        )
+        if result["success"]:
+            confirmed_qty = result["filled_quantity"]
+            position = build_confirmed_position(
+                signal,
+                result,
+                exchange,
+                cfg,
+                tick_size=tick_size,
+                signal_analytics=signal_analytics,
+            )
+            open_positions[symbol] = position
+
+            # Persist the confirmed exposure before the protective-stop
+            # broker side effect.  A crash in the next instruction therefore
+            # restarts from an explicit PENDING/blocked position, not from a
+            # falsely empty local book.
+            save_positions(open_positions)
+
+            if (
+                result.get("operation_id")
+                and result.get("client_tag")
+            ):
+                from pending_order_store import mark_entry_fill_applied
+                mark_entry_fill_applied(
+                    result["operation_id"],
+                    confirmed_qty,
+                )
+
+            protect_confirmed_position(
+                kite,
+                symbol,
+                position,
+                cfg,
+            )
+            save_positions(open_positions)
+
+            confirmed_entry_price = position["entry"]
+            stop_price = position["stop"]
+            target_price = position["target"]
+
+            if not cfg.PAPER_TRADING and not position["entry_protected"]:
+                logger.critical(
+                    f"{symbol}: confirmed entry is NOT safely protected "
+                    f"| state={position['protective_stop_state']} "
+                    "| automated actions blocked; manual reconciliation required"
+                )
+
+            record_pipeline_event(
+                symbol=symbol,
+                market=signal.market_trend,
+                raw_direction=signal.raw_direction,
+                decision=signal.policy_decision,
+                final_direction=signal.direction,
+                status=(
+                    "FILLED_PROTECTED"
+                    if position["entry_protected"]
+                    else "FILLED_PROTECTION_ATTENTION"
+                ),
+                quantity=confirmed_qty,
+                entry_price=confirmed_entry_price,
+            )
+
+            logger.info(f"ENTRY {signal.direction} {exchange}:{symbol} qty={confirmed_qty} "
+                        f"entry={confirmed_entry_price:.2f} stop={stop_price:.2f} "
+                        f"target={target_price:.2f} | {signal.reason} "
+                        f"[market_alignment: {signal.market_alignment}] "
+                        f"[fill_status: {result.get('status')}] "
+                        f"[protection: {position['protective_stop_state']}]")
+            status_this_cycle.append({
+                "symbol": symbol,
+                "status": (
+                    f"ENTRY {signal.direction} @ {confirmed_entry_price:.2f} "
+                    f"| protection={position['protective_stop_state']}"
+                ),
+                "confidence": signal.confidence,
+                "confidence": signal.confidence,
+                "market_alignment": signal.market_alignment,
+            })
+            log_signal({
+                "timestamp": str(signal.timestamp), "symbol": symbol,
+                "entry_operation_id": result.get("operation_id"),
+                "entry_order_id": result.get("order_id"),
+                "market_trend": candidate.get("market_trend"),
+                "market_trend_reason": candidate.get("market_trend_reason"),
+                "sector": candidate.get("sector"),
+                "sector_trend": candidate.get("sector_trend"),
+                "sector_trend_reason": candidate.get("sector_trend_reason"),
+                "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
+                "entry_price": signal.entry_price, "direction": signal.direction, "executed": True,
+                "confirmed_entry_price": confirmed_entry_price,
+                **signal_analytics,
+                "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
+                "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
+                "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
+                "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
+                "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
+                "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
+                "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
+                "news_confidence_score": signal.news_confidence_score,
+                "price_action_score": signal.price_action_score,
+                "market_structure": (signal.price_action_detail or {}).get("market_structure"),
+                "support": (signal.price_action_detail or {}).get("support"),
+                "resistance": (signal.price_action_detail or {}).get("resistance"),
+                "breakout": (signal.price_action_detail or {}).get("breakout"),
+                "pullback": (signal.price_action_detail or {}).get("pullback"),
+                "bos": (signal.price_action_detail or {}).get("bos"),
+                "choch": (signal.price_action_detail or {}).get("choch"),
+            })
+        else:
+            record_pipeline_event(
+                symbol=symbol,
+                market=signal.market_trend,
+                raw_direction=signal.raw_direction,
+                decision=signal.policy_decision,
+                final_direction=signal.direction,
+                status="ORDER_FAILED",
+            )
+            status_this_cycle.append({"symbol": symbol, "status": "signal found, order failed"})
+            log_signal({
+                "timestamp": str(signal.timestamp), "symbol": symbol,
+                "entry_operation_id": result.get("operation_id"),
+                "entry_order_id": result.get("order_id"),
+                "market_trend": candidate.get("market_trend"),
+                "market_trend_reason": candidate.get("market_trend_reason"),
+                "sector": candidate.get("sector"),
+                "sector_trend": candidate.get("sector_trend"),
+                "sector_trend_reason": candidate.get("sector_trend_reason"),
+                "market_alignment": signal.market_alignment, "technical_confidence": signal.confidence,
+                "entry_price": signal.entry_price, "direction": signal.direction, "executed": False,
+                **signal_analytics,
+                "rejection_reason": result["reason"],
+                "bear_trap": is_bear_trap(df_5m), "bull_trap": is_bull_trap(df_5m),
+                "raw_close": _snapshot_row.get("close") if _snapshot_row is not None else None,
+                "raw_ema_fast": _snapshot_row.get("ema_fast") if _snapshot_row is not None else None,
+                "raw_ema_slow": _snapshot_row.get("ema_slow") if _snapshot_row is not None else None,
+                "raw_vwap": _snapshot_row.get("vwap") if _snapshot_row is not None else None,
+                "raw_adx": _snapshot_row.get("adx") if _snapshot_row is not None else None,
+                "news_sentiment": signal.news_sentiment, "news_headline": signal.news_headline,
+                "news_confidence_score": signal.news_confidence_score,
+                "price_action_score": signal.price_action_score,
+                "market_structure": (signal.price_action_detail or {}).get("market_structure"),
+                "support": (signal.price_action_detail or {}).get("support"),
+                "resistance": (signal.price_action_detail or {}).get("resistance"),
+                "breakout": (signal.price_action_detail or {}).get("breakout"),
+                "pullback": (signal.price_action_detail or {}).get("pullback"),
+                "bos": (signal.price_action_detail or {}).get("bos"),
+                "choch": (signal.price_action_detail or {}).get("choch"),
+            })
 
     logger.info(f"Scan Summary\n------------\nNifty fetches: {nifty_fetches}\n"
                 f"Sector fetches: {sector_fetches}\nSector cache hits: {sector_cache_hits}\n"
@@ -381,15 +1943,543 @@ def _trend_reversed(kite, symbol, token, direction):
         if df_15m.empty:
             return False, None
         df_15m, _ = add_indicators(df_15m, df_15m.copy(), cfg)
-        as_of = df_15m["date"].max()
+        as_of = pd.Timestamp.now(tz=df_15m["date"].dt.tz)
         current_trend = latest_completed_15m_trend(df_15m, as_of, cfg)
-        latest_row = df_15m[df_15m["date"] <= as_of].iloc[-1]
+        latest_row = latest_completed_15m_row(df_15m, as_of)
+        if latest_row is None:
+            return False, None
         current_adx = latest_row.get("adx")
         wanted = "UP" if direction == "BUY" else "DOWN"
         return (current_trend != wanted), current_adx
     except Exception as e:
         logger.warning(f"Trend-reversal check for {symbol} failed ({e}), staying in trade")
         return False, None
+
+
+def _apply_confirmed_protective_stop_fill(
+    symbol,
+    position,
+    stop_result,
+    open_positions,
+    risk,
+    exchange,
+    *,
+    positions_path=None,
+    store_path=None,
+):
+    """Apply only the stop-fill delta not already reflected locally."""
+
+    operation_id = stop_result.get("operation_id")
+    record = (
+        get_protective_stop(operation_id, path=store_path)
+        if operation_id
+        else None
+    )
+
+    if record is None:
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
+        position["protective_stop_exit_state"] = (
+            "STOP_RECORD_MISSING"
+        )
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+        return {
+            "success": False,
+            "position_closed": False,
+            "remaining_quantity": int(position.get("qty") or 0),
+            "status": "STOP RECORD MISSING",
+        }
+
+    stop_state = (
+        stop_result.get("stop_state")
+        or stop_result.get("state")
+        or "UNKNOWN"
+    )
+    terminal = stop_state in {
+        "CANCELLED",
+        "REJECTED",
+        "TRIGGERED",
+        "PARTIALLY_TRIGGERED",
+    }
+    total_filled = int(
+        stop_result.get(
+            "stop_filled_quantity",
+            stop_result.get("filled_quantity", 0),
+        )
+        or 0
+    )
+    already_applied = int(
+        record.get("applied_filled_quantity") or 0
+    )
+    newly_confirmed = total_filled - already_applied
+    current_quantity = int(position.get("qty") or 0)
+
+    position["protective_stop_state"] = stop_state
+    position["protective_stop_active"] = bool(
+        stop_result.get("active")
+    )
+    position["protective_stop_confirmation_pending"] = bool(
+        stop_result.get("confirmation_pending")
+    )
+    position["protective_stop_order_id"] = record.get("order_id")
+    position["protective_stop_operation_id"] = operation_id
+    position["protective_stop_status_message"] = (
+        stop_result.get("reason")
+        or stop_result.get("status_message")
+    )
+    position["protective_stop_exit_state"] = stop_result.get(
+        "state"
+    )
+
+    if newly_confirmed < 0 or newly_confirmed > current_quantity:
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
+        position["protective_stop_exit_state"] = (
+            "STOP_FILL_QUANTITY_MISMATCH"
+        )
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+        return {
+            "success": False,
+            "position_closed": False,
+            "remaining_quantity": current_quantity,
+            "status": "STOP FILL QUANTITY MISMATCH",
+        }
+
+    if newly_confirmed == 0:
+        if stop_state == "ACTIVE":
+            position["protective_stop_quantity"] = int(
+                record["requested_quantity"]
+            )
+            position["entry_protected"] = True
+            position["automated_exit_blocked"] = False
+            position["manual_reconciliation_required"] = False
+        elif terminal:
+            position["protective_stop_quantity"] = 0
+            position["entry_protected"] = False
+            position["automated_exit_blocked"] = True
+            position["manual_reconciliation_required"] = not bool(
+                record.get("exit_coordination_requested")
+            )
+
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+
+        if terminal:
+            mark_protective_stop_resolved(
+                operation_id,
+                resolution_reason=stop_state,
+                path=store_path,
+            )
+
+        return {
+            "success": True,
+            "position_closed": False,
+            "remaining_quantity": current_quantity,
+            "status": stop_state,
+            "newly_confirmed": 0,
+        }
+
+    cumulative_average = stop_result.get(
+        "stop_average_price",
+        stop_result.get("average_price"),
+    )
+    incremental_price = None
+
+    if cumulative_average is not None:
+        cumulative_average = float(cumulative_average)
+
+        if cumulative_average > 0:
+            if already_applied == 0:
+                incremental_price = cumulative_average
+            else:
+                previous_average = record.get(
+                    "applied_average_price"
+                )
+
+                if previous_average is not None:
+                    incremental_notional = (
+                        total_filled * cumulative_average
+                        - already_applied * float(previous_average)
+                    )
+                    incremental_price = (
+                        incremental_notional / newly_confirmed
+                    )
+
+                    if incremental_price <= 0:
+                        incremental_price = None
+
+    remaining_quantity = current_quantity - newly_confirmed
+    pnl_recorded = False
+
+    # Reserve the cumulative broker fill in the durable stop store before
+    # recording P&L or changing the local position. A crash after this
+    # point can leave the position conservatively overstated, but restart
+    # will detect the quantity mismatch and block for reconciliation. It
+    # cannot apply the same broker fill or P&L a second time.
+    try:
+        mark_protective_stop_fill_applied(
+            operation_id,
+            total_filled,
+            applied_average_price=(
+                cumulative_average
+                if incremental_price is not None
+                else None
+            ),
+            path=store_path,
+        )
+    except Exception as exc:
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
+        position["protective_stop_exit_state"] = (
+            "STOP_FILL_APPLICATION_RESERVATION_FAILED"
+        )
+        position["protective_stop_status_message"] = str(exc)
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+        return {
+            "success": False,
+            "position_closed": False,
+            "remaining_quantity": current_quantity,
+            "status": "STOP FILL APPLICATION RESERVATION FAILED",
+        }
+
+    if incremental_price is not None:
+        cost_result = net_pnl_for_trade(
+            position["direction"],
+            newly_confirmed,
+            position["entry"],
+            incremental_price,
+        )
+        gross_pnl = cost_result["gross_pnl"]
+        costs = cost_result["costs"]
+        pnl = cost_result["net_pnl"]
+
+        risk.record_trade_result(pnl)
+        record_trade(
+            symbol,
+            position["direction"],
+            newly_confirmed,
+            position["entry"],
+            incremental_price,
+            pnl,
+            "protective_stop",
+            exchange=exchange,
+            gross_pnl=gross_pnl,
+            costs=costs,
+            analytics=_trade_analytics_from_position(position),
+        )
+        position["last_exit_price"] = incremental_price
+        position["last_exit_pnl"] = pnl
+        pnl_recorded = True
+
+    position["protective_stop_applied_filled_quantity"] = (
+        total_filled
+    )
+    position["protective_stop_average_price"] = (
+        cumulative_average
+    )
+    position["protective_stop_quantity"] = 0
+    position["entry_protected"] = False
+    position["automated_exit_blocked"] = True
+
+    if not pnl_recorded:
+        position["manual_reconciliation_required"] = True
+        position["protective_stop_status_message"] = (
+            "confirmed protective-stop fill has no usable average "
+            "price; exposure was reduced but P&L was not fabricated"
+        )
+
+    if remaining_quantity == 0:
+        del open_positions[symbol]
+    else:
+        position["qty"] = remaining_quantity
+
+    save_positions(
+        open_positions,
+        positions_path=positions_path,
+    )
+
+    if terminal and pnl_recorded:
+        mark_protective_stop_resolved(
+            operation_id,
+            resolution_reason=stop_state,
+            path=store_path,
+        )
+
+    logger.info(
+        f"Protective-stop fill applied for {exchange}:{symbol}: "
+        f"newly_confirmed={newly_confirmed}, "
+        f"broker_total={total_filled}, "
+        f"remaining_quantity={remaining_quantity}, "
+        f"state={stop_state}, pnl_recorded={pnl_recorded}"
+    )
+
+    return {
+        "success": True,
+        "position_closed": remaining_quantity == 0,
+        "remaining_quantity": remaining_quantity,
+        "status": stop_state,
+        "newly_confirmed": newly_confirmed,
+        "pnl_recorded": pnl_recorded,
+    }
+
+
+def _prepare_protective_stop_for_exit(
+    kite,
+    symbol,
+    position,
+    open_positions,
+    risk,
+    exchange,
+    exit_action,
+    exit_reason,
+    exit_quantity=None,
+    *,
+    positions_path=None,
+    store_path=None,
+):
+    """Return exact-order clearance only after the stop is terminal."""
+
+    original_quantity = int(position.get("qty") or 0)
+    if exit_quantity is None:
+        exit_quantity = original_quantity
+    full_exit_requested = int(exit_quantity) == original_quantity
+
+    if getattr(cfg, "PAPER_TRADING", False):
+        coordination = coordinate_protective_stop_for_exit(
+            kite,
+            symbol=symbol,
+            position=position,
+            cfg=cfg,
+            exit_action=exit_action,
+            exit_reason=exit_reason,
+            exit_quantity=exit_quantity,
+            store_path=store_path,
+        )
+        return {
+            "proceed": True,
+            "position_closed": False,
+            "clearance": coordination["clearance"],
+            "status": "PAPER",
+        }
+
+    position["protective_stop_exit_pending"] = True
+    position["protective_stop_exit_action"] = exit_action
+    position["protective_stop_exit_reason"] = exit_reason
+    position["protective_stop_exit_state"] = "REQUESTED"
+    position["automated_exit_blocked"] = True
+    save_positions(
+        open_positions,
+        positions_path=positions_path,
+    )
+
+    coordination = coordinate_protective_stop_for_exit(
+        kite,
+        symbol=symbol,
+        position=position,
+        cfg=cfg,
+        exit_action=exit_action,
+        exit_reason=exit_reason,
+        exit_quantity=exit_quantity,
+        store_path=store_path,
+    )
+
+    position["protective_stop_exit_state"] = coordination.get(
+        "state"
+    )
+    position["protective_stop_status_message"] = coordination.get(
+        "reason"
+    )
+
+    if not coordination.get("success"):
+        position["manual_reconciliation_required"] = True
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+        return {
+            "proceed": False,
+            "position_closed": False,
+            "clearance": None,
+            "status": coordination.get("state"),
+        }
+
+    applied = _apply_confirmed_protective_stop_fill(
+        symbol,
+        position,
+        coordination,
+        open_positions,
+        risk,
+        exchange,
+        positions_path=positions_path,
+        store_path=store_path,
+    )
+
+    if applied["position_closed"]:
+        return {
+            "proceed": False,
+            "position_closed": True,
+            "clearance": None,
+            "status": "CLOSED_BY_PROTECTIVE_STOP",
+        }
+
+    if symbol not in open_positions:
+        return {
+            "proceed": False,
+            "position_closed": True,
+            "clearance": None,
+            "status": "CLOSED_BY_PROTECTIVE_STOP",
+        }
+
+    position = open_positions[symbol]
+    current_quantity = int(position.get("qty") or 0)
+    clearance = coordination.get("clearance")
+    expected_clearance_quantity = (
+        current_quantity if full_exit_requested else int(exit_quantity)
+    )
+
+    if (
+        not coordination.get("safe_to_submit_exit")
+        or not clearance
+        or int(clearance.get("quantity") or 0)
+        != expected_clearance_quantity
+    ):
+        position["manual_reconciliation_required"] = True
+        position["protective_stop_exit_state"] = (
+            "EXIT_CLEARANCE_QUANTITY_MISMATCH"
+        )
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
+        return {
+            "proceed": False,
+            "position_closed": False,
+            "clearance": None,
+            "status": "EXIT_CLEARANCE_QUANTITY_MISMATCH",
+        }
+
+    position["protective_stop_exit_pending"] = False
+    position["protective_stop_exit_state"] = "CLEARED_FOR_EXIT"
+    position["protective_stop_active"] = False
+    position["protective_stop_quantity"] = 0
+    position["entry_protected"] = False
+    position["automated_exit_blocked"] = True
+    save_positions(
+        open_positions,
+        positions_path=positions_path,
+    )
+
+    return {
+        "proceed": True,
+        "position_closed": False,
+        "clearance": clearance,
+        "status": coordination.get("state"),
+    }
+
+
+def _reprotect_remaining_live_position(
+    kite,
+    symbol,
+    position,
+    open_positions,
+    *,
+    positions_path=None,
+    store_path=None,
+):
+    """Durably arm a new broker stop after a coordinated partial exit."""
+
+    if cfg.PAPER_TRADING:
+        return True
+
+    old_stop_operation_id = position.get(
+        "protective_stop_operation_id"
+    )
+    if old_stop_operation_id:
+        try:
+            # The coordinated full-size stop is terminal at this point.
+            # Resolve its durable intent before creating the smaller runner
+            # stop; otherwise the protective-stop store correctly rejects a
+            # second unresolved stop for the same symbol.
+            mark_protective_stop_resolved(
+                old_stop_operation_id,
+                resolution_reason=(
+                    "terminal stop replaced after coordinated partial exit"
+                ),
+                path=store_path,
+            )
+        except Exception as exc:
+            position["manual_reconciliation_required"] = True
+            position["protective_stop_exit_state"] = (
+                "OLD_STOP_RESOLUTION_UNCERTAIN"
+            )
+            position["automated_exit_blocked"] = True
+            save_positions(
+                open_positions,
+                positions_path=positions_path,
+            )
+            logger.critical(
+                "%s: old protective stop %s could not be durably resolved "
+                "before runner reprotection: %s",
+                symbol,
+                old_stop_operation_id,
+                exc,
+            )
+            return False
+
+    position.update({
+        "protective_stop_state": "PENDING",
+        "protective_stop_active": False,
+        "protective_stop_confirmation_pending": True,
+        "protective_stop_operation_id": None,
+        "protective_stop_order_id": None,
+        "protective_stop_client_tag": None,
+        "protective_stop_quantity": 0,
+        "protective_stop_exit_pending": False,
+        "protective_stop_exit_action": None,
+        "protective_stop_exit_reason": None,
+        "protective_stop_exit_state": "REPROTECTION_PENDING",
+        "entry_protected": False,
+        "automated_exit_blocked": True,
+        "manual_reconciliation_required": False,
+    })
+    # Persist the recovery point before creating a new broker side effect.
+    save_positions(open_positions, positions_path=positions_path)
+
+    result = protect_confirmed_position(
+        kite,
+        symbol,
+        position,
+        cfg,
+        store_path=store_path,
+    )
+    save_positions(open_positions, positions_path=positions_path)
+
+    protected = bool(
+        result.get("active")
+        and position.get("entry_protected")
+        and not position.get("automated_exit_blocked")
+    )
+    if not protected:
+        logger.critical(
+            "%s: remaining live quantity=%s could not be conclusively "
+            "reprotected after partial exit; automated exits remain blocked "
+            "state=%s",
+            symbol,
+            position.get("qty"),
+            position.get("protective_stop_state"),
+        )
+    return protected
 
 
 def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk, check_trend=False):
@@ -409,12 +2499,158 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
     import pandas as pd
     pos = open_positions[symbol]
     exchange = pos.get("exchange", exchange_map.get(symbol, "NSE"))
-    token = tokens[symbol]
-    df_5m = fetch_candles(kite, token, cfg.ENTRY_TIMEFRAME, lookback_days=1, trim_incomplete=False)  # real-time price needed for stop/trailing-stop monitoring
-    time.sleep(0.5)
-    if df_5m.empty:
-        return f"position open | {pos['direction']} entry {pos['entry']:.2f} (current price unavailable)"
-    last_price = df_5m.iloc[-1]["close"]
+    resumed_exit_reason = None
+    resumed_exit_action = None
+
+    if not cfg.PAPER_TRADING:
+        inspection = inspect_protective_stop(
+            kite,
+            symbol=symbol,
+            position=pos,
+            cfg=cfg,
+        )
+
+        if not inspection.get("success"):
+            pos["automated_exit_blocked"] = True
+            pos["manual_reconciliation_required"] = True
+            pos["protective_stop_exit_state"] = inspection.get(
+                "state"
+            )
+            pos["protective_stop_status_message"] = inspection.get(
+                "reason"
+            )
+            save_positions(open_positions)
+            return (
+                "AUTOMATED EXIT BLOCKED | "
+                f"protection={inspection.get('state', 'UNKNOWN')}"
+            )
+
+        stop_state = inspection.get("state")
+
+        if stop_state == "ACTIVE":
+            _apply_confirmed_protective_stop_fill(
+                symbol,
+                pos,
+                inspection,
+                open_positions,
+                risk,
+                exchange,
+            )
+
+            if inspection.get("exit_coordination_requested"):
+                resumed_exit_reason = (
+                    inspection.get("exit_reason")
+                    or pos.get("protective_stop_exit_reason")
+                    or "resumed_exit"
+                )
+                resumed_exit_action = (
+                    inspection.get("exit_action")
+                    or pos.get("protective_stop_exit_action")
+                    or "EXIT"
+                )
+                pos["automated_exit_blocked"] = True
+                pos["protective_stop_exit_pending"] = True
+        elif stop_state in {
+            "CANCELLED",
+            "REJECTED",
+            "TRIGGERED",
+            "PARTIALLY_TRIGGERED",
+        }:
+            applied_stop = _apply_confirmed_protective_stop_fill(
+                symbol,
+                pos,
+                inspection,
+                open_positions,
+                risk,
+                exchange,
+            )
+
+            if applied_stop["position_closed"]:
+                return (
+                    "CLOSED (protective_stop) | "
+                    f"state={stop_state}"
+                )
+
+            pos = open_positions[symbol]
+
+            if inspection.get("exit_coordination_requested"):
+                resumed_exit_reason = (
+                    inspection.get("exit_reason")
+                    or pos.get("protective_stop_exit_reason")
+                    or "resumed_exit"
+                )
+                resumed_exit_action = (
+                    inspection.get("exit_action")
+                    or pos.get("protective_stop_exit_action")
+                    or "EXIT"
+                )
+            elif stop_state in {
+                "TRIGGERED",
+                "PARTIALLY_TRIGGERED",
+            }:
+                resumed_exit_reason = "protective_stop_remainder"
+                resumed_exit_action = "EXIT"
+            else:
+                return (
+                    "AUTOMATED EXIT BLOCKED | protective stop became "
+                    f"{stop_state} without a coordinated exit request"
+                )
+        else:
+            pos["automated_exit_blocked"] = True
+            pos["manual_reconciliation_required"] = True
+            pos["protective_stop_exit_state"] = stop_state
+            save_positions(open_positions)
+            return (
+                "AUTOMATED EXIT BLOCKED | protective-stop verification "
+                f"state={stop_state}"
+            )
+
+        if resumed_exit_action == "FORCE_EXIT":
+            return (
+                "FORCE EXIT COORDINATION PENDING | "
+                f"state={pos.get('protective_stop_exit_state')}"
+            )
+
+        if (
+            pos.get("automated_exit_blocked", False)
+            and resumed_exit_reason is None
+        ):
+            return (
+                "AUTOMATED EXIT BLOCKED | "
+                f"protection={pos.get('protective_stop_state', 'UNKNOWN')}"
+            )
+
+    if resumed_exit_reason is not None:
+        # A durable exit request must resume even when market-data fetches
+        # are unavailable after restart. Live P&L uses the broker-confirmed
+        # market-order average, so no quote is required for this path.
+        last_price = float(pos["entry"])
+        df_5m = pd.DataFrame([{
+            "high": last_price,
+            "low": last_price,
+            "close": last_price,
+        }])
+        check_trend = False
+    else:
+        token = tokens[symbol]
+        df_5m = fetch_candles(
+            kite,
+            token,
+            cfg.ENTRY_TIMEFRAME,
+            lookback_days=1,
+            trim_incomplete=False,
+        )  # real-time price needed for stop/trailing-stop monitoring
+        time.sleep(0.5)
+
+        if df_5m.empty:
+            return (
+                f"position open | {pos['direction']} "
+                f"entry {pos['entry']:.2f} "
+                "(current price unavailable)"
+            )
+
+        last_price = df_5m.iloc[-1]["close"]
+
     direction = pos["direction"]
     hit_hard_stop = (last_price <= pos["stop"]) if direction == "BUY" else (last_price >= pos["stop"])
 
@@ -429,6 +2665,7 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         # trend reversal are intentionally bypassed entirely -- by
         # explicit design choice, temporary pullbacks and higher-
         # timeframe trend changes must NOT close the trade early.
+        hybrid_stage = pos.get("hybrid_exit_stage")
         target_price = pos.get("target")
         try:
             if target_price is not None:
@@ -439,23 +2676,75 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
     else:
         # ORIGINAL exit-stack logic, completely unchanged from before
         # fixed-target mode existed.
+        # Retain the most favourable closing price present in the
+        # fetched monitoring window. This prevents a later pullback
+        # from replacing an earlier peak and works during ATR warm-up.
+        completed_closes = pd.to_numeric(
+            df_5m["close"],
+            errors="coerce",
+        ).dropna()
+
+        previous_peak = float(
+            pos.get(
+                "peak_price",
+                pos["entry"],
+            )
+        )
+
+        if completed_closes.empty:
+            observed_extreme = float(
+                last_price
+            )
+        elif direction == "BUY":
+            observed_extreme = float(
+                completed_closes.max()
+            )
+        else:
+            observed_extreme = float(
+                completed_closes.min()
+            )
+
+        if direction == "BUY":
+            updated_peak = max(
+                previous_peak,
+                observed_extreme,
+            )
+        else:
+            updated_peak = min(
+                previous_peak,
+                observed_extreme,
+            )
+
+        pos["peak_price"] = updated_peak
+
+        if updated_peak != previous_peak:
+            save_positions(open_positions)
+
         atr_series = atr_indicator(df_5m, 14)
         current_atr = atr_series.iloc[-1] if not atr_series.empty else None
         tight_mode = pos.get("tight_mode", False)
         multiplier = 1.2 if tight_mode else 2.5
+
         if current_atr is None or pd.isna(current_atr):
             logger.info(f"{symbol}: ATR trailing stop inactive (warming up, needs 14 candles of "
                         f"history) -- protected only by hard stop-loss and structure-break checks")
         else:
             if direction == "BUY":
-                pos["peak_price"] = max(pos.get("peak_price", pos["entry"]), last_price)
-                trailing_stop = pos["peak_price"] - current_atr * multiplier
-                hit_trailing_stop = last_price <= trailing_stop
+                trailing_stop = (
+                    pos["peak_price"]
+                    - current_atr * multiplier
+                )
+                hit_trailing_stop = (
+                    last_price <= trailing_stop
+                )
             else:
-                pos["peak_price"] = min(pos.get("peak_price", pos["entry"]), last_price)
-                trailing_stop = pos["peak_price"] + current_atr * multiplier
-                hit_trailing_stop = last_price >= trailing_stop
-            save_positions(open_positions)
+                trailing_stop = (
+                    pos["peak_price"]
+                    + current_atr * multiplier
+                )
+                hit_trailing_stop = (
+                    last_price >= trailing_stop
+                )
         structure_broken = _market_structure_broken(df_5m, direction)
         if check_trend and not (hit_hard_stop or hit_trailing_stop or structure_broken):
             trend_reversed, current_adx = _trend_reversed(kite, symbol, token, direction)
@@ -463,15 +2752,35 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
                                   and current_adx < getattr(cfg, "ADX_THRESHOLD", 25))
             save_positions(open_positions)
 
-    if hit_hard_stop or hit_trailing_stop or structure_broken or trend_reversed or hit_target:
-        if hit_hard_stop:
+    if (
+        resumed_exit_reason is not None
+        or hit_hard_stop
+        or hit_trailing_stop
+        or structure_broken
+        or trend_reversed
+        or hit_target
+    ):
+        if resumed_exit_reason is not None:
+            result = resumed_exit_reason
+        elif hit_hard_stop:
             result = "stop"
         elif hit_trailing_stop:
             result = "trailing_stop"
         elif structure_broken:
             result = "structure_break"
         elif hit_target:
-            result = "fixed_target"
+            if (
+                pos.get("hybrid_exit_enabled")
+                and hybrid_stage == SCALP_PENDING
+            ):
+                result = "hybrid_scalp_1r"
+            elif (
+                pos.get("hybrid_exit_enabled")
+                and hybrid_stage == RUNNER_PENDING
+            ):
+                result = "hybrid_runner_2r"
+            else:
+                result = "fixed_target"
         else:
             result = "trend_reversal"
 
@@ -491,7 +2800,42 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         except Exception:
             pass
 
-        requested_qty = int(pos["qty"])
+        position_qty_before_exit = int(pos["qty"])
+        requested_qty = requested_exit_quantity(pos, result)
+
+        if requested_qty <= 0:
+            logger.critical(
+                f"{symbol}: exit trigger={result} produced invalid "
+                f"quantity {requested_qty}; position left unchanged"
+            )
+            return f"EXIT BLOCKED ({result}) | invalid quantity"
+
+        preparation = _prepare_protective_stop_for_exit(
+            kite,
+            symbol,
+            pos,
+            open_positions,
+            risk,
+            exchange,
+            "EXIT",
+            result,
+            requested_qty,
+        )
+
+        if preparation["position_closed"]:
+            return (
+                "CLOSED (protective_stop) | "
+                f"trigger={result}"
+            )
+
+        if not preparation["proceed"]:
+            return (
+                f"EXIT BLOCKED ({result}) | protective_stop="
+                f"{preparation['status']}"
+            )
+
+        pos = open_positions[symbol]
+        position_qty_before_exit = int(pos["qty"])
 
         exit_result = place_exit_order(
             kite,
@@ -500,6 +2844,7 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             requested_qty,
             exchange,
             cfg,
+            protection_clearance=preparation["clearance"],
         )
 
         confirmed_qty = int(
@@ -531,6 +2876,10 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
         pos["exit_status_message"] = exit_result.get("reason")
         pos["exit_reason"] = result
 
+        if not cfg.PAPER_TRADING:
+            pos["automated_exit_blocked"] = True
+            pos["manual_reconciliation_required"] = True
+
         def finalize_terminal_exit_operation():
             """
             Resolve the durable EXIT operation only AFTER the
@@ -557,6 +2906,25 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
 
         if confirmed_qty <= 0:
             save_positions(open_positions)
+
+            if (
+                not cfg.PAPER_TRADING
+                and result == "hybrid_scalp_1r"
+                and exit_result.get("resolved", False)
+                and not pos["exit_confirmation_pending"]
+            ):
+                reprotected = _reprotect_remaining_live_position(
+                    kite,
+                    symbol,
+                    pos,
+                    open_positions,
+                )
+                if not reprotected:
+                    return (
+                        "EXIT NOT FILLED (hybrid_scalp_1r) | "
+                        "live reprotection unresolved"
+                    )
+
             finalize_terminal_exit_operation()
 
             if pos["exit_confirmation_pending"]:
@@ -604,7 +2972,7 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             # fabricated P&L. Reduce the known live exposure, but leave
             # an explicit reconciliation record instead of inventing a
             # price or silently recording inaccurate profit.
-            remaining_qty = requested_qty - confirmed_qty
+            remaining_qty = position_qty_before_exit - confirmed_qty
 
             pos["qty"] = remaining_qty
             pos["exit_filled_quantity"] = confirmed_qty
@@ -674,14 +3042,23 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             exchange=exchange,
             gross_pnl=gross_pnl,
             costs=costs,
+            analytics=_trade_analytics_from_position(pos),
         )
 
-        remaining_qty = requested_qty - confirmed_qty
+        remaining_qty = position_qty_before_exit - confirmed_qty
 
         pos["exit_filled_quantity"] = confirmed_qty
         pos["exit_average_price"] = exit_price
         pos["last_exit_price"] = exit_price
         pos["last_exit_pnl"] = pnl
+
+        apply_confirmed_hybrid_fill(
+            pos,
+            reason=result,
+            confirmed_quantity=confirmed_qty,
+            exit_price=exit_price,
+            net_pnl=pnl,
+        )
 
         if remaining_qty == 0:
             logger.info(
@@ -709,6 +3086,26 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
 
         pos["qty"] = remaining_qty
         save_positions(open_positions)
+
+        if (
+            not cfg.PAPER_TRADING
+            and result == "hybrid_scalp_1r"
+            and exit_result.get("resolved", False)
+            and not pos["exit_confirmation_pending"]
+        ):
+            if not _reprotect_remaining_live_position(
+                kite,
+                symbol,
+                pos,
+                open_positions,
+            ):
+                return (
+                    f"PARTIAL EXIT ({result}) @ {exit_price:.2f} | "
+                    f"closed {confirmed_qty}/{requested_qty} | "
+                    f"remaining {remaining_qty} | "
+                    "LIVE REPROTECTION UNRESOLVED"
+                )
+
         finalize_terminal_exit_operation()
 
         logger.warning(
@@ -734,43 +3131,194 @@ def check_position_exit(kite, symbol, tokens, exchange_map, open_positions, risk
             f"| unrealized {unrealized:+.2f}")
 
 
+def _is_previous_day_mis_entry(order, cfg, now=None):
+    """Return True when an ENTRY record cannot represent today's MIS exposure.
+
+    MIS positions are intraday-only.  A resolved fill from a previous date may
+    still need an accounting marker, but it must never be reconstructed as a
+    live position on a later trading day.  Aware timestamps are converted to
+    the VM's current timezone; legacy naive timestamps are treated as local.
+    """
+
+    if str(getattr(cfg, "PRODUCT", "")).upper() != "MIS":
+        return False
+
+    created_at = order.get("created_at")
+
+    if not isinstance(created_at, str) or not created_at.strip():
+        return False
+
+    try:
+        created = datetime.fromisoformat(created_at)
+    except (TypeError, ValueError):
+        return False
+
+    current = now or datetime.now().astimezone()
+
+    if created.tzinfo is not None:
+        created = created.astimezone(current.tzinfo)
+
+    return created.date() < current.date()
+
+
 def recover_unresolved_entries(kite, open_positions, cfg, positions_path=None):
     """
-    Stage 3 restart recovery: inspects unresolved ENTRY operations
-    BEFORE any new scanning begins. For orders with a broker order_id,
-    resumes verification and applies only the NEWLY confirmed delta
-    (exec_result.filled_quantity - quantity_already_applied_locally)
-    -- this is what makes repeated recovery cycles idempotent; running
-    this function twice in a row with no new fills applies a delta of
-    zero both times. For intents with NO order_id at all, submission
-    outcome is genuinely unknown -- never blindly resubmitted, only
-    logged as a critical, requiring deliberate reconciliation.
+    Recover tagged submissions, unresolved broker orders, and terminal
+    fills that were verified but not yet applied locally.  Recovery is
+    idempotent and never resubmits an entry.  Legacy no-ID/no-tag intents
+    remain blocked for manual reconciliation.
     """
-    from pending_order_store import list_unresolved_orders, update_order_verification, mark_order_resolved
+    from types import SimpleNamespace
+
+    from executor import reconcile_entry_submission
+    from pending_order_store import (
+        attach_broker_order_id,
+        list_entry_orders_requiring_local_application,
+        list_unresolved_orders,
+        mark_entry_fill_applied,
+        mark_order_resolved,
+        update_order_verification,
+    )
     from order_verification import verify_order_execution
 
-    unresolved_entries = [o for o in list_unresolved_orders() if o["action"] == "ENTRY"]
-    if not unresolved_entries:
-        return
+    unresolved_entries = [
+        order
+        for order in list_unresolved_orders()
+        if order["action"] == "ENTRY"
+    ]
+    unapplied_entries = list_entry_orders_requiring_local_application()
+    candidate_entries = {
+        order["operation_id"]: order
+        for order in unresolved_entries + unapplied_entries
+    }
 
-    logger.info(f"Restart recovery: {len(unresolved_entries)} unresolved ENTRY operation(s) found")
+    entries_by_id = {}
+    stale_unresolved = []
 
-    for op in unresolved_entries:
-        symbol = op["symbol"]
-        if op["order_id"] is None:
-            logger.error(f"CRITICAL: unresolved ENTRY intent for {symbol} has no broker order_id "
-                        f"(operation_id={op['operation_id']}) -- submission outcome is genuinely "
-                        f"unknown. Requires deliberate reconciliation, NOT automatic resubmission. "
-                        f"Leaving unresolved.")
+    for operation_id, order in candidate_entries.items():
+        if not _is_previous_day_mis_entry(order, cfg):
+            entries_by_id[operation_id] = order
             continue
 
-        logger.info(f"Resuming verification for unresolved ENTRY: {symbol} (order_id={op['order_id']})")
-        exec_result = verify_order_execution(
-            kite, op["order_id"], op["requested_quantity"],
-            max_wait_seconds=getattr(cfg, "ORDER_VERIFY_MAX_WAIT_SECONDS", 15),
-            poll_interval_seconds=getattr(cfg, "ORDER_VERIFY_POLL_INTERVAL_SECONDS", 1),
+        confirmed = int(order.get("filled_quantity") or 0)
+        applied = int(order.get("applied_filled_quantity") or 0)
+
+        if not order.get("resolved", False):
+            stale_unresolved.append(order)
+            logger.critical(
+                "Previous-day unresolved MIS ENTRY blocked startup "
+                f"recovery for {order.get('exchange')}:{order.get('symbol')} "
+                f"(operation_id={operation_id}). The record will not be "
+                "verified against today's order book or reconstructed as "
+                "current exposure; manual reconciliation is required."
+            )
+            continue
+
+        if confirmed > applied:
+            mark_entry_fill_applied(
+                operation_id,
+                confirmed,
+            )
+
+        logger.warning(
+            "Previous-day resolved MIS ENTRY suppressed for "
+            f"{order.get('exchange')}:{order.get('symbol')} "
+            f"(operation_id={operation_id}, confirmed={confirmed}, "
+            f"previously_applied={applied}). Historical intraday fills "
+            "will not be reconstructed as today's local position."
         )
-        update_order_verification(op["operation_id"], exec_result)
+
+    if stale_unresolved:
+        symbols = sorted({
+            str(order.get("symbol") or "UNKNOWN")
+            for order in stale_unresolved
+        })
+        raise RuntimeError(
+            "previous-day unresolved MIS ENTRY records require manual "
+            f"reconciliation before startup: {symbols}"
+        )
+
+    if not entries_by_id:
+        return
+
+    logger.info(
+        "Restart recovery: %s ENTRY operation(s) require verification "
+        "or local fill application",
+        len(entries_by_id),
+    )
+
+    protective_store_path = (
+        f"{positions_path}.protective_stops"
+        if positions_path is not None
+        else None
+    )
+
+    for op in entries_by_id.values():
+        symbol = op["symbol"]
+        if op["order_id"] is None:
+            client_tag = op.get("client_tag")
+
+            if not client_tag:
+                logger.error(
+                    f"CRITICAL: unresolved legacy ENTRY intent for {symbol} "
+                    "has no order_id or client tag; manual reconciliation "
+                    "is required and no resubmission will occur"
+                )
+                continue
+
+            reconciliation = reconcile_entry_submission(
+                kite,
+                client_tag=client_tag,
+                symbol=symbol,
+                exchange=op["exchange"],
+                direction=op["side"],
+                quantity=op["requested_quantity"],
+                product=cfg.PRODUCT,
+                order_type=cfg.ORDER_TYPE_ENTRY,
+                max_wait_seconds=getattr(
+                    cfg,
+                    "ENTRY_RECONCILE_MAX_WAIT_SECONDS",
+                    0,
+                ),
+                poll_interval_seconds=getattr(
+                    cfg,
+                    "ENTRY_RECONCILE_POLL_INTERVAL_SECONDS",
+                    1,
+                ),
+            )
+
+            if not reconciliation["matched"]:
+                logger.error(
+                    f"CRITICAL: unresolved ENTRY submission for {symbol} "
+                    f"tag={client_tag}; unique broker match not found. "
+                    "No resubmission will occur."
+                )
+                continue
+
+            op["order_id"] = reconciliation["order_id"]
+            attach_broker_order_id(
+                op["operation_id"],
+                op["order_id"],
+            )
+
+        if not op.get("resolved", False):
+            logger.info(
+                f"Resuming verification for ENTRY: {symbol} "
+                f"(order_id={op['order_id']})"
+            )
+            exec_result = verify_order_execution(
+                kite, op["order_id"], op["requested_quantity"],
+                max_wait_seconds=getattr(cfg, "ORDER_VERIFY_MAX_WAIT_SECONDS", 15),
+                poll_interval_seconds=getattr(cfg, "ORDER_VERIFY_POLL_INTERVAL_SECONDS", 1),
+            )
+            update_order_verification(op["operation_id"], exec_result)
+        else:
+            exec_result = SimpleNamespace(
+                status=op.get("last_known_status"),
+                filled_quantity=int(op.get("filled_quantity") or 0),
+                average_price=op.get("average_price"),
+                terminal=bool(op.get("terminal")),
+            )
 
         already_applied = open_positions.get(symbol, {}).get("filled_quantity", 0)
         newly_confirmed = exec_result.filled_quantity - already_applied
@@ -782,26 +3330,73 @@ def recover_unresolved_entries(kite, open_positions, cfg, positions_path=None):
                 if exec_result.average_price is not None:
                     open_positions[symbol]["entry"] = exec_result.average_price
                     open_positions[symbol]["entry_average_price"] = exec_result.average_price
+
+                protected_quantity = int(
+                    open_positions[symbol].get(
+                        "protective_stop_quantity",
+                        0,
+                    )
+                    or 0
+                )
+
+                if protected_quantity < exec_result.filled_quantity:
+                    open_positions[symbol]["entry_protected"] = False
+                    open_positions[symbol]["protective_stop_state"] = (
+                        "PROTECTION_QUANTITY_MISMATCH"
+                    )
+                    open_positions[symbol]["manual_reconciliation_required"] = True
+                    open_positions[symbol]["automated_exit_blocked"] = True
                 logger.info(f"Recovery applied +{newly_confirmed} newly confirmed shares to existing "
                             f"{symbol} position (total filled_quantity now {exec_result.filled_quantity})")
             else:
-                logger.error(f"CRITICAL: recovered a filled position for {symbol} with NO local "
-                            f"record before restart -- stop/target are UNKNOWN, requires MANUAL review")
-                open_positions[symbol] = {
-                    "direction": op["side"], "qty": exec_result.filled_quantity,
-                    "entry": exec_result.average_price, "stop": None, "target": None,
-                    "exchange": op["exchange"], "peak_price": exec_result.average_price, "tight_mode": False,
-                    "entry_time": op["created_at"], "entry_order_id": op["order_id"],
-                    "entry_operation_id": op["operation_id"], "requested_quantity": op["requested_quantity"],
-                    "filled_quantity": exec_result.filled_quantity, "entry_fill_status": exec_result.status,
-                    "entry_average_price": exec_result.average_price,
-                    "entry_confirmation_pending": not exec_result.terminal,
-                    "entry_status_message": "recovered after restart with no prior local record -- "
-                                             "stop/target unknown, requires manual review",
-                }
+                open_positions[symbol] = build_recovered_position(
+                    op,
+                    exec_result,
+                    cfg,
+                )
+
+            save_positions(
+                open_positions,
+                positions_path=positions_path,
+            )
+            mark_entry_fill_applied(
+                op["operation_id"],
+                exec_result.filled_quantity,
+            )
+
+            position = open_positions[symbol]
+
+            if (
+                not position.get("manual_reconciliation_required")
+                and not position.get("protective_stop_operation_id")
+            ):
+                protect_confirmed_position(
+                    kite,
+                    symbol,
+                    position,
+                    cfg,
+                    store_path=protective_store_path,
+                )
+                save_positions(
+                    open_positions,
+                    positions_path=positions_path,
+                )
         elif newly_confirmed == 0:
             logger.info(f"Recovery for {symbol}: no NEW fills since last check "
                         f"(idempotent, filled_quantity still {exec_result.filled_quantity})")
+
+            local_quantity = int(
+                open_positions.get(symbol, {}).get(
+                    "filled_quantity",
+                    0,
+                )
+                or 0
+            )
+            if local_quantity >= exec_result.filled_quantity:
+                mark_entry_fill_applied(
+                    op["operation_id"],
+                    exec_result.filled_quantity,
+                )
 
         if exec_result.terminal:
             mark_order_resolved(op["operation_id"], resolution_reason=exec_result.status)
@@ -814,6 +3409,77 @@ def recover_unresolved_entries(kite, open_positions, cfg, positions_path=None):
                            f"({exec_result.status})")
 
     save_positions(open_positions, positions_path=positions_path)
+
+
+def recover_unresolved_protective_stops(
+    kite,
+    open_positions,
+    cfg,
+    *,
+    positions_path=None,
+    store_path=None,
+):
+    """Recover durable stop intents without submitting another stop."""
+
+    changed = False
+
+    records = list_unresolved_protective_stops(store_path)
+    symbols_with_records = {
+        (record["exchange"], record["symbol"])
+        for record in records
+    }
+
+    for record in records:
+        symbol = record["symbol"]
+        position = open_positions.get(symbol)
+
+        if position is None:
+            logger.critical(
+                f"Protective stop exists for {symbol} without a local "
+                "position; manual reconciliation required"
+            )
+            continue
+
+        result = recover_protective_stop(
+            kite,
+            record,
+            cfg,
+            store_path=store_path,
+        )
+        apply_protective_stop_result(position, result)
+        changed = True
+
+        if not position.get("entry_protected"):
+            logger.critical(
+                f"{symbol}: protective-stop recovery remains unresolved "
+                f"| state={position.get('protective_stop_state')}"
+            )
+
+    # A crash can occur after the confirmed position is persisted but
+    # immediately before place_protective_stop() creates its durable intent.
+    # PENDING + no store record proves there was no stop-side broker call,
+    # because the stop engine always fsyncs its intent before submission.
+    for symbol, position in open_positions.items():
+        key = (position.get("exchange", "NSE"), symbol)
+
+        if needs_initial_stop_recovery(
+            position,
+            has_store_record=key in symbols_with_records,
+        ):
+            protect_confirmed_position(
+                kite,
+                symbol,
+                position,
+                cfg,
+                store_path=store_path,
+            )
+            changed = True
+
+    if changed:
+        save_positions(
+            open_positions,
+            positions_path=positions_path,
+        )
 
 
 
@@ -870,6 +3536,10 @@ def apply_force_exit_result(
         exit_result.get("reason")
     )
     position["force_exit_reason"] = "square_off"
+
+    if not cfg.PAPER_TRADING:
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
 
     def finalize_terminal_force_exit():
         operation_id = exit_result.get(
@@ -1027,6 +3697,7 @@ def apply_force_exit_result(
         exchange=exchange,
         gross_pnl=gross_pnl,
         costs=costs,
+        analytics=_trade_analytics_from_position(position),
     )
 
     position[
@@ -1133,6 +3804,21 @@ def recover_unresolved_exits(
         )
 
         if order_id is None:
+            position = open_positions.get(symbol)
+
+            if position is not None:
+                position["automated_exit_blocked"] = True
+                position["manual_reconciliation_required"] = True
+                position["exit_confirmation_pending"] = True
+                position["exit_status_message"] = (
+                    "exit submission outcome is unknown; broker order "
+                    "ID is unavailable"
+                )
+                save_positions(
+                    open_positions,
+                    positions_path=positions_path,
+                )
+
             logger.error(
                 f"CRITICAL: unresolved EXIT intent for {symbol} "
                 f"has no broker order_id "
@@ -1238,6 +3924,17 @@ def recover_unresolved_exits(
         )
 
         if newly_confirmed < 0:
+            position["automated_exit_blocked"] = True
+            position["manual_reconciliation_required"] = True
+            position["exit_status_message"] = (
+                "broker cumulative exit quantity is below the "
+                "quantity already applied locally"
+            )
+            save_positions(
+                open_positions,
+                positions_path=positions_path,
+            )
+
             logger.error(
                 f"CRITICAL: EXIT recovery quantity moved backwards "
                 f"for {symbol}: broker total={total_confirmed}, "
@@ -1259,6 +3956,7 @@ def recover_unresolved_exits(
             )
 
             position["manual_reconciliation_required"] = True
+            position["automated_exit_blocked"] = True
             position["exit_status_message"] = (
                 "broker exit fill exceeds local remaining quantity"
             )
@@ -1280,6 +3978,11 @@ def recover_unresolved_exits(
         position["exit_status_message"] = (
             execution.status_message
         )
+        # The broker-side protective stop was terminal before this
+        # market order was submitted. If any local quantity remains,
+        # automatic retry would be an unprotected duplicate-exit risk.
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
 
         if newly_confirmed == 0:
             save_positions(
@@ -1288,6 +3991,25 @@ def recover_unresolved_exits(
             )
 
             if execution.terminal:
+                exit_reason = position.get("exit_reason")
+                if (
+                    exit_reason == "hybrid_scalp_1r"
+                    and int(position.get("qty") or 0) > 0
+                ):
+                    if not _reprotect_remaining_live_position(
+                        kite,
+                        symbol,
+                        position,
+                        open_positions,
+                        positions_path=positions_path,
+                    ):
+                        logger.critical(
+                            "%s: recovered hybrid exit is terminal but "
+                            "remaining exposure is not reprotected; EXIT "
+                            "operation stays unresolved",
+                            symbol,
+                        )
+                        continue
                 mark_order_resolved(
                     operation_id,
                     resolution_reason=execution.status,
@@ -1467,6 +4189,7 @@ def recover_unresolved_exits(
             exchange=exchange,
             gross_pnl=gross_pnl,
             costs=costs,
+            analytics=_trade_analytics_from_position(position),
         )
 
         remaining_quantity = (
@@ -1485,6 +4208,14 @@ def recover_unresolved_exits(
         )
         position["last_exit_pnl"] = pnl
 
+        apply_confirmed_hybrid_fill(
+            position,
+            reason=exit_reason,
+            confirmed_quantity=newly_confirmed,
+            exit_price=incremental_exit_price,
+            net_pnl=pnl,
+        )
+
         if remaining_quantity == 0:
             del open_positions[symbol]
 
@@ -1495,7 +4226,21 @@ def recover_unresolved_exits(
 
         # Resolution happens only after both confirmed P&L and the
         # revised local position have been applied and persisted.
-        if execution.terminal:
+        reprotected = True
+        if (
+            execution.terminal
+            and remaining_quantity > 0
+            and exit_reason == "hybrid_scalp_1r"
+        ):
+            reprotected = _reprotect_remaining_live_position(
+                kite,
+                symbol,
+                position,
+                open_positions,
+                positions_path=positions_path,
+            )
+
+        if execution.terminal and reprotected:
             mark_order_resolved(
                 operation_id,
                 resolution_reason=execution.status,
@@ -1569,6 +4314,21 @@ def recover_unresolved_force_exits(
         )
 
         if order_id is None:
+            position = open_positions.get(symbol)
+
+            if position is not None:
+                position["automated_exit_blocked"] = True
+                position["manual_reconciliation_required"] = True
+                position["force_exit_confirmation_pending"] = True
+                position["force_exit_status_message"] = (
+                    "force-exit submission outcome is unknown; broker "
+                    "order ID is unavailable"
+                )
+                save_positions(
+                    open_positions,
+                    positions_path=positions_path,
+                )
+
             logger.error(
                 f"CRITICAL: unresolved FORCE_EXIT intent for "
                 f"{symbol} has no broker order_id "
@@ -1669,6 +4429,7 @@ def recover_unresolved_force_exits(
         )
 
         if newly_confirmed < 0:
+            position["automated_exit_blocked"] = True
             position[
                 "manual_reconciliation_required"
             ] = True
@@ -1695,6 +4456,7 @@ def recover_unresolved_force_exits(
         )
 
         if newly_confirmed > current_quantity:
+            position["automated_exit_blocked"] = True
             position[
                 "manual_reconciliation_required"
             ] = True
@@ -1729,6 +4491,10 @@ def recover_unresolved_force_exits(
             execution.status_message
         )
         position["force_exit_reason"] = "square_off"
+        # Once the coordinated stop is terminal, any remaining live
+        # quantity must not be blindly retried by another market exit.
+        position["automated_exit_blocked"] = True
+        position["manual_reconciliation_required"] = True
 
         if newly_confirmed == 0:
             save_positions(
@@ -1926,6 +4692,7 @@ def recover_unresolved_force_exits(
             exchange=exchange,
             gross_pnl=gross_pnl,
             costs=costs,
+            analytics=_trade_analytics_from_position(position),
         )
 
         remaining_quantity = (
@@ -1986,6 +4753,16 @@ def run():
     exchange_map = {w["symbol"]: w["exchange"] for w in cfg.WATCHLIST}
     tokens = {s: get_instrument_token(kite, s, exchange_map[s]) for s in symbols}
 
+    # --- Optional WS shadow engine (opt-in, cfg.ENABLE_WS_CANDLES) ---
+    # Runs entirely independently of the REST-based loop below via its
+    # own background thread; never touches run_full_scan(), evaluate(),
+    # or order placement. See ws_integration.py. A no-op (returns None
+    # immediately) when cfg.ENABLE_WS_CANDLES is False, the default.
+    ws_shadow_engine = None
+    if getattr(cfg, "ENABLE_WS_CANDLES", False):
+        from ws_integration import start_ws_shadow_engine
+        ws_shadow_engine = start_ws_shadow_engine(kite, symbols, tokens, exchange_map)
+
     # --- Restore any open positions from before a crash/restart today ---
     open_positions = load_positions()
     if open_positions:
@@ -2003,6 +4780,11 @@ def run():
 
     if not cfg.PAPER_TRADING:
         recover_unresolved_entries(
+            kite,
+            open_positions,
+            cfg,
+        )
+        recover_unresolved_protective_stops(
             kite,
             open_positions,
             cfg,
@@ -2057,210 +4839,262 @@ def run():
                       "Refusing to start. Re-run auth.py and restart.")
         return
 
+    effective_position_check_seconds = float(cfg.POSITION_CHECK_SECONDS)
+    # Live hardening: cap position reconciliation/exit checks at 5s.
+    effective_position_check_seconds = min(effective_position_check_seconds, 5.0)
+
     if cfg.ENABLE_CANDLE_ALIGNED_POLLING:
         logger.info(f"Candle-aligned polling ENABLED | entry timeframe: {cfg.ENTRY_TIMEFRAME} | "
-                    f"position check every {cfg.POSITION_CHECK_SECONDS}s | "
+                    f"position check every {effective_position_check_seconds:g}s | "
                     f"scan buffer: {cfg.SCAN_BUFFER_SECONDS}s")
+
     scan_guard = ScanGuard()
 
-    while True:
-        now = datetime.now()
+    try:
+        while True:
+            now = datetime.now()
 
-        # Force square-off at end of day regardless
-        # of signals. Only broker-confirmed quantities are
-        # removed locally.
-        if past_square_off():
-            for symbol, pos in list(
-                open_positions.items()
-            ):
-                logger.info(
-                    f"Force square-off: {symbol}"
-                )
-
-                exchange = pos.get(
-                    "exchange",
-                    exchange_map.get(symbol, "NSE"),
-                )
-                token = tokens[symbol]
-
-                try:
-                    df_5m = fetch_candles(
-                        kite,
-                        token,
-                        cfg.ENTRY_TIMEFRAME,
-                        lookback_days=1,
-                        trim_incomplete=False,
+            # Force square-off at end of day regardless
+            # of signals. Only broker-confirmed quantities are
+            # removed locally.
+            if past_square_off():
+                for symbol, pos in list(
+                    open_positions.items()
+                ):
+                    logger.info(
+                        f"Force square-off: {symbol}"
                     )
-                    last_price = (
-                        df_5m.iloc[-1]["close"]
-                        if not df_5m.empty
-                        else pos["entry"]
+
+                    exchange = pos.get(
+                        "exchange",
+                        exchange_map.get(symbol, "NSE"),
                     )
-                except Exception:
-                    last_price = pos["entry"]
+                    token = tokens[symbol]
 
-                requested_quantity = int(
-                    pos["qty"]
-                )
+                    try:
+                        df_5m = fetch_candles(
+                            kite,
+                            token,
+                            cfg.ENTRY_TIMEFRAME,
+                            lookback_days=1,
+                            trim_incomplete=False,
+                        )
+                        last_price = (
+                            df_5m.iloc[-1]["close"]
+                            if not df_5m.empty
+                            else pos["entry"]
+                        )
+                    except Exception:
+                        last_price = pos["entry"]
 
-                force_result = (
-                    place_force_exit_order(
+                    preparation = _prepare_protective_stop_for_exit(
                         kite,
                         symbol,
-                        pos["direction"],
-                        requested_quantity,
+                        pos,
+                        open_positions,
+                        risk,
                         exchange,
-                        cfg,
+                        "FORCE_EXIT",
+                        "square_off",
+                        int(pos.get("qty") or 0),
                     )
-                )
 
-                status = apply_force_exit_result(
-                    symbol,
-                    pos,
-                    force_result,
-                    open_positions,
-                    risk,
-                    exchange,
-                    last_price,
-                )
+                    if preparation["position_closed"]:
+                        logger.info(
+                            f"Force square-off for {exchange}:{symbol} "
+                            "was already completed by the protective stop"
+                        )
+                        continue
+
+                    if not preparation["proceed"]:
+                        logger.critical(
+                            f"Force square-off blocked for "
+                            f"{exchange}:{symbol}: protective_stop="
+                            f"{preparation['status']}"
+                        )
+                        continue
+
+                    pos = open_positions[symbol]
+                    requested_quantity = int(pos["qty"])
+
+                    force_result = (
+                        place_force_exit_order(
+                            kite,
+                            symbol,
+                            pos["direction"],
+                            requested_quantity,
+                            exchange,
+                            cfg,
+                            protection_clearance=(
+                                preparation["clearance"]
+                            ),
+                        )
+                    )
+
+                    status = apply_force_exit_result(
+                        symbol,
+                        pos,
+                        force_result,
+                        open_positions,
+                        risk,
+                        exchange,
+                        last_price,
+                    )
+
+                    logger.info(
+                        f"Force square-off result for "
+                        f"{exchange}:{symbol}: {status}"
+                    )
+
+                if open_positions:
+                    save_positions(open_positions)
+
+                    logger.critical(
+                        "Trading day ended with unresolved "
+                        "or partially closed positions still "
+                        f"persisted: "
+                        f"{list(open_positions.keys())}. "
+                        "They will be reconciled by restart "
+                        "recovery; positions were NOT cleared."
+                    )
+                else:
+                    clear_positions()
 
                 logger.info(
-                    f"Force square-off result for "
-                    f"{exchange}:{symbol}: {status}"
+                    "Trading day complete. Exiting."
                 )
+                break
 
-            if open_positions:
-                save_positions(open_positions)
+            if not cfg.ENABLE_CANDLE_ALIGNED_POLLING:
+                # --- ORIGINAL BEHAVIOR, byte-for-byte unchanged ---
+                status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk, ws_shadow_engine=ws_shadow_engine)
+                try:
+                    todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
+                    prev_status = load_bot_status()
+                    pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
+                        kite, cfg, open_positions, symbols, start_time,
+                        previous_bot_status=prev_status, todays_trades=todays_trades)
+                    save_bot_status(status_this_cycle, positions=pos_analytics,
+                                    portfolio_summary=portfolio_sum, session_summary=session_sum, health=health)
+                except Exception as e:
+                    logger.warning(f"Analytics snapshot failed this cycle, saving basic status only: {e}")
+                    save_bot_status(status_this_cycle)
 
-                logger.critical(
-                    "Trading day ended with unresolved "
-                    "or partially closed positions still "
-                    f"persisted: "
-                    f"{list(open_positions.keys())}. "
-                    "They will be reconciled by restart "
-                    "recovery; positions were NOT cleared."
+                if risk.day.halted:
+                    logger.warning(f"Trading halted (no new entries, still managing open positions): {risk.day.halt_reason}")
+
+                time.sleep(POLL_SECONDS)
+                continue
+
+            # --- NEW: candle-aligned scheduler ---
+            interval_min = candle_interval_minutes(cfg.ENTRY_TIMEFRAME)
+            target_scan_time = next_scan_time(datetime.now(), interval_min, cfg.SCAN_BUFFER_SECONDS)
+
+            # Position-monitor sub-loop: lightweight checks only, until it's
+            # time for the next full scan (or the trading day ends).
+            while datetime.now() < target_scan_time and not past_square_off():
+                if open_positions:
+                    pc_start = time.time()
+                    for sym in list(open_positions.keys()):
+                        check_position_exit(kite, sym, tokens, exchange_map, open_positions, risk)
+                    pc_elapsed = time.time() - pc_start
+
+                    if pc_elapsed > cfg.POSITION_CHECK_CRITICAL_SECONDS:
+                        logger.error(f"CRITICAL: position check took {pc_elapsed:.1f}s "
+                                     f"(threshold {cfg.POSITION_CHECK_CRITICAL_SECONDS}s) -- "
+                                     f"possible API/network degradation")
+                    elif pc_elapsed > cfg.POSITION_CHECK_WARNING_SECONDS:
+                        logger.warning(f"Position check took {pc_elapsed:.1f}s "
+                                       f"(threshold {cfg.POSITION_CHECK_WARNING_SECONDS}s)")
+
+                    remaining = max(0, (target_scan_time - datetime.now()).total_seconds())
+                    logger.info(f"Position monitor cycle | {len(open_positions)} open "
+                                f"({', '.join(open_positions.keys())}) | next scan in {remaining:.0f}s")
+                else:
+                    logger.info("No open positions.")
+
+                try:
+                    todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
+                    prev_status = load_bot_status()
+                    pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
+                        kite, cfg, open_positions, symbols, start_time,
+                        previous_bot_status=prev_status, todays_trades=todays_trades)
+                    previous_symbols = (
+                        prev_status.get("symbols", [])
+                        if isinstance(prev_status, dict)
+                        else []
+                    )
+                    save_bot_status(previous_symbols, positions=pos_analytics,
+                                    portfolio_summary=portfolio_sum,
+                                    session_summary=session_sum, health=health)
+                except Exception as e:
+                    logger.warning(f"Analytics snapshot failed this position-monitor cycle: {e}")
+
+                sleep_for = min(effective_position_check_seconds,
+                                 max(0, (target_scan_time - datetime.now()).total_seconds()))
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+
+            if past_square_off():
+                continue  # let the top of the loop handle force square-off
+
+            # Time for the full scan -- but guard against scanning the same
+            # completed candle twice (e.g. if we looped back around fast).
+            current_candle = last_completed_candle_close(datetime.now(), interval_min)
+            if scan_guard.should_scan(current_candle):
+                scan_delay = (datetime.now() - target_scan_time).total_seconds()
+                if scan_delay > cfg.SCAN_DELAY_CRITICAL_SECONDS:
+                    logger.error(f"CRITICAL: full scan starting {scan_delay:.0f}s late "
+                                 f"(threshold {cfg.SCAN_DELAY_CRITICAL_SECONDS}s) -- "
+                                 f"scheduler may be falling behind")
+                elif scan_delay > cfg.SCAN_DELAY_WARNING_SECONDS:
+                    logger.warning(f"Full scan starting {scan_delay:.0f}s late "
+                                   f"(threshold {cfg.SCAN_DELAY_WARNING_SECONDS}s)")
+
+                logger.info(
+                    f"Entry scan starting ({cfg.ENTRY_TIMEFRAME} candle) | "
+                    f"last completed candle: {current_candle.strftime('%H:%M')}"
+                )
+                scan_start = time.time()
+                status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk, ws_shadow_engine=ws_shadow_engine)
+                scan_elapsed = time.time() - scan_start
+                try:
+                    todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
+                    prev_status = load_bot_status()
+                    pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
+                        kite, cfg, open_positions, symbols, start_time,
+                        previous_bot_status=prev_status, todays_trades=todays_trades)
+                    save_bot_status(status_this_cycle, positions=pos_analytics,
+                                    portfolio_summary=portfolio_sum, session_summary=session_sum, health=health)
+                except Exception as e:
+                    logger.warning(f"Analytics snapshot failed this cycle, saving basic status only: {e}")
+                    save_bot_status(status_this_cycle)
+                scan_guard.mark_scanned(current_candle)
+
+                if scan_elapsed > cfg.SCHEDULER_CRITICAL_SCAN_SECONDS:
+                    logger.error(f"CRITICAL: full scan took {scan_elapsed:.1f}s "
+                                 f"(threshold {cfg.SCHEDULER_CRITICAL_SCAN_SECONDS}s) -- "
+                                 f"consider reducing watchlist size or investigating API latency")
+                elif scan_elapsed > cfg.SCHEDULER_WARNING_SCAN_SECONDS:
+                    logger.warning(f"Full scan took {scan_elapsed:.1f}s "
+                                   f"(threshold {cfg.SCHEDULER_WARNING_SCAN_SECONDS}s)")
+
+                next_target = next_scan_time(datetime.now(), interval_min, cfg.SCAN_BUFFER_SECONDS)
+                logger.info(
+                    f"Entry scan completed ({cfg.ENTRY_TIMEFRAME} candle) | "
+                    f"took {scan_elapsed:.1f}s | next scan: "
+                    f"{next_target.strftime('%H:%M:%S')}"
                 )
             else:
-                clear_positions()
-
-            logger.info(
-                "Trading day complete. Exiting."
-            )
-            break
-
-        if not cfg.ENABLE_CANDLE_ALIGNED_POLLING:
-            # --- ORIGINAL BEHAVIOR, byte-for-byte unchanged ---
-            status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk)
-            try:
-                todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
-                prev_status = load_bot_status()
-                pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
-                    kite, cfg, open_positions, symbols, start_time,
-                    previous_bot_status=prev_status, todays_trades=todays_trades)
-                save_bot_status(status_this_cycle, positions=pos_analytics,
-                                portfolio_summary=portfolio_sum, session_summary=session_sum, health=health)
-            except Exception as e:
-                logger.warning(f"Analytics snapshot failed this cycle, saving basic status only: {e}")
-                save_bot_status(status_this_cycle)
+                logger.info(f"Skipped duplicate scan for candle {current_candle.strftime('%H:%M')}")
 
             if risk.day.halted:
                 logger.warning(f"Trading halted (no new entries, still managing open positions): {risk.day.halt_reason}")
 
-            time.sleep(POLL_SECONDS)
-            continue
 
-        # --- NEW: candle-aligned scheduler ---
-        interval_min = candle_interval_minutes(cfg.ENTRY_TIMEFRAME)
-        target_scan_time = next_scan_time(datetime.now(), interval_min, cfg.SCAN_BUFFER_SECONDS)
-
-        # Position-monitor sub-loop: lightweight checks only, until it's
-        # time for the next full scan (or the trading day ends).
-        while datetime.now() < target_scan_time and not past_square_off():
-            if open_positions:
-                pc_start = time.time()
-                for sym in list(open_positions.keys()):
-                    check_position_exit(kite, sym, tokens, exchange_map, open_positions, risk)
-                pc_elapsed = time.time() - pc_start
-
-                if pc_elapsed > cfg.POSITION_CHECK_CRITICAL_SECONDS:
-                    logger.error(f"CRITICAL: position check took {pc_elapsed:.1f}s "
-                                 f"(threshold {cfg.POSITION_CHECK_CRITICAL_SECONDS}s) -- "
-                                 f"possible API/network degradation")
-                elif pc_elapsed > cfg.POSITION_CHECK_WARNING_SECONDS:
-                    logger.warning(f"Position check took {pc_elapsed:.1f}s "
-                                   f"(threshold {cfg.POSITION_CHECK_WARNING_SECONDS}s)")
-
-                remaining = max(0, (target_scan_time - datetime.now()).total_seconds())
-                logger.info(f"Position monitor cycle | {len(open_positions)} open "
-                            f"({', '.join(open_positions.keys())}) | next scan in {remaining:.0f}s")
-            else:
-                logger.info("No open positions.")
-
-            try:
-                todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
-                prev_status = load_bot_status()
-                pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
-                    kite, cfg, open_positions, symbols, start_time,
-                    previous_bot_status=prev_status, todays_trades=todays_trades)
-                save_bot_status([], positions=pos_analytics, portfolio_summary=portfolio_sum,
-                                session_summary=session_sum, health=health)
-            except Exception as e:
-                logger.warning(f"Analytics snapshot failed this position-monitor cycle: {e}")
-
-            sleep_for = min(cfg.POSITION_CHECK_SECONDS,
-                             max(0, (target_scan_time - datetime.now()).total_seconds()))
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-
-        if past_square_off():
-            continue  # let the top of the loop handle force square-off
-
-        # Time for the full scan -- but guard against scanning the same
-        # completed candle twice (e.g. if we looped back around fast).
-        current_candle = last_completed_candle_close(datetime.now(), interval_min)
-        if scan_guard.should_scan(current_candle):
-            scan_delay = (datetime.now() - target_scan_time).total_seconds()
-            if scan_delay > cfg.SCAN_DELAY_CRITICAL_SECONDS:
-                logger.error(f"CRITICAL: full scan starting {scan_delay:.0f}s late "
-                             f"(threshold {cfg.SCAN_DELAY_CRITICAL_SECONDS}s) -- "
-                             f"scheduler may be falling behind")
-            elif scan_delay > cfg.SCAN_DELAY_WARNING_SECONDS:
-                logger.warning(f"Full scan starting {scan_delay:.0f}s late "
-                               f"(threshold {cfg.SCAN_DELAY_WARNING_SECONDS}s)")
-
-            logger.info(f"Entry scan starting (5-minute candle) | last completed candle: {current_candle.strftime('%H:%M')}")
-            scan_start = time.time()
-            status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk)
-            scan_elapsed = time.time() - scan_start
-            try:
-                todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))
-                prev_status = load_bot_status()
-                pos_analytics, portfolio_sum, session_sum, health = build_full_analytics_snapshot(
-                    kite, cfg, open_positions, symbols, start_time,
-                    previous_bot_status=prev_status, todays_trades=todays_trades)
-                save_bot_status(status_this_cycle, positions=pos_analytics,
-                                portfolio_summary=portfolio_sum, session_summary=session_sum, health=health)
-            except Exception as e:
-                logger.warning(f"Analytics snapshot failed this cycle, saving basic status only: {e}")
-                save_bot_status(status_this_cycle)
-            scan_guard.mark_scanned(current_candle)
-
-            if scan_elapsed > cfg.SCHEDULER_CRITICAL_SCAN_SECONDS:
-                logger.error(f"CRITICAL: full scan took {scan_elapsed:.1f}s "
-                             f"(threshold {cfg.SCHEDULER_CRITICAL_SCAN_SECONDS}s) -- "
-                             f"consider reducing watchlist size or investigating API latency")
-            elif scan_elapsed > cfg.SCHEDULER_WARNING_SCAN_SECONDS:
-                logger.warning(f"Full scan took {scan_elapsed:.1f}s "
-                               f"(threshold {cfg.SCHEDULER_WARNING_SCAN_SECONDS}s)")
-
-            next_target = next_scan_time(datetime.now(), interval_min, cfg.SCAN_BUFFER_SECONDS)
-            logger.info(f"Entry scan completed (5-minute candle) | took {scan_elapsed:.1f}s | next scan: {next_target.strftime('%H:%M:%S')}")
-        else:
-            logger.info(f"Skipped duplicate scan for candle {current_candle.strftime('%H:%M')}")
-
-        if risk.day.halted:
-            logger.warning(f"Trading halted (no new entries, still managing open positions): {risk.day.halt_reason}")
-
+    finally:
+        if ws_shadow_engine is not None:
+            ws_shadow_engine.stop()
 
 if __name__ == "__main__":
     run()

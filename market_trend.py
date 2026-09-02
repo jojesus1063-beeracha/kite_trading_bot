@@ -28,24 +28,48 @@ SECTOR_INDEX_TOKENS = {
 # Watchlist symbol -> sector index tradingsymbol. Manually maintained --
 # Kite does not provide this mapping. Symbols not listed here have no
 # sector-level trend (get_sector_trend falls back to "Sideways").
+#
+# The August 2026 expansion uses the official Nifty 500 industry
+# classification and maps a symbol only when an existing, broker-verified
+# sector token is an exact sector match. NIFTY INFRA is limited to the
+# telecom, shipping, port and railway groups explicitly covered by that
+# index. Unsupported industries remain deliberately unmapped instead of
+# being assigned to a convenient but misleading proxy.
 SECTOR_MAP = {
     "HDFCBANK": "NIFTY BANK", "ICICIBANK": "NIFTY BANK", "AXISBANK": "NIFTY BANK",
     "KOTAKBANK": "NIFTY BANK", "SBIN": "NIFTY BANK", "INDUSINDBK": "NIFTY BANK",
-    "BANDHANBNK": "NIFTY BANK", "IDFCFIRSTB": "NIFTY BANK",
+    "BANDHANBNK": "NIFTY BANK", "IDFCFIRSTB": "NIFTY BANK", "FEDERALBNK": "NIFTY BANK",
     "PNB": "NIFTY PSU BANK", "CANBK": "NIFTY PSU BANK", "UNIONBANK": "NIFTY PSU BANK",
     "TCS": "NIFTY IT", "INFY": "NIFTY IT", "HCLTECH": "NIFTY IT", "WIPRO": "NIFTY IT",
-    "TECHM": "NIFTY IT",
+    "TECHM": "NIFTY IT", "CYIENT": "NIFTY IT", "NETWEB": "NIFTY IT",
     "MARUTI": "NIFTY AUTO", "TVSMOTOR": "NIFTY AUTO", "EICHERMOT": "NIFTY AUTO",
     "HEROMOTOCO": "NIFTY AUTO", "M&M": "NIFTY AUTO", "BAJAJ-AUTO": "NIFTY AUTO",
+    "ATHERENERG": "NIFTY AUTO", "RKFORGE": "NIFTY AUTO", "EXIDEIND": "NIFTY AUTO",
+    "GABRIEL": "NIFTY AUTO",
     "SUNPHARMA": "NIFTY PHARMA", "DRREDDY": "NIFTY PHARMA", "CIPLA": "NIFTY PHARMA",
-    "TATASTEEL": "NIFTY METAL", "JSWSTEEL": "NIFTY METAL",
+    "TATASTEEL": "NIFTY METAL", "JSWSTEEL": "NIFTY METAL", "GMDCLTD": "NIFTY METAL",
+    "SAIL": "NIFTY METAL", "NATIONALUM": "NIFTY METAL", "JAINREC": "NIFTY METAL",
+    "HINDZINC": "NIFTY METAL", "VEDL": "NIFTY METAL", "GRAVITA": "NIFTY METAL",
     "ONGC": "NIFTY ENERGY", "NTPC": "NIFTY ENERGY", "POWERGRID": "NIFTY ENERGY",
+    "CHENNPETRO": "NIFTY ENERGY", "TORNTPOWER": "NIFTY ENERGY",
     "ITC": "NIFTY FMCG", "HINDUNILVR": "NIFTY FMCG", "NESTLEIND": "NIFTY FMCG",
-    "BRIGADE": "NIFTY REALTY",
+    "GODFRYPHLP": "NIFTY FMCG", "DOMS": "NIFTY FMCG", "DABUR": "NIFTY FMCG",
+    "BALRAMCHIN": "NIFTY FMCG", "LTFOODS": "NIFTY FMCG",
+    "BRIGADE": "NIFTY REALTY", "DLF": "NIFTY REALTY", "PRESTIGE": "NIFTY REALTY",
+    "ZEEL": "NIFTY MEDIA",
     "BAJFINANCE": "NIFTY FIN SERVICE", "BAJAJFINSV": "NIFTY FIN SERVICE",
     "SHRIRAMFIN": "NIFTY FIN SERVICE", "IREDA": "NIFTY FIN SERVICE",
     "IRFC": "NIFTY FIN SERVICE", "HUDCO": "NIFTY FIN SERVICE",
+    "TATAINVEST": "NIFTY FIN SERVICE", "ANANDRATHI": "NIFTY FIN SERVICE",
+    "PINELABS": "NIFTY FIN SERVICE", "LICI": "NIFTY FIN SERVICE",
+    "PAYTM": "NIFTY FIN SERVICE", "GROWW": "NIFTY FIN SERVICE",
+    "CAMS": "NIFTY FIN SERVICE", "CDSL": "NIFTY FIN SERVICE",
+    "NAM-INDIA": "NIFTY FIN SERVICE", "M&MFIN": "NIFTY FIN SERVICE",
+    "PNBHOUSING": "NIFTY FIN SERVICE", "360ONE": "NIFTY FIN SERVICE",
+    "MCX": "NIFTY FIN SERVICE", "MANAPPURAM": "NIFTY FIN SERVICE",
     "LT": "NIFTY INFRA", "NBCC": "NIFTY INFRA", "NCC": "NIFTY INFRA",
+    "SCI": "NIFTY INFRA", "GESHIP": "NIFTY INFRA", "JSWINFRA": "NIFTY INFRA",
+    "HFCL": "NIFTY INFRA", "JWL": "NIFTY INFRA",
 }
 
 TREND_LABELS = {"UP": "Bullish", "DOWN": "Bearish", None: "Sideways"}
@@ -64,28 +88,153 @@ def classify_trend(df_15m: pd.DataFrame, cfg=None) -> str:
     return TREND_LABELS[trend]
 
 
-def _fetch_and_classify(kite, token, cfg) -> str:
-    """Shared fetch->indicators->classify path. Missing data is UNKNOWN."""
+_LAST_MARKET_CANDLES = pd.DataFrame()
+_LAST_SECTOR_CANDLES: dict[str, pd.DataFrame] = {}
+
+
+def clear_relative_strength_cache() -> None:
+    """
+    Clear benchmark snapshots at the beginning of each scan.
+    """
+
+    global _LAST_MARKET_CANDLES
+
+    _LAST_MARKET_CANDLES = pd.DataFrame()
+    _LAST_SECTOR_CANDLES.clear()
+
+
+def get_cached_market_candles() -> pd.DataFrame:
+    return _LAST_MARKET_CANDLES.copy()
+
+
+def get_cached_sector_candles(
+    sector_name: str | None,
+) -> pd.DataFrame:
+    if sector_name is None:
+        return pd.DataFrame()
+
+    candles = _LAST_SECTOR_CANDLES.get(
+        sector_name
+    )
+
+    if candles is None:
+        return pd.DataFrame()
+
+    return candles.copy()
+
+
+def _fetch_classified_context_diagnostic(
+    kite,
+    token,
+    cfg,
+) -> tuple[str, pd.DataFrame, str]:
+    """
+    Fetch, enrich and classify one benchmark with a reason code.
+
+    Missing or failed data resolves to ``UNKNOWN`` so it can never be
+    mistaken for a genuine SIDEWAYS market by the direction policy.
+    """
+
     from data_feed import fetch_candles
+
     try:
-        df_15m = fetch_candles(kite, token, cfg.TREND_TIMEFRAME, lookback_days=5)
-        if df_15m.empty:
-            return "UNKNOWN"
-        df_15m, _ = add_indicators(df_15m, df_15m.copy(), cfg)
-        return classify_trend(df_15m, cfg)
+        df_15m = fetch_candles(
+            kite,
+            token,
+            cfg.TREND_TIMEFRAME,
+            lookback_days=5,
+        )
     except Exception:
-        return "UNKNOWN"
+        return "UNKNOWN", pd.DataFrame(), "FETCH_ERROR"
+
+    if not isinstance(df_15m, pd.DataFrame) or df_15m.empty:
+        return "UNKNOWN", pd.DataFrame(), "EMPTY_DATA"
+
+    try:
+        df_15m, _ = add_indicators(
+            df_15m,
+            df_15m.copy(),
+            cfg,
+        )
+
+        return (
+            classify_trend(
+                df_15m,
+                cfg,
+            ),
+            df_15m,
+            "OK",
+        )
+    except Exception:
+        return "UNKNOWN", pd.DataFrame(), "INDICATOR_ERROR"
+
+
+def _fetch_classified_context(
+    kite,
+    token,
+    cfg,
+) -> tuple[str, pd.DataFrame]:
+    """Backward-compatible context wrapper without diagnostics."""
+
+    trend, candles, _ = _fetch_classified_context_diagnostic(
+        kite,
+        token,
+        cfg,
+    )
+
+    return trend, candles
+
+
+def _fetch_and_classify(
+    kite,
+    token,
+    cfg,
+) -> str:
+    """
+    Backward-compatible trend-only wrapper.
+    """
+
+    trend, _ = _fetch_classified_context(
+        kite,
+        token,
+        cfg,
+    )
+
+    return trend
+
+
+def get_market_trend_diagnostic(
+    kite,
+    cfg,
+) -> tuple[str, str]:
+    """
+    Return Nifty 50 trend plus its diagnostic reason.
+    """
+
+    global _LAST_MARKET_CANDLES
+
+    trend, candles, reason = _fetch_classified_context_diagnostic(
+        kite,
+        NIFTY50_TOKEN,
+        cfg,
+    )
+
+    _LAST_MARKET_CANDLES = candles
+
+    return trend, reason
 
 
 def get_market_trend(kite, cfg) -> str:
     """
-    Fetches live Nifty 50 15m data and classifies it. Isolated: does
-    not touch the trading pipeline, does not affect any signal or
-    confidence yet -- proves the live fetch -> classify path works.
-    Fails safe to "UNKNOWN" on any error so a data failure can never be
-    mistaken for a real SIDEWAYS regime by the direction policy.
+    Backward-compatible Nifty trend-only wrapper.
     """
-    return _fetch_and_classify(kite, NIFTY50_TOKEN, cfg)
+
+    trend, _ = get_market_trend_diagnostic(
+        kite,
+        cfg,
+    )
+
+    return trend
 
 
 def sector_for_symbol(symbol: str):
@@ -93,48 +242,65 @@ def sector_for_symbol(symbol: str):
     return SECTOR_MAP.get(symbol)
 
 
-def get_sector_trend(kite, symbol: str, cfg) -> str:
+def get_sector_trend_diagnostic(
+    kite,
+    symbol: str,
+    cfg,
+) -> tuple[str, str]:
     """
-    Fetches the live sector-index trend for `symbol`'s mapped sector.
-    Falls back to "Sideways" if the symbol has no sector mapping, or
-    on any fetch error -- same fail-safe philosophy as get_market_trend.
-    Still isolated: not wired into the trading pipeline yet.
+    Return a sector trend plus its diagnostic reason.
+
+    Its trend value deliberately preserves the historical public
+    behavior: unmapped and unavailable sectors remain ``Sideways``.
+    ``main.py`` separately keeps its established ``UNKNOWN`` treatment
+    for unmapped symbols when calculating market alignment.
     """
-    sector_name = sector_for_symbol(symbol)
+
+    sector_name = sector_for_symbol(
+        symbol
+    )
+
     if sector_name is None:
-        return "Sideways"
-    token = SECTOR_INDEX_TOKENS.get(sector_name)
+        return "Sideways", "UNMAPPED"
+
+    token = SECTOR_INDEX_TOKENS.get(
+        sector_name
+    )
+
     if token is None:
-        return "Sideways"
-    return _fetch_and_classify(kite, token, cfg)
+        _LAST_SECTOR_CANDLES[
+            sector_name
+        ] = pd.DataFrame()
+
+        return "Sideways", "MISSING_TOKEN"
+
+    trend, candles, reason = _fetch_classified_context_diagnostic(
+        kite,
+        token,
+        cfg,
+    )
+
+    _LAST_SECTOR_CANDLES[
+        sector_name
+    ] = candles
+
+    return trend, reason
 
 
-def compute_market_alignment(direction: str, market_trend: str, sector_trend: str) -> str:
-    """
-    Pure function: compares the trade's direction against market and
-    sector trend, returns "ALIGNED" / "NEUTRAL" / "OPPOSED".
+def get_sector_trend(
+    kite,
+    symbol: str,
+    cfg,
+) -> str:
+    """Backward-compatible sector trend-only wrapper."""
 
-    ALIGNED: both market AND sector trend match the trade direction
-             (Bullish for BUY, Bearish for SELL).
-    OPPOSED: EITHER market OR sector trend actively contradicts the
-             trade direction (the stronger of two negative signals wins
-             -- any real opposition is treated as OPPOSED, not averaged
-             away by a Sideways reading elsewhere).
-    NEUTRAL: everything else (e.g. one Sideways + one matching, or
-             both Sideways) -- no strong signal either way.
+    trend, _ = get_sector_trend_diagnostic(
+        kite,
+        symbol,
+        cfg,
+    )
 
-    Used to adjust Signal.confidence -- never to block a trade outright
-    (that decision belongs to the caller, per the "confidence not
-    filter" design principle).
-    """
-    wanted = "Bullish" if direction == "BUY" else "Bearish"
-    opposed_label = "Bearish" if direction == "BUY" else "Bullish"
-
-    if market_trend == opposed_label or sector_trend == opposed_label:
-        return "OPPOSED"
-    if market_trend == wanted and sector_trend == wanted:
-        return "ALIGNED"
-    return "NEUTRAL"
+    return trend
 
 
 def compute_market_alignment(direction: str, market_trend: str, sector_trend: str) -> str:

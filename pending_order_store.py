@@ -1,9 +1,8 @@
 """
-Stage 2: durable, atomic persistence for unresolved order intents and
-submitted broker order IDs -- so a process restart cannot lose track
-of a live order, or blindly submit a duplicate for the same symbol
-and action. NOT wired into executor.py/main.py yet; this is a
-standalone persistence API for a future stage to integrate.
+Durable, atomic persistence for order intents, broker order IDs and
+locally applied entry-fill quantities.  The executor and restart path
+use this journal to prevent duplicate broker submissions and to recover
+confirmed fills across process failure.
 
 Concurrency: file-level atomic writes (temp file + fsync + os.replace)
 protect against corruption from a single process crashing mid-write.
@@ -173,7 +172,17 @@ def has_unresolved_order(symbol, exchange, action, path=None, _data=None):
     return False
 
 
-def create_order_intent(symbol, exchange, action, side, requested_quantity, path=None):
+def create_order_intent(
+    symbol,
+    exchange,
+    action,
+    side,
+    requested_quantity,
+    path=None,
+    *,
+    client_tag=None,
+    metadata=None,
+):
     """
     Validates inputs, checks idempotency (raises UnresolvedOrderExistsError
     if a blocking unresolved order already exists for this symbol+
@@ -182,6 +191,22 @@ def create_order_intent(symbol, exchange, action, side, requested_quantity, path
     as None -- the intent exists durably BEFORE any broker submission.
     """
     _validate_intent_inputs(symbol, exchange, action, side, requested_quantity)
+
+    if client_tag is not None:
+        if (
+            not isinstance(client_tag, str)
+            or not client_tag
+            or not client_tag.isalnum()
+            or len(client_tag) > 20
+        ):
+            raise InvalidOrderRecordError(
+                "client_tag must be an alphanumeric string no longer than 20 characters"
+            )
+
+    if metadata is None:
+        metadata = {}
+    elif not isinstance(metadata, dict):
+        raise InvalidOrderRecordError("metadata must be a dict")
     p = path if path is not None else STORE_PATH
     with _file_lock(p):
         data = load_pending_orders(p)
@@ -193,9 +218,11 @@ def create_order_intent(symbol, exchange, action, side, requested_quantity, path
             raise DuplicateOperationError(f"operation_id collision: {operation_id}")
         now = datetime.now().isoformat()
         record = {
-            "operation_id": operation_id, "order_id": None, "symbol": symbol, "exchange": exchange,
+            "operation_id": operation_id, "order_id": None, "client_tag": client_tag,
+            "symbol": symbol, "exchange": exchange,
             "action": action, "side": side, "requested_quantity": requested_quantity,
             "filled_quantity": 0, "pending_quantity": requested_quantity, "cancelled_quantity": 0,
+            "applied_filled_quantity": 0, "metadata": dict(metadata),
             "average_price": None, "last_known_status": "INTENT_CREATED", "terminal": False,
             "resolved": False, "status_message": None, "exchange_order_id": None,
             "submitted_at": None, "created_at": now, "last_checked_at": None, "updated_at": now,
@@ -294,3 +321,68 @@ def get_order_by_broker_id(order_id, path=None):
 def list_unresolved_orders(path=None):
     data = load_pending_orders(path)
     return [o for o in data["orders"] if not o["resolved"]]
+
+
+def list_entry_orders_requiring_local_application(path=None):
+    """Return ENTRY records whose confirmed fills are not fully local.
+
+    This deliberately includes terminal/resolved broker orders.  A process
+    can crash after broker verification but before ``open_positions.json``
+    is persisted; the durable order record must still make that fill visible
+    on restart.
+    """
+
+    data = load_pending_orders(path)
+    return [
+        order
+        for order in data["orders"]
+        if order.get("action") == "ENTRY"
+        and int(order.get("filled_quantity") or 0)
+        > int(order.get("applied_filled_quantity") or 0)
+    ]
+
+
+def mark_entry_fill_applied(operation_id, applied_quantity, path=None):
+    """Persist how much of a confirmed ENTRY fill exists in local state."""
+
+    if (
+        not isinstance(applied_quantity, int)
+        or isinstance(applied_quantity, bool)
+        or applied_quantity < 0
+    ):
+        raise InvalidOrderRecordError(
+            "applied_quantity must be a non-negative int"
+        )
+
+    p = path if path is not None else STORE_PATH
+
+    with _file_lock(p):
+        data = load_pending_orders(p)
+        record = _find_by_operation_id(data, operation_id)
+
+        if record is None:
+            raise InvalidOrderRecordError(
+                f"No pending order with operation_id={operation_id}"
+            )
+
+        if record.get("action") != "ENTRY":
+            raise InvalidOrderRecordError(
+                "Only ENTRY operations can record applied fills"
+            )
+
+        confirmed = int(record.get("filled_quantity") or 0)
+        previous = int(record.get("applied_filled_quantity") or 0)
+
+        if applied_quantity < previous:
+            raise InvalidOrderRecordError(
+                "applied entry quantity cannot move backwards"
+            )
+
+        if applied_quantity > confirmed:
+            raise InvalidOrderRecordError(
+                "applied entry quantity exceeds broker-confirmed quantity"
+            )
+
+        record["applied_filled_quantity"] = applied_quantity
+        record["updated_at"] = datetime.now().isoformat()
+        save_pending_orders(data, p)

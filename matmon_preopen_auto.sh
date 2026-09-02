@@ -1,0 +1,54 @@
+#!/bin/bash
+set -u
+
+cd /home/ubuntu/kite_trading_bot
+source venv/bin/activate
+
+LOGDIR="runtime/matmon/preopen"
+mkdir -p "$LOGDIR"
+
+echo "===== MATMON PREOPEN AUTO $(date) ====="
+
+# Try repeatedly until shortly before Matmon startup.
+for attempt in {1..11}; do
+    now=$(date +%H%M%S)
+
+    if [ "$now" -lt 090000 ]; then
+        echo "Outside pre-open window: current time $now is before 09:00:00."
+        echo "Preserving existing Top-120."
+        exit 0
+    fi
+
+    if [ "$now" -ge 091300 ]; then
+        echo "Pre-open cutoff reached before attempt $attempt."
+        echo "Preserving existing Top-120."
+        break
+    fi
+
+    echo
+    echo "Attempt $attempt at $(date)"
+
+    if python3 matmon_preopen_top120.py; then
+        echo "MATMON_PREOPEN_AUTO=PASS"
+        echo "Fresh Top-120 installed."
+        exit 0
+    fi
+
+    echo "Selector not ready; preserving existing Top-120."
+
+    # Don't keep trying beyond the safe window.
+    now=$(date +%H%M%S)
+
+    if [ "$now" -ge 091300 ]; then
+        break
+    fi
+
+    sleep 60
+done
+
+echo
+echo "MATMON_PREOPEN_AUTO=FALLBACK"
+echo "Fresh selector never became valid."
+echo "Existing Top-120 remains in user_config.json."
+echo "Matmon may continue with fallback universe."
+exit 0

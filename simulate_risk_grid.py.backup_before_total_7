@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+
+import csv
+from collections import defaultdict
+from pathlib import Path
+
+import config
+from costs import net_pnl_for_trade
+
+TRADES_FILE = Path(
+    "runtime/ema_threshold_replay/trades.csv"
+)
+
+EMA_LIMIT = 2.00
+DAILY_LOSS_PCT = 0.50
+MAX_TRADES_PER_DAY = 7
+CAPITAL = float(config.CAPITAL)
+
+
+def load_trades():
+    rows = []
+
+    with TRADES_FILE.open() as handle:
+        for row in csv.DictReader(handle):
+            if abs(
+                float(row["ema_limit"]) - EMA_LIMIT
+            ) > 0.0001:
+                continue
+
+            row["entry"] = float(row["entry"])
+            row["exit"] = float(row["exit"])
+            row["stop_loss"] = float(
+                row["stop_loss"]
+            )
+            row["timestamp_key"] = str(
+                row["timestamp"]
+            )
+
+            rows.append(row)
+
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["date"],
+            row["timestamp_key"],
+        ),
+    )
+
+
+def simulate(rows, risk_pct, apply_cap):
+    by_day = defaultdict(list)
+
+    for row in rows:
+        by_day[row["date"]].append(row)
+
+    results = []
+    equity = 0.0
+    equity_peak = 0.0
+    max_drawdown = 0.0
+
+    for date in sorted(by_day):
+        day_net = 0.0
+        day_trades = 0
+
+        for row in by_day[date]:
+            if day_trades >= MAX_TRADES_PER_DAY:
+                break
+
+            if day_net <= -(
+                CAPITAL
+                * DAILY_LOSS_PCT
+                / 100
+            ):
+                break
+
+            entry = row["entry"]
+            exit_price = row["exit"]
+            stop = row["stop_loss"]
+            risk_per_share = abs(entry - stop)
+
+            if risk_per_share <= 0:
+                continue
+
+            risk_amount = (
+                CAPITAL
+                * risk_pct
+                / 100
+            )
+
+            qty_by_risk = int(
+                risk_amount / risk_per_share
+            )
+
+            if apply_cap:
+                qty_by_notional = int(
+                    (CAPITAL * 4.0) / entry
+                )
+
+                quantity = min(
+                    qty_by_risk,
+                    qty_by_notional,
+                )
+            else:
+                quantity = qty_by_risk
+
+            if quantity <= 0:
+                continue
+
+            pnl = net_pnl_for_trade(
+                row["direction"],
+                quantity,
+                entry,
+                exit_price,
+            )
+
+            net = float(pnl["net_pnl"])
+            day_net += net
+            day_trades += 1
+            equity += net
+            equity_peak = max(
+                equity_peak,
+                equity,
+            )
+            max_drawdown = min(
+                max_drawdown,
+                equity - equity_peak,
+            )
+
+            results.append({
+                "date": date,
+                "net": net,
+            })
+
+    wins = sum(
+        row["net"] > 0
+        for row in results
+    )
+
+    losses = sum(
+        row["net"] <= 0
+        for row in results
+    )
+
+    return {
+        "trades": len(results),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": (
+            wins / len(results) * 100
+            if results else 0
+        ),
+        "net_pnl": sum(
+            row["net"]
+            for row in results
+        ),
+        "max_drawdown": max_drawdown,
+    }
+
+
+def money(value):
+    return f"₹{value:,.2f}"
+
+
+trades = load_trades()
+
+print("Capital:", money(CAPITAL))
+print("EMA limit:", EMA_LIMIT, "ATR")
+print("Base trade opportunities:", len(trades))
+print("Daily loss limit:", DAILY_LOSS_PCT, "%")
+print()
+
+print(
+    "Risk   "
+    "Uncapped trades/P&L/DD              "
+    "100%-notional-cap trades/P&L/DD"
+)
+
+for risk_pct in (
+    0.20,
+    0.30,
+    0.40,
+    0.50,
+    0.75,
+    1.00,
+    1.50,
+    2.00,
+    2.50,
+    3.00,
+    4.00,
+    5.00,
+    6.00,
+    7.00,
+    8.00,
+    9.00,
+    10.00,
+):
+    theoretical = simulate(
+        trades,
+        risk_pct,
+        apply_cap=False,
+    )
+
+    capped = simulate(
+        trades,
+        risk_pct,
+        apply_cap=True,
+    )
+
+    print(
+        f"{risk_pct:>3}%   "
+        f"{theoretical['trades']:>2} trades  "
+        f"{money(theoretical['net_pnl']):>13}  "
+        f"DD {money(theoretical['max_drawdown']):>13}   "
+        f"{capped['trades']:>2} trades  "
+        f"{money(capped['net_pnl']):>11}  "
+        f"DD {money(capped['max_drawdown']):>11}"
+    )
+
+print()
+print(
+    "WARNING: Uncapped results assume enough "
+    "leverage to risk the requested percentage."
+)
+print(
+    "They are theoretical and may exceed available "
+    "broker margin or account capital."
+)

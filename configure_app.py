@@ -25,10 +25,164 @@ import config as cfg
 from auth import get_kite_client
 from stocks import STOCK_UNIVERSE
 from trade_log import get_trade_history, get_today_summary, load_bot_status
+from pipeline_dashboard import load_pipeline_dashboard
+from pipeline_dashboard_section import PIPELINE_FORM_CARD
 
 import pyotp
 
 TOTP_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "totp_config.json")
+
+
+
+# ------------------------------------------------------------------
+# MATMON DASHBOARD MICROSTRUCTURE FEED
+# READ-ONLY / OBSERVATIONAL ONLY.
+# This data must never participate in entry/exit authorization.
+# ------------------------------------------------------------------
+def _matmon_dashboard_microstructure():
+    try:
+        import json as _json
+        from datetime import datetime as _datetime
+        from pathlib import Path as _Path
+
+        day = _datetime.now().astimezone().date().isoformat()
+        path = (
+            _Path(__file__).resolve().parent
+            / "runtime"
+            / "matmon"
+            / "observations"
+            / f"{day}.jsonl"
+        )
+
+        if not path.exists():
+            return {}
+
+        # Dashboard only needs recent/latest observations.
+        # Limit read size so a growing session file cannot make the
+        # monitor progressively expensive.
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 2_000_000))
+            raw = fh.read().decode("utf-8", errors="ignore")
+
+        if size > 2_000_000:
+            raw = raw.split("\n", 1)[-1]
+
+        latest = {}
+
+        for line in raw.splitlines():
+            try:
+                row = _json.loads(line)
+            except Exception:
+                continue
+
+            symbol = row.get("symbol")
+            if not symbol:
+                continue
+
+            q = row.get("quote_evidence") or {}
+
+            # Do not replace a useful observation with a later empty
+            # NO_FRESH_START_QUOTE row for the same stock.
+            useful = bool(
+                q.get("available")
+                or q.get("microstructure_samples")
+                or q.get("sample_count")
+            )
+
+            old = latest.get(symbol)
+            if useful or old is None:
+                latest[symbol] = row
+
+        stocks = []
+
+        def _num(v):
+            return v if isinstance(v, (int, float)) else None
+
+        for symbol, row in latest.items():
+            q = row.get("quote_evidence") or {}
+
+            l1 = _num(q.get("last_l1_imbalance"))
+            obi = _num(q.get("last_weighted_5_imbalance"))
+            micro = _num(q.get("last_microprice"))
+            bid_vel = _num(q.get("bid_velocity_per_sec"))
+            ask_vel = _num(q.get("ask_velocity_per_sec"))
+            spread = _num(q.get("last_spread"))
+            spread_bps = _num(q.get("last_spread_bps"))
+            ltp = _num(q.get("last_ltp"))
+
+            # Composite is DISPLAY ONLY.
+            components = [x for x in (l1, obi) if x is not None]
+            strength = (
+                sum(components) / len(components)
+                if components else None
+            )
+
+            stocks.append({
+                "symbol": symbol,
+                "direction": row.get("direction"),
+                "ltp": ltp,
+                "microprice": micro,
+                "l1_imbalance": l1,
+                "weighted_5_imbalance": obi,
+                "bid_velocity": bid_vel,
+                "ask_velocity": ask_vel,
+                "spread": spread,
+                "spread_bps": spread_bps,
+                "strength": strength,
+                "samples": q.get("microstructure_samples", 0),
+                "available": bool(q.get("available")),
+                "recorded_at": row.get("recorded_at"),
+            })
+
+        useful_stocks = [
+            x for x in stocks
+            if x["available"] or x["samples"]
+        ]
+
+        # Put stocks with actual microstructure first.
+        useful_stocks.sort(
+            key=lambda x: (
+                x.get("recorded_at") or "",
+                x.get("samples") or 0,
+            ),
+            reverse=True,
+        )
+
+        vals = [
+            x["strength"] for x in useful_stocks
+            if x["strength"] is not None
+        ]
+
+        aggregate = (
+            sum(vals) / len(vals)
+            if vals else None
+        )
+
+        buyers = None
+        sellers = None
+        if aggregate is not None:
+            buyers = max(0.0, min(100.0, (aggregate + 1.0) * 50.0))
+            sellers = 100.0 - buyers
+
+        return {
+            "available": bool(useful_stocks),
+            "observation_only": True,
+            "source": "matmon_observation_jsonl",
+            "buyers_pct": buyers,
+            "sellers_pct": sellers,
+            "strength": aggregate,
+            "stocks": useful_stocks[:120],
+            "updated_at": (
+                useful_stocks[0]["recorded_at"]
+                if useful_stocks else None
+            ),
+        }
+
+    except Exception:
+        # Dashboard must fail open visually and must never affect trading.
+        return {}
 
 
 def get_available_balance():
@@ -156,7 +310,7 @@ BASE_STYLE = """
     box-shadow: 0 0 8px var(--accent);
   }
   .container {
-    max-width: 960px;
+    max-width: 1180px;
     margin: 28px auto;
     padding: 0 16px;
   }
@@ -171,6 +325,7 @@ BASE_STYLE = """
     transition: border-color 0.15s ease;
   }
   .card:hover { border-color: var(--border); }
+  .card { content-visibility: auto; contain-intrinsic-size: auto 320px; }
   @keyframes fadeIn {
     from { opacity: 0; transform: translateY(4px); }
     to { opacity: 1; transform: translateY(0); }
@@ -319,6 +474,14 @@ BASE_STYLE = """
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+  @media (max-width: 700px) {
+    .topbar { padding: 14px 12px; align-items: flex-start !important; flex-direction: column; }
+    .topbar > div { width: 100%; overflow-x: auto; }
+    .container { margin: 16px auto; padding: 0 10px; }
+    .card { padding: 16px 14px; border-radius: 10px; }
+    .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    table { display: block; max-width: 100%; overflow-x: auto; }
+  }
 </style>
 """
 
@@ -366,7 +529,7 @@ FORM_PAGE = BASE_STYLE + """
 <!doctype html>
 <title>Trading Bot Dashboard</title>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <body>
   <div class="topbar" style="display: flex; justify-content: space-between; align-items: center;">
     <span>Trading Bot Dashboard</span>
@@ -388,6 +551,8 @@ FORM_PAGE = BASE_STYLE + """
   <div class="container">
 
     {% if saved %}<div class="banner" style="background:#e3f9f0; color: var(--accent);">Saved — restart the bot for changes to take effect.</div>{% endif %}
+
+""" + PIPELINE_FORM_CARD + """
 
     <div class="card">
       <h2>Trade History</h2>
@@ -546,7 +711,7 @@ FORM_PAGE = BASE_STYLE + """
             <input type="number" step="0.1" name="risk_per_trade_pct" value="{{ risk_per_trade_pct }}">
           </div>
           <div>
-            <label>Stop-loss buffer (%)</label>
+            <label>Fixed stop-loss (%)</label>
             <input type="number" step="0.01" name="sl_buffer_pct" value="{{ sl_buffer_pct }}">
           </div>
           <div>
@@ -797,10 +962,12 @@ FORM_PAGE = BASE_STYLE + """
       btn.textContent = showing ? btn.textContent.replace('Hide', 'Show') : btn.textContent.replace('Show', 'Hide');
     }
     const sparkData = {{ spark_json|safe }};
-    for (const key in sparkData) {
-      const canvas = document.getElementById("chart-" + key);
-      if (!canvas) continue;
-      new Chart(canvas, {
+    function renderSparklines() {
+      if (typeof Chart === "undefined") return;
+      for (const key in sparkData) {
+        const canvas = document.getElementById("chart-" + key);
+        if (!canvas) continue;
+        new Chart(canvas, {
         type: 'line',
         data: {
           labels: sparkData[key].map((_, i) => i),
@@ -817,8 +984,11 @@ FORM_PAGE = BASE_STYLE + """
           plugins: { legend: { display: false } },
           scales: { x: { display: false }, y: { display: false } }
         }
-      });
+        });
+      }
     }
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", renderSparklines);
+    else renderSparklines();
   </script>
 </body>
 """
@@ -845,7 +1015,7 @@ def load_current():
         "watchlist": watchlist,
         "capital": saved.get("capital", cfg.CAPITAL),
         "risk_per_trade_pct": saved.get("risk_per_trade_pct", cfg.RISK_PER_TRADE_PCT),
-        "sl_buffer_pct": saved.get("sl_buffer_pct", cfg.SL_BUFFER_PCT),
+        "sl_buffer_pct": saved.get("sl_buffer_pct", getattr(cfg, "STOP_LOSS_PERCENT", 0.45)),
         "risk_reward_min": saved.get("risk_reward_min", cfg.RISK_REWARD_MIN),
         "max_trades_per_day": saved.get("max_trades_per_day", cfg.MAX_TRADES_PER_DAY),
         "max_daily_loss_pct": saved.get("max_daily_loss_pct", cfg.MAX_DAILY_LOSS_PCT),
@@ -1047,14 +1217,14 @@ from trade_log import load_bot_status
 from watchlist_range_analytics import load_watchlist_snapshot
 from watchlist_dashboard_helpers import compute_summary_cards, classify_report_freshness
 import json as _json
+from dashboard_bot_reload import apply_saved_config
 
 
 @app.route("/api/monitor-data")
 def api_monitor_data():
     """Read-only JSON endpoint for the /monitor page's client-side
-    polling. Makes ZERO Kite API calls -- reads only the already-
-    generated bot_status.json and watchlist_daily_range.json, exactly
-    like the server-rendered /monitor route does on initial load."""
+    polling. Makes ZERO Kite API calls -- reads only generated status,
+    selector and telemetry files plus read-only systemd state."""
     if not require_login():
         return {"error": "not authenticated"}, 401
     status = load_bot_status() or {}
@@ -1068,14 +1238,17 @@ def api_monitor_data():
         "portfolio": status.get("portfolio_summary", {}),
         "session": session_data,
         "health": status.get("health", {}),
+        "microstructure": _matmon_dashboard_microstructure(),
         "watchlist_snapshot": watchlist_snapshot,
         "freshness": freshness,
         "summary_cards": summary_cards,
         "watchlist_symbols": watchlist_snapshot.get("symbols", []) if watchlist_snapshot else [],
+        "pipeline": load_pipeline_dashboard(),
     }
 
 
 @app.route("/monitor")
+@app.route("/Monitor")
 def monitor():
     if not require_login():
         return redirect("/login")
@@ -1106,6 +1279,7 @@ def monitor():
         freshness=freshness,
         summary_cards=summary_cards,
         watchlist_symbols_json=watchlist_symbols_json,
+        pipeline=load_pipeline_dashboard(),
     )
 
 
@@ -1164,6 +1338,8 @@ def index():
         with open(USER_CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
         saved = True
+        # DASHBOARD_AUTO_APPLY_CONFIG
+        apply_saved_config()
 
     current = load_current()
     selected_symbols = [w["symbol"] for w in current["watchlist"]]
@@ -1283,6 +1459,7 @@ def index():
         bot_status_routine=bot_status_routine,
         bot_status_counts=bot_status_counts,
         backtest_result=backtest_result,
+        pipeline=load_pipeline_dashboard(),
         bt_symbol=backtest_result["symbol"] if backtest_result else None,
         bt_from_date=backtest_result["from_date"] if backtest_result else None,
         bt_to_date=backtest_result["to_date"] if backtest_result else None,

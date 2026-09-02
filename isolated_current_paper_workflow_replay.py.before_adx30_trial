@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Read-only replay of the strict current PAPER workflow.
+
+Uses retained per-day trade symbols (selection-biased) or integrity-checked
+watchlists. It never imports strategy/config/risk/executor and never writes
+paper/live state or places orders.
+"""
+from __future__ import annotations
+import argparse, json, time
+from collections import Counter, defaultdict
+from pathlib import Path
+import pandas as pd
+from auth import get_kite_client
+from costs import net_pnl_for_trade, estimate_trade_cost
+from isolated_vwap_ema_replay import retained_history, valid_watchlists, fetch, ts, IST
+
+def cli():
+    p=argparse.ArgumentParser()
+    p.add_argument('--mode',choices=('history','watchlist'),default='history')
+    p.add_argument('--history',default='trade_history.jsonl')
+    p.add_argument('--watchlist-glob',default='runtime/historical_all_nse_watchlist_*_0927.json')
+    p.add_argument('--from-date');p.add_argument('--to-date')
+    p.add_argument('--capital',type=float,default=5000.0)
+    p.add_argument('--risk-pct',type=float,default=0.20)
+    p.add_argument('--max-trades-day',type=int,default=3)
+    p.add_argument('--max-open',type=int,default=2)
+    p.add_argument('--max-symbol-day',type=int,default=1)
+    p.add_argument('--daily-loss-pct',type=float,default=5.0)
+    p.add_argument('--loss-cooldown-min',type=float,default=30.0)
+    p.add_argument('--stop-pct',type=float,default=0.45)
+    p.add_argument('--target-pct',type=float,default=0.70)
+    p.add_argument('--rvol-min',type=float,default=0.70)
+    p.add_argument('--rvol-max',type=float,default=1.00)
+    p.add_argument('--body-min',type=float,default=0.50)
+    p.add_argument('--acceleration-min',type=float,default=1.10)
+    p.add_argument('--max-extension-atr',type=float,default=1.50)
+    p.add_argument('--cost-multiple',type=float,default=2.0)
+    p.add_argument('--entry-start',default='09:27');p.add_argument('--entry-end',default='15:00')
+    p.add_argument('--output',default='runtime/isolated_current_paper_workflow_all_days.json')
+    return p.parse_args()
+
+def enrich(f):
+    f=f.copy();c=f.close.astype(float)
+    for n in (9,21,50):f[f'ema{n}']=c.ewm(span=n,adjust=False).mean()
+    prev=c.shift(1);tr=pd.concat([(f.high-f.low),(f.high-prev).abs(),(f.low-prev).abs()],axis=1).max(axis=1)
+    f['atr14']=tr.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    up=f.high.diff();dn=-f.low.diff()
+    plus=up.where((up>dn)&(up>0),0.0);minus=dn.where((dn>up)&(dn>0),0.0)
+    atr=f.atr14.replace(0,float('nan'))
+    pdi=100*plus.ewm(alpha=1/14,adjust=False,min_periods=14).mean()/atr
+    mdi=100*minus.ewm(alpha=1/14,adjust=False,min_periods=14).mean()/atr
+    dx=100*(pdi-mdi).abs()/(pdi+mdi).replace(0,float('nan'))
+    f['adx14']=dx.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    f['volavg20']=f.volume.astype(float).rolling(20).mean().shift(1)
+    f['rvol']=f.volume/f.volavg20.replace(0,float('nan'))
+    f['acceleration']=f.volume/f.volume.shift(1).replace(0,float('nan'))
+    typical=(f.high+f.low+f.close)/3.0;session=f.date.dt.date
+    f['vwap']=(typical*f.volume).groupby(session).cumsum()/f.volume.groupby(session).cumsum().replace(0,float('nan'))
+    return f
+
+def technical_signal(f,i,a,reasons):
+    if i<53:return None
+    r=f.iloc[i];p=f.iloc[i-1];old=f.iloc[i-3]
+    needed=(r.ema9,r.ema21,r.ema50,r.vwap,r.adx14,r.rvol,r.acceleration,r.atr14)
+    if any(pd.isna(x) for x in needed):reasons['INDICATOR_WARMUP']+=1;return None
+    buy=r.ema9>r.ema21>r.ema50 and r.ema9>old.ema9 and r.ema21>old.ema21 and r.ema50>old.ema50 and r.close>r.vwap
+    sell=r.ema9<r.ema21<r.ema50 and r.ema9<old.ema9 and r.ema21<old.ema21 and r.ema50<old.ema50 and r.close<r.vwap
+    if not (buy or sell):reasons['EMA_VWAP_DIRECTION']+=1;return None
+    d='BUY' if buy else 'SELL'
+    if r.adx14<(25 if d=='BUY' else 20):reasons['ADX_STRENGTH']+=1;return None
+    if not (a.rvol_min<=r.rvol<a.rvol_max):reasons['RVOL_BAND']+=1;return None
+    span=float(r.high-r.low);body=abs(float(r.close-r.open))/span if span>0 else 0
+    if body<a.body_min:reasons['BODY_RATIO']+=1;return None
+    if r.acceleration<a.acceleration_min:reasons['VOLUME_ACCELERATION']+=1;return None
+    extension=abs(float(r.close-r.ema9))/float(r.atr14) if r.atr14>0 else 999
+    if extension>a.max_extension_atr:reasons['ATR_EXTENSION']+=1;return None
+    breakout=float(r.close)>float(p.high) if d=='BUY' else float(r.close)<float(p.low)
+    clv=(float(r.close-r.low)/span) if d=='BUY' else (float(r.high-r.close)/span)
+    confirmations=sum((breakout,clv>=0.65,r.acceleration>=a.acceleration_min))
+    if confirmations<2:reasons['CONFIRMATION_2_OF_3']+=1;return None
+    return {'direction':d,'signal_time':r.date,'body_ratio':body,'rvol':float(r.rvol),'acceleration':float(r.acceleration),'adx':float(r.adx14),'extension_atr':extension}
+
+def candidate_exit(f,i,d,a):
+    if i+1>=len(f):return None
+    sig=f.iloc[i];nxt=f.iloc[i+1]
+    if nxt.date.date()!=sig.date.date():return None
+    entry=float(nxt.open)
+    # Reject next-open gaps which already exceed the allowed EMA extension.
+    if sig.atr14<=0 or abs(entry-float(sig.ema9))/float(sig.atr14)>a.max_extension_atr:return None
+    stop=entry*(1-a.stop_pct/100) if d=='BUY' else entry*(1+a.stop_pct/100)
+    target=entry*(1+a.target_pct/100) if d=='BUY' else entry*(1-a.target_pct/100)
+    exit_price=None;exit_time=None;reason=None
+    end=ts(str(sig.date.date())+' 15:08')
+    for j in range(i+1,len(f)):
+        r=f.iloc[j]
+        if r.date.date()!=sig.date.date():break
+        sh=float(r.low)<=stop if d=='BUY' else float(r.high)>=stop
+        th=float(r.high)>=target if d=='BUY' else float(r.low)<=target
+        if sh:exit_price=stop;exit_time=r.date;reason='STOP';break
+        if th:exit_price=target;exit_time=r.date;reason='TARGET';break
+        if r.date+pd.Timedelta(minutes=3)>=end:exit_price=float(r.close);exit_time=r.date;reason='SQUARE_OFF';break
+    if exit_price is None:return None
+    return {'entry_time':nxt.date,'entry':entry,'stop':stop,'target':target,'exit':exit_price,'exit_time':exit_time,'exit_reason':reason}
+
+def main():
+    a=cli()
+    if a.mode=='history':universes,labels=retained_history(a.history);bad={}
+    else:universes,labels,bad=valid_watchlists(a.watchlist_glob)
+    universes={d:s for d,s in universes.items() if (not a.from_date or d>=a.from_date) and (not a.to_date or d<=a.to_date)}
+    if not universes:raise SystemExit('No valid date/universe pairs')
+    print('READ_ONLY_REPLAY=True',flush=True);print('MODE=',a.mode,flush=True);print('DATES=',','.join(sorted(universes)),flush=True)
+    kite=get_kite_client();print('AUTH_CLIENT_OK=True',flush=True)
+    inst=kite.instruments('NSE');tokens={str(x.get('tradingsymbol')):int(x['instrument_token']) for x in inst if x.get('instrument_type')=='EQ'}
+    pairs=[(d,s) for d in sorted(universes) for s in sorted(universes[d])];frames={};fail={}
+    for n,(d,s) in enumerate(pairs,1):
+        token=tokens.get(s)
+        if token is None:fail[f'{d}:{s}']='TOKEN_NOT_FOUND';continue
+        try:
+            start=ts(d+' 09:15')-pd.Timedelta(days=10);end=ts(d+' 15:30')
+            frames[(d,s)]=enrich(fetch(kite,token,start.to_pydatetime(),end.to_pydatetime()))
+            print(f'FETCH {n}/{len(pairs)} {d} NSE:{s} candles={len(frames[(d,s)])}',flush=True);time.sleep(.35)
+        except Exception as e:fail[f'{d}:{s}']=str(e)
+    rejects=Counter();signals=[]
+    st=pd.Timestamp(a.entry_start).time();et=pd.Timestamp(a.entry_end).time()
+    for d,symbols in sorted(universes.items()):
+        for s in sorted(symbols):
+            f=frames.get((d,s));
+            if f is None:continue
+            idx=f.index[(f.date.dt.strftime('%Y-%m-%d')==d)&(f.date.dt.time>=st)&(f.date.dt.time<=et)]
+            for i in idx:
+                sig=technical_signal(f,i,a,rejects)
+                if not sig:continue
+                outcome=candidate_exit(f,i,sig['direction'],a)
+                if not outcome:rejects['NEXT_OPEN_OR_EXIT_DATA']+=1;continue
+                entry=outcome['entry'];full_qty=int(a.capital/entry)
+                if full_qty<1:rejects['PRICE_ABOVE_CAPITAL']+=1;continue
+                expected_gross=full_qty*entry*a.target_pct/100
+                expected_cost=estimate_trade_cost(full_qty*entry,full_qty*entry*(1+a.target_pct/100))
+                if expected_cost<=0 or expected_gross/expected_cost<a.cost_multiple:rejects['COST_MULTIPLE']+=1;continue
+                signals.append({'date':d,'symbol':s,'universe_label':labels[d],**sig,**outcome,'expected_gross_cost_multiple':expected_gross/expected_cost})
+    signals.sort(key=lambda x:(x['entry_time'],x['symbol']))
+    admitted=[];open_pos=[];day_count=Counter();symbol_count=Counter();realized=Counter();last_loss={}
+    daily_limit=a.capital*a.daily_loss_pct/100
+    for x in signals:
+        now=x['entry_time'];day=x['date']
+        still=[]
+        for p in open_pos:
+            if p['exit_time']<=now:
+                realized[p['date']]+=p['net_pnl']
+                if p['net_pnl']<0:last_loss[(p['date'],p['symbol'])]=p['exit_time']
+            else:still.append(p)
+        open_pos=still
+        if day_count[day]>=a.max_trades_day:rejects['DAILY_TRADE_CAP']+=1;continue
+        if len(open_pos)>=a.max_open:rejects['MAX_OPEN_POSITIONS']+=1;continue
+        if symbol_count[(day,x['symbol'])]>=a.max_symbol_day:rejects['SYMBOL_DAY_CAP']+=1;continue
+        if realized[day]<=-daily_limit:rejects['DAILY_LOSS_LIMIT']+=1;continue
+        prior=last_loss.get((day,x['symbol']))
+        if prior is not None and (now-prior).total_seconds()<a.loss_cooldown_min*60:rejects['LOSS_COOLDOWN']+=1;continue
+        used=sum(p['entry']*p['qty'] for p in open_pos);available=max(0,a.capital-used)
+        risk_rupees=a.capital*a.risk_pct/100;risk_share=x['entry']*a.stop_pct/100
+        qty=min(int(risk_rupees/risk_share),int(available/x['entry'])) if risk_share>0 else 0
+        if qty<1:rejects['SHARED_CAPITAL_OR_RISK_SIZE']+=1;continue
+        pnl=net_pnl_for_trade(x['direction'],qty,x['entry'],x['exit'])
+        trade={**x,'qty':qty,**pnl};admitted.append(trade);open_pos.append(trade);day_count[day]+=1;symbol_count[(day,x['symbol'])]+=1
+    for p in open_pos:realized[p['date']]+=p['net_pnl']
+    byday={}
+    for d in sorted(universes):
+        rows=[x for x in admitted if x['date']==d];w=sum(x['net_pnl']>0 for x in rows)
+        byday[d]={'universe_symbols':len(universes[d]),'trades':len(rows),'wins':w,'losses':len(rows)-w,'gross_pnl':sum(x['gross_pnl'] for x in rows),'costs':sum(x['costs'] for x in rows),'net_pnl':sum(x['net_pnl'] for x in rows)}
+    wins=sum(x['net_pnl']>0 for x in admitted)
+    summary={'dates':len(universes),'technical_signals':len(signals),'trades':len(admitted),'wins':wins,'losses':len(admitted)-wins,'win_rate':wins/len(admitted)*100 if admitted else 0,'gross_pnl':sum(x['gross_pnl'] for x in admitted),'costs':sum(x['costs'] for x in admitted),'net_pnl':sum(x['net_pnl'] for x in admitted),'profitable_days':sum(v['net_pnl']>0 for v in byday.values())}
+    result={'read_only':True,'strategy':'STRICT_CURRENT_PAPER_WORKFLOW','mode':a.mode,'selection_bias':a.mode=='history','limitations':['history mode uses previously retained symbols, not a full point-in-time universe','same-candle ambiguity is stop-first','estimated MIS charges','no slippage beyond next-candle open'],'parameters':vars(a),'rejected_watchlists':bad,'fetch_failures':fail,'rejections':dict(rejects),'summary':summary,'by_day':byday,'trades':admitted}
+    out=Path(a.output);out.parent.mkdir(parents=True,exist_ok=True);out.write_text(json.dumps(result,indent=2,default=str))
+    print(json.dumps({'summary':summary,'by_day':byday,'top_rejections':rejects.most_common(15)},indent=2),flush=True);print('DETAIL=',out,flush=True)
+if __name__=='__main__':main()

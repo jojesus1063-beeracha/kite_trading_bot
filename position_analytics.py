@@ -49,21 +49,42 @@ def compute_distances(direction, current, stop, target):
 
 
 def compute_reward_risk(direction, entry, current, stop, target):
-    """Reward/risk remaining FROM THE CURRENT PRICE (not from entry) --
-    this is 'what's left to gain vs. what's left to lose from here',
-    which is what a live monitor should show, distinct from the
-    original entry-time reward:risk ratio."""
+    """Return both entry-plan and live remaining reward:risk.
+
+    Keeping these values separate prevents the live monitor from presenting a
+    ratio that rises as a losing position approaches its stop as though it were
+    the trade's original reward:risk.
+    """
     if direction == "BUY":
+        entry_reward = target - entry
+        entry_risk = entry - stop
         reward_remaining = target - current
         risk_remaining = current - stop
     else:
+        entry_reward = entry - target
+        entry_risk = stop - entry
         reward_remaining = current - target
         risk_remaining = stop - current
 
-    reward_risk = (reward_remaining / risk_remaining) if risk_remaining > 0 else None
+    entry_reward_risk = (
+        entry_reward / entry_risk
+        if entry_reward >= 0 and entry_risk > 0
+        else None
+    )
+    remaining_reward_risk = (
+        reward_remaining / risk_remaining
+        if reward_remaining >= 0 and risk_remaining > 0
+        else None
+    )
     return {
+        "entry_reward": entry_reward,
+        "entry_risk": entry_risk,
+        "entry_reward_risk": entry_reward_risk,
         "reward_remaining": reward_remaining, "risk_remaining": risk_remaining,
-        "reward_risk": reward_risk,
+        "remaining_reward_risk": remaining_reward_risk,
+        # Backward-compatible alias for downstream consumers that already use
+        # reward_risk as the live remaining ratio.
+        "reward_risk": remaining_reward_risk,
     }
 
 
@@ -82,8 +103,13 @@ def update_mfe_mae(position, current_profit_pct):
     fields, purely informational, never read by any exit-decision
     code. Returns the updated (mfe_pct, mae_pct).
     """
-    mfe = position.get("mfe_pct", current_profit_pct)
-    mae = position.get("mae_pct", current_profit_pct)
+    # Excursion is measured relative to entry.  Before price has moved in a
+    # favourable/adverse direction the corresponding excursion is zero, not a
+    # negative MFE or positive MAE.
+    # Clamp legacy persisted values as well, so a position first observed while
+    # losing is repaired from a negative MFE on the next analytics update.
+    mfe = max(float(position.get("mfe_pct", 0.0) or 0.0), 0.0)
+    mae = min(float(position.get("mae_pct", 0.0) or 0.0), 0.0)
     mfe = max(mfe, current_profit_pct)
     mae = min(mae, current_profit_pct)
     position["mfe_pct"] = mfe
@@ -271,12 +297,24 @@ def build_position_analytics(symbol, position, quotes, previous_status_entry=Non
         "gross_unrealized_pnl": gross_pnl, "net_unrealized_pnl": net_pnl, "profit_pct": profit_pct,
         "entry_time": entry_time_str, "time_in_trade_minutes": time_in_trade_minutes,
         "stop_price": stop, "target_price": target,
+        "strategy_stop_price": position.get("paper_strategy_stop"),
+        "stop_type": (
+            "PAPER_EMERGENCY"
+            if position.get("paper_emergency_stop_active")
+            else "STRATEGY"
+        ),
+        "hybrid_exit_stage": position.get("hybrid_exit_stage"),
         "session_high_since_entry": session_high, "session_low_since_entry": session_low,
         "mfe_pct": mfe_pct, "mae_pct": mae_pct,
         **distances, **rr,
         "bid": bid, "ask": ask, **spread_info, "ltq": ltq,
         "price_updated_at": now, "quote_age_seconds": 0,
         "status": status,
+        "raw_direction": position.get("raw_direction"),
+        "final_direction": position.get("final_direction", direction),
+        "policy_decision": position.get("policy_decision"),
+        "policy_reason": position.get("policy_reason"),
+        "policy_market_trend": position.get("policy_market_trend"),
     }
 
 
@@ -439,9 +477,12 @@ def compute_health_check(cfg, kite, open_positions, symbols, start_time):
     """
     health = {
         "trading_mode": "PAPER" if getattr(cfg, "PAPER_TRADING", True) else "LIVE",
-        "market_alignment": "Enabled" if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) else "Disabled",
-        "adx_filter": "Enabled" if getattr(cfg, "USE_ADX_FILTER", False) else "Disabled",
-        "entry_scheduler": "5 Minute Candle" if getattr(cfg, "ENABLE_CANDLE_ALIGNED_POLLING", False) else "Continuous",
+        "market_alignment": "Observational" if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) else ("Enabled" if getattr(cfg, "ENABLE_MARKET_ALIGNMENT_FILTER", False) else "Disabled"),
+        "adx_filter": "Observational" if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) else ("Enabled" if getattr(cfg, "USE_ADX_FILTER", False) else "Disabled"),
+        "entry_scheduler": f"{getattr(cfg, 'ENTRY_TIMEFRAME', '3minute')} Candle" if getattr(cfg, "ENABLE_CANDLE_ALIGNED_POLLING", False) else "Continuous",
+        "pipeline": "MOMENTUM_RVOL_EMA_MARKET_POLICY" if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) else "LEGACY",
+        "raw_signal": "EMA9_EMA21_3MIN" if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) else "LEGACY",
+        "legacy_strategy_filters": "OBSERVATIONAL_ONLY" if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False) else "CONFIGURED",
         "position_monitor_interval_seconds": getattr(cfg, "POSITION_CHECK_SECONDS", None),
         "watchlist_size": len(getattr(cfg, "WATCHLIST", [])),
         "symbols_loaded": len(symbols),
