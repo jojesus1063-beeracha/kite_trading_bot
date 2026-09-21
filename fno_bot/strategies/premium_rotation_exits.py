@@ -10,6 +10,15 @@ The structural concepts mirror the user's EL-Bethel approach: protect the
 trade only after it has developed, let confirmed direction run, and tighten
 only after a meaningful favorable move. Exact thresholds are paper-test
 parameters, not claims of optimization.
+
+Exit priority for SELL_PREMIUM is explicit and deterministic:
+1. hard stop
+2. optional profit target (disabled by default)
+3. trailing breach after activation
+4. time-stop only when progress remains below the configured minimum
+5. momentum/underlying protection while the trade is not yet protected as a runner
+6. mandatory session cutoff
+If multiple conditions are true on the same tick, the first applicable item wins.
 """
 from dataclasses import dataclass
 from fno_bot.strategies.premium_rotation import WindowFeatures, RotationParams
@@ -200,14 +209,17 @@ def evaluate_exit(
     current_favorable_pct = _favorable_pct(position, current_price)
     setattr(position, "_current_favorable_pct", current_favorable_pct)
 
+    # Priority is intentional: hard risk protection first, then optional
+    # target, then runner protection, then stagnation, then thesis protection,
+    # with the mandatory end-of-session exit last.
     checks = [
         lambda: check_hard_stop(position, current_price, params_exit),
         lambda: check_profit_target(position, current_price, params_exit),
+        lambda: check_trailing_stop(position, current_price, params_exit),
+        lambda: check_time_stop(position, current_price, now_time, params_exit),
         lambda: check_momentum_reversal(
             position, features, params_rotation, params_exit
         ),
-        lambda: check_trailing_stop(position, current_price, params_exit),
-        lambda: check_time_stop(position, current_price, now_time, params_exit),
         lambda: check_session_cutoff(now_hhmm, params_exit),
     ]
     for check in checks:
