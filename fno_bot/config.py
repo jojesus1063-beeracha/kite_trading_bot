@@ -84,20 +84,20 @@ SELL_OTM_STEPS = int(os.environ.get("FNO_SELL_OTM_STEPS", "1"))   # simulated ad
 # ---------------------------------------------------------------------
 TIMEZONE = "Asia/Kolkata"
 
-ENTRY_START_TIME = "09:15:00"   # earliest the strategy may act on a signal
-ENTRY_END_TIME = "09:20:00"     # opening-momentum window closes -- no fresh FIRST_TICK entries after this
+ENTRY_START_TIME = "09:20:00"   # earliest the strategy may act on a signal
+ENTRY_END_TIME = "14:30:00"     # opening-momentum window closes -- no fresh FIRST_TICK entries after this
                                   # (existing open positions are unaffected; see exit hierarchy)
-PREPARE_BEFORE_SECONDS = 300     # start PREPARE (auth, contract master, ws connect+subscribe) this many
+PREPARE_BEFORE_SECONDS = 600     # start PREPARE (auth, contract master, ws connect+subscribe) this many
                                    # seconds before ENTRY_START_TIME, so nothing time-critical happens at 09:15:00 itself
 
-FORCE_SQUARE_OFF_TIME = "15:10"  # mandatory end-of-session exit, same discipline as equity bot
+FORCE_SQUARE_OFF_TIME = "15:05"  # mandatory end-of-session exit, same discipline as equity bot
 
 # PAPER-only second session.  This does not widen the Opening Scalper's
 # authorization; a separate completed-candle/live-flow engine owns this range.
 INTRADAY_OPTIONS_ENABLED = False
 INTRADAY_ENTRY_START_TIME = "09:20:00"
-INTRADAY_ENTRY_END_TIME = "14:45:00"
-INTRADAY_FORCE_EXIT_TIME = "15:15:00"
+INTRADAY_ENTRY_END_TIME = "14:30:00"
+INTRADAY_FORCE_EXIT_TIME = "15:05:00"
 INTRADAY_HISTORICAL_SHORTLIST_SIZE = 10
 INTRADAY_HISTORICAL_CACHE_SECONDS = 55
 
@@ -105,7 +105,7 @@ INTRADAY_HISTORICAL_CACHE_SECONDS = 55
 # Stale-data / connection-quality protection (spec #25, #26)
 # ---------------------------------------------------------------------
 MAX_TICK_AGE_MS = 1500            # reject a tick older than this for any trading decision
-MAX_SPREAD_PCT = 3.0              # reject entries when bid/ask spread exceeds this % of mid
+MAX_SPREAD_PCT = 2.0              # reject entries when bid/ask spread exceeds this % of mid
 WEBSOCKET_RECONNECT_TIMEOUT_SECONDS = 10   # max time to re-establish + resubscribe before STOP_NEW_ENTRIES
 DISCONNECT_WHILE_OPEN_RECOVERY_TIMEOUT_SECONDS = 30  # max time to reconcile against broker before EMERGENCY_EXIT
 
@@ -132,9 +132,9 @@ STOP_LOSS_PCT_CANDIDATES = [3.0, 5.0, 7.5]
 MAX_LOSS_RUPEES = None            # optional absolute rupee cap per trade, in addition to STOP_LOSS_PCT; None = unused
 MAX_ADVERSE_MOVE_PCT = None       # optional secondary/emergency threshold beyond STOP_LOSS_PCT; None = unused
 
-MAX_HOLD_SECONDS = 90             # time stop -- exit if opening momentum hasn't produced target/SL by then
+MAX_HOLD_SECONDS = 900             # time stop -- exit if opening momentum hasn't produced target/SL by then
 DYNAMIC_EXITS_ENABLED = False     # opt-in PAPER validation; LIVE remains blocked for all-stock options
-MAX_ENTRY_WINDOW_SECONDS = 300    # if no valid signal has fired this long after ENTRY_START_TIME, stop trying for the day
+MAX_ENTRY_WINDOW_SECONDS = 18600    # if no valid signal has fired this long after ENTRY_START_TIME, stop trying for the day
 
 EXIT_ORDER_BUFFER_PCT = 1.0       # initial exit limit = best_bid * (1 - buffer/100), i.e. slightly aggressive of bid
 EXIT_REPRICE_WAIT_MS = 500        # wait this long before refreshing depth and repricing an unfilled exit
@@ -159,12 +159,12 @@ EXIT_PRIORITY_ORDER = [
 FNO_CAPITAL = float(os.environ.get("FNO_TRADING_CAPITAL", "5000"))  # this strategy's OWN capital allocation,
                                                                         # distinct from the equity bot's TRADING_CAPITAL
 MAX_CAPITAL_PER_TRADE_PCT = 100.0   # no single trade's premium outlay exceeds this % of FNO_CAPITAL
-MAX_RISK_PER_TRADE_PCT = 5.0       # max % of FNO_CAPITAL this trade's stop-loss is allowed to risk
-MAX_DAILY_LOSS = 5000.0            # absolute rupee kill-switch for the day
-MAX_TRADES_PER_DAY = 3
+MAX_RISK_PER_TRADE_PCT = 2.0       # max % of FNO_CAPITAL this trade's stop-loss is allowed to risk
+MAX_DAILY_LOSS = 1000.0            # absolute rupee kill-switch for the day
+MAX_TRADES_PER_DAY = 2
 MAX_CONSECUTIVE_LOSSES = 2
-REENTRY_COOLDOWN_MINUTES = 30
-MAX_CAPITAL_EXPOSURE_PCT = 30.0    # cap on total F&O capital deployed at once (relevant once >1 concurrent position is allowed)
+REENTRY_COOLDOWN_MINUTES = 20
+MAX_CAPITAL_EXPOSURE_PCT = 100.0    # cap on total F&O capital deployed at once (relevant once >1 concurrent position is allowed)
 
 # ---------------------------------------------------------------------
 # Shared-capital coordination with the equity bot (see Finding 2,
@@ -201,10 +201,31 @@ SHADOW_SIGNAL_CANDIDATES = [
     "bid_ask_imbalance",
     "depth_imbalance",
 ]
-SIGNAL_CONFIRMATION_WINDOW_MS = 1500  # short confirmation window some candidates use before committing
+SIGNAL_CONFIRMATION_WINDOW_MS = 3000  # short confirmation window some candidates use before committing
 
 # Counterfactual capture horizons (spec #22), even when flat/no trade
 COUNTERFACTUAL_HORIZONS_SECONDS = [1, 2, 5, 10, 30, 60]
+
+# ---------------------------------------------------------------------
+# Options-specific entry/exit tuning (paper baseline; not performance-optimized)
+# ---------------------------------------------------------------------
+FNO_WINDOW_SECONDS = float(os.environ.get("FNO_WINDOW_SECONDS", "60"))
+FNO_CONFIRMATION_COUNT = int(os.environ.get("FNO_CONFIRMATION_COUNT", "3"))
+FNO_SCORE_THRESHOLD = float(os.environ.get("FNO_SCORE_THRESHOLD", "68"))
+FNO_DOMINANCE_MARGIN = float(os.environ.get("FNO_DOMINANCE_MARGIN", "15"))
+FNO_ANTI_CHASE_LOOKBACK_SECONDS = float(os.environ.get("FNO_ANTI_CHASE_LOOKBACK_SECONDS", "30"))
+FNO_ANTI_CHASE_MAX_EXTENSION_PCT = float(os.environ.get("FNO_ANTI_CHASE_MAX_EXTENSION_PCT", "10"))
+FNO_HARD_STOP_PCT = float(os.environ.get("FNO_HARD_STOP_PCT", "12"))
+FNO_PROFIT_TARGET_ENABLED = os.environ.get("FNO_PROFIT_TARGET_ENABLED", "false").lower() == "true"
+FNO_TRAILING_ACTIVATION_PCT = float(os.environ.get("FNO_TRAILING_ACTIVATION_PCT", "8"))
+FNO_TRAILING_DISTANCE_PCT = float(os.environ.get("FNO_TRAILING_DISTANCE_PCT", "4"))
+FNO_TIME_STOP_SECONDS = float(os.environ.get("FNO_TIME_STOP_SECONDS", "900"))
+FNO_TIME_STOP_MIN_PROGRESS_PCT = float(os.environ.get("FNO_TIME_STOP_MIN_PROGRESS_PCT", "1"))
+FNO_MOMENTUM_EXIT_MIN_PROFIT_PCT = float(os.environ.get("FNO_MOMENTUM_EXIT_MIN_PROFIT_PCT", "3"))
+FNO_STRUCTURE_CONFIRMATIONS = int(os.environ.get("FNO_STRUCTURE_CONFIRMATIONS", "2"))
+FNO_LATE_ENTRY_CUTOFF = os.environ.get("FNO_LATE_ENTRY_CUTOFF", "14:30")
+FNO_EXIT_CUTOFF = os.environ.get("FNO_EXIT_CUTOFF", "15:05")
+FNO_PAPER_ONLY_DEFAULT = True
 
 # ---------------------------------------------------------------------
 # Observability
