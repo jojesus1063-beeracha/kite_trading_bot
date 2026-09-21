@@ -1,15 +1,8 @@
-"""
-Central configuration for the F&O opening-momentum options scalper.
+"""Central configuration for the F&O opening-momentum options scalper.
 
-This is a completely separate module from the equity bot's config.py --
-nothing here is read by, or overrides, the equity bot, and nothing in
-the equity bot's user_config.json affects this file. See
-user_config_fno.json (optional, dashboard-managed override layer,
-mirroring the equity bot's pattern) for runtime overrides of the
-defaults below.
+This is a completely separate module from the equity bot's config.py -- nothing here is read by, or overrides, the equity bot, and nothing in the equity bot's user_config.json affects this file. See user_config_fno.json (optional, dashboard-managed override layer, mirroring the equity bot's pattern) for runtime overrides of the defaults below.
 
-Every production-relevant parameter lives here, documented, with no
-magic numbers scattered through the rest of the codebase (spec #36).
+Every production-relevant parameter lives here, documented, with no magic numbers scattered through the rest of the codebase (spec #36).
 """
 
 import os
@@ -18,11 +11,6 @@ import json
 # ---------------------------------------------------------------------
 # Broker credentials / auth
 # ---------------------------------------------------------------------
-# Shares ONE Kite Connect login with the equity bot -- same account,
-# same daily access token. This bot never regenerates the token itself;
-# it only reads the file the equity bot's auth.py (or a standalone run
-# of it) already produced. Path is intentionally identical to the
-# equity repo's ACCESS_TOKEN_FILE so both processes read the same file.
 API_KEY = os.environ.get("KITE_API_KEY", "your_api_key_here")
 API_SECRET = os.environ.get("KITE_API_SECRET", "your_api_secret_here")
 ACCESS_TOKEN_FILE = os.environ.get(
@@ -33,20 +21,11 @@ ACCESS_TOKEN_FILE = os.environ.get(
 # ---------------------------------------------------------------------
 # Instrument scope
 # ---------------------------------------------------------------------
-# Initial scope is SENSEX only (BSE F&O / "BFO" segment). Architecture
-# supports adding NIFTY/BANKNIFTY (NSE F&O / "NFO" segment) later by
-# adding entries here -- nothing else in the codebase should hardcode
-# "SENSEX" or "BFO" once instruments/ is fully wired.
 UNDERLYING = os.environ.get("FNO_UNDERLYING", "SENSEX")
-
-# SINGLE keeps the original index-only launcher behavior. ALL_STOCK_OPTIONS
-# dynamically discovers every NSE equity with listed NFO options and scans
-# only its nearest-expiry ATM CE/PE pair. The feature is opt-in so adding it
-# cannot silently broaden an existing deployment.
 UNIVERSE_MODE = os.environ.get("FNO_UNIVERSE_MODE", "SINGLE").upper()
-ALL_STOCK_OPTIONS_MAX_UNDERLYINGS = int(os.environ.get("FNO_STOCK_OPTION_LIMIT", "0"))  # 0 = all
+ALL_STOCK_OPTIONS_MAX_UNDERLYINGS = int(os.environ.get("FNO_STOCK_OPTION_LIMIT", "0"))
 ALL_STOCK_OPTIONS_WEBSOCKET_LIMIT = 3000
-ALL_STOCK_OPTIONS_LIVE_ENABLED = False  # PAPER/SHADOW validation is mandatory first
+ALL_STOCK_OPTIONS_LIVE_ENABLED = False
 
 UNDERLYING_REGISTRY = {
     "SENSEX": {"exchange": "BFO", "index_exchange": "BSE", "index_symbol": "SENSEX", "strike_interval": 100},
@@ -54,96 +33,74 @@ UNDERLYING_REGISTRY = {
     "BANKNIFTY": {"exchange": "NFO", "index_exchange": "NSE", "index_symbol": "NIFTY BANK", "strike_interval": 100},
 }
 
-PRODUCT = "MIS"          # intraday margin product -- no overnight positions in V1
+PRODUCT = "MIS"
 VARIETY = "regular"
-ORDER_TYPE_ENTRY = "LIMIT"   # aggressive limit buy, not MARKET -- spec #7
-MARKET_PROTECTION = -1        # -1 = exchange-automatic protection band (mandatory since Apr-2026)
+ORDER_TYPE_ENTRY = "LIMIT"
+MARKET_PROTECTION = -1
 
 # ---------------------------------------------------------------------
-# Mode: SHADOW (signals + counterfactuals only, no orders) / PAPER
-# (simulated fills) / LIVE (real broker orders). ALWAYS start SHADOW.
+# Mode
 # ---------------------------------------------------------------------
-MODE = os.environ.get("FNO_MODE", "PAPER")  # PAPER by default; LIVE remains explicitly gated
-
-# LIVE mode refuses to start without this exact acknowledgement string
-# present in the environment -- never silently falls back from
-# PAPER/SHADOW to LIVE (spec #23).
+MODE = os.environ.get("FNO_MODE", "PAPER")
 FNO_LIVE_ACK_ENV_VAR = "FNO_LIVE_ACK"
 FNO_LIVE_ACK_REQUIRED_VALUE = "I_ACCEPT_REAL_FNO_ORDERS"
-
-# Paper-mode fill simulation
 PAPER_SLIPPAGE_PCT = 0.5
 
 # Options-selling strategy: bullish underlying -> sell PE; bearish -> sell CE.
-# One strike step OTM is the initial paper-test setting; this is not a live-trading recommendation.
 OPTION_STRATEGY = os.environ.get("FNO_OPTION_STRATEGY", "SELL_PREMIUM").upper()
-SELL_OTM_STEPS = int(os.environ.get("FNO_SELL_OTM_STEPS", "1"))   # simulated adverse slippage applied to paper fills, % of reference price
+SELL_OTM_STEPS = int(os.environ.get("FNO_SELL_OTM_STEPS", "1"))
 
 # ---------------------------------------------------------------------
 # Opening sequence / timing (all Asia/Kolkata, tz-aware)
 # ---------------------------------------------------------------------
 TIMEZONE = "Asia/Kolkata"
+ENTRY_START_TIME = "09:25:00"
+ENTRY_END_TIME = "14:30:00"
+PREPARE_BEFORE_SECONDS = 600
+FORCE_SQUARE_OFF_TIME = "15:30"
 
-ENTRY_START_TIME = "09:20:00"   # earliest the strategy may act on a signal
-ENTRY_END_TIME = "14:30:00"     # opening-momentum window closes -- no fresh FIRST_TICK entries after this
-                                  # (existing open positions are unaffected; see exit hierarchy)
-PREPARE_BEFORE_SECONDS = 600     # start PREPARE (auth, contract master, ws connect+subscribe) this many
-                                   # seconds before ENTRY_START_TIME, so nothing time-critical happens at 09:15:00 itself
-
-FORCE_SQUARE_OFF_TIME = "15:30"  # mandatory end-of-session exit, same discipline as equity bot
-
-# PAPER-only second session.  This does not widen the Opening Scalper's
-# authorization; a separate completed-candle/live-flow engine owns this range.
 INTRADAY_OPTIONS_ENABLED = False
-INTRADAY_ENTRY_START_TIME = "09:20:00"
+INTRADAY_ENTRY_START_TIME = "09:25:00"
 INTRADAY_ENTRY_END_TIME = "14:30:00"
 INTRADAY_FORCE_EXIT_TIME = "15:30:00"
 INTRADAY_HISTORICAL_SHORTLIST_SIZE = 10
 INTRADAY_HISTORICAL_CACHE_SECONDS = 55
 
 # ---------------------------------------------------------------------
-# Stale-data / connection-quality protection (spec #25, #26)
+# Stale-data / connection-quality protection
 # ---------------------------------------------------------------------
-MAX_TICK_AGE_MS = 1500            # reject a tick older than this for any trading decision
-MAX_SPREAD_PCT = 2.0              # reject entries when bid/ask spread exceeds this % of mid
-WEBSOCKET_RECONNECT_TIMEOUT_SECONDS = 10   # max time to re-establish + resubscribe before STOP_NEW_ENTRIES
-DISCONNECT_WHILE_OPEN_RECOVERY_TIMEOUT_SECONDS = 30  # max time to reconcile against broker before EMERGENCY_EXIT
+MAX_TICK_AGE_MS = 1500
+MAX_SPREAD_PCT = 2.0
+WEBSOCKET_RECONNECT_TIMEOUT_SECONDS = 10
+DISCONNECT_WHILE_OPEN_RECOVERY_TIMEOUT_SECONDS = 30
 
 # ---------------------------------------------------------------------
-# Entry (spec #7-9)
+# Entry
 # ---------------------------------------------------------------------
-ENTRY_BUFFER_PCT = 10.0           # aggressive limit = reference_price * (1 + buffer/100); NOT assumed optimal,
-                                    # shadow/backtest before trusting this default
-MAX_ENTRY_SLIPPAGE_PCT = 15.0     # hard ceiling -- if the executable price implies slippage beyond this
-                                    # vs the original reference price, ABORT ENTRY rather than chase further
-ENTRY_TIMEOUT_MS = 3000           # max wait for one entry attempt's fill confirmation
+ENTRY_BUFFER_PCT = 10.0
+MAX_ENTRY_SLIPPAGE_PCT = 15.0
+ENTRY_TIMEOUT_MS = 3000
 MAX_ENTRY_ATTEMPTS = 3
-ENTRY_RETRY_BACKOFF_MS = 250      # pause between attempts, each attempt re-reads fresh depth/LTP/spread first
+ENTRY_RETRY_BACKOFF_MS = 250
 
 # ---------------------------------------------------------------------
-# Exit (spec #12-16)
+# Exit
 # ---------------------------------------------------------------------
-TARGET_PCT = 10.0                 # profit target as % of ACTUAL fill price -- not assumed optimal,
-                                    # candidate values for shadow/backtest comparison: see TARGET_PCT_CANDIDATES
+TARGET_PCT = 10.0
 TARGET_PCT_CANDIDATES = [3.0, 5.0, 7.5, 10.0, 12.5, 15.0]
-
-STOP_LOSS_PCT = 5.0               # hard SL as % of ACTUAL fill price -- mandatory, never optional
+STOP_LOSS_PCT = 5.0
 STOP_LOSS_PCT_CANDIDATES = [3.0, 5.0, 7.5]
-MAX_LOSS_RUPEES = None            # optional absolute rupee cap per trade, in addition to STOP_LOSS_PCT; None = unused
-MAX_ADVERSE_MOVE_PCT = None       # optional secondary/emergency threshold beyond STOP_LOSS_PCT; None = unused
+MAX_LOSS_RUPEES = None
+MAX_ADVERSE_MOVE_PCT = None
+MAX_HOLD_SECONDS = 900
+DYNAMIC_EXITS_ENABLED = False
+MAX_ENTRY_WINDOW_SECONDS = 18600
 
-MAX_HOLD_SECONDS = 900             # time stop -- exit if opening momentum hasn't produced target/SL by then
-DYNAMIC_EXITS_ENABLED = False     # opt-in PAPER validation; LIVE remains blocked for all-stock options
-MAX_ENTRY_WINDOW_SECONDS = 18600    # if no valid signal has fired this long after ENTRY_START_TIME, stop trying for the day
-
-EXIT_ORDER_BUFFER_PCT = 1.0       # initial exit limit = best_bid * (1 - buffer/100), i.e. slightly aggressive of bid
-EXIT_REPRICE_WAIT_MS = 500        # wait this long before refreshing depth and repricing an unfilled exit
-MAX_EXIT_REPRICE_ATTEMPTS = 4     # bounded escalation steps before falling through to the emergency exit
+EXIT_ORDER_BUFFER_PCT = 1.0
+EXIT_REPRICE_WAIT_MS = 500
+MAX_EXIT_REPRICE_ATTEMPTS = 4
 EXIT_RETRY_INTERVAL_MS = 500
 
-# Priority order documented explicitly (spec #15) -- evaluated top to
-# bottom every tick while a position is open; the first condition that
-# fires wins, even if others would also apply this tick.
 EXIT_PRIORITY_ORDER = [
     "EMERGENCY_RISK_EXIT",
     "HARD_STOP_LOSS",
@@ -154,24 +111,19 @@ EXIT_PRIORITY_ORDER = [
 ]
 
 # ---------------------------------------------------------------------
-# Position sizing / capital (spec #10)
+# Position sizing / capital
 # ---------------------------------------------------------------------
-FNO_CAPITAL = float(os.environ.get("FNO_TRADING_CAPITAL", "5000"))  # this strategy's OWN capital allocation,
-                                                                        # distinct from the equity bot's TRADING_CAPITAL
-MAX_CAPITAL_PER_TRADE_PCT = 100.0   # no single trade's premium outlay exceeds this % of FNO_CAPITAL
-MAX_RISK_PER_TRADE_PCT = 2.0       # max % of FNO_CAPITAL this trade's stop-loss is allowed to risk
-MAX_DAILY_LOSS = 1000.0            # absolute rupee kill-switch for the day
+FNO_CAPITAL = float(os.environ.get("FNO_TRADING_CAPITAL", "5000"))
+MAX_CAPITAL_PER_TRADE_PCT = 100.0
+MAX_RISK_PER_TRADE_PCT = 2.0
+MAX_DAILY_LOSS = 1000.0
 MAX_TRADES_PER_DAY = 2
 MAX_CONSECUTIVE_LOSSES = 2
 REENTRY_COOLDOWN_MINUTES = 20
-MAX_CAPITAL_EXPOSURE_PCT = 100.0    # cap on total F&O capital deployed at once (relevant once >1 concurrent position is allowed)
+MAX_CAPITAL_EXPOSURE_PCT = 100.0
 
 # ---------------------------------------------------------------------
-# Shared-capital coordination with the equity bot (see Finding 2,
-# architecture review) -- both bots draw on the same broker account.
-# This is additive: SHARED_CAPITAL_CHECK_ENABLED=False makes this
-# bot behave exactly as if it were the only consumer of margin,
-# useful for isolated testing.
+# Shared-capital coordination
 # ---------------------------------------------------------------------
 SHARED_CAPITAL_CHECK_ENABLED = True
 SHARED_CAPITAL_LEDGER_PATH = os.environ.get(
@@ -180,20 +132,16 @@ SHARED_CAPITAL_LEDGER_PATH = os.environ.get(
 )
 
 # ---------------------------------------------------------------------
-# Order safety / duplicate protection (spec #28)
+# Order safety / duplicate protection
 # ---------------------------------------------------------------------
 ORDER_VERIFY_MAX_WAIT_SECONDS = 8
 ORDER_VERIFY_POLL_INTERVAL_SECONDS = 0.5
 MAX_ORDER_RETRIES = 3
 
 # ---------------------------------------------------------------------
-# Directional signal selection (spec #6) -- modular, shadow-testable.
-# AUTHORIZED_SIGNAL is the ONLY candidate allowed to produce a live/
-# paper order; every candidate in SHADOW_SIGNAL_CANDIDATES still runs
-# and is logged every session, purely for comparison. None is assumed
-# correct -- see strategies/signal_candidates.py.
+# Directional signal selection
 # ---------------------------------------------------------------------
-AUTHORIZED_SIGNAL = None   # None = no signal is authorized to trade yet; SHADOW-only until explicitly set
+AUTHORIZED_SIGNAL = None
 SHADOW_SIGNAL_CANDIDATES = [
     "premium_imbalance",
     "premium_rate_of_change",
@@ -201,13 +149,11 @@ SHADOW_SIGNAL_CANDIDATES = [
     "bid_ask_imbalance",
     "depth_imbalance",
 ]
-SIGNAL_CONFIRMATION_WINDOW_MS = 3000  # short confirmation window some candidates use before committing
-
-# Counterfactual capture horizons (spec #22), even when flat/no trade
+SIGNAL_CONFIRMATION_WINDOW_MS = 3000
 COUNTERFACTUAL_HORIZONS_SECONDS = [1, 2, 5, 10, 30, 60]
 
 # ---------------------------------------------------------------------
-# Options-specific entry/exit tuning (paper baseline; not performance-optimized)
+# Options-specific entry/exit tuning
 # ---------------------------------------------------------------------
 FNO_WINDOW_SECONDS = float(os.environ.get("FNO_WINDOW_SECONDS", "60"))
 FNO_CONFIRMATION_COUNT = int(os.environ.get("FNO_CONFIRMATION_COUNT", "3"))
@@ -230,12 +176,10 @@ FNO_PAPER_ONLY_DEFAULT = True
 # ---------------------------------------------------------------------
 # Observability
 # ---------------------------------------------------------------------
-DEBUG_TICK_LOGGING = False   # if True, logs every tick -- noisy, debug-only per spec #30
+DEBUG_TICK_LOGGING = False
 
 # ---------------------------------------------------------------------
-# Overrides from an (optional) F&O configuration UI, same pattern as
-# the equity bot's user_config.json -- completely separate file, never
-# shared with or read by the equity bot.
+# Optional F&O UI overrides
 # ---------------------------------------------------------------------
 _USER_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_config_fno.json")
 
@@ -254,9 +198,7 @@ if os.path.exists(_USER_CONFIG_PATH):
     INTRADAY_ENTRY_START_TIME = _overrides.get("intraday_entry_start_time", INTRADAY_ENTRY_START_TIME)
     INTRADAY_ENTRY_END_TIME = _overrides.get("intraday_entry_end_time", INTRADAY_ENTRY_END_TIME)
     INTRADAY_FORCE_EXIT_TIME = _overrides.get("intraday_force_exit_time", INTRADAY_FORCE_EXIT_TIME)
-    INTRADAY_HISTORICAL_SHORTLIST_SIZE = _overrides.get(
-        "intraday_historical_shortlist_size", INTRADAY_HISTORICAL_SHORTLIST_SIZE
-    )
+    INTRADAY_HISTORICAL_SHORTLIST_SIZE = _overrides.get("intraday_historical_shortlist_size", INTRADAY_HISTORICAL_SHORTLIST_SIZE)
     ENTRY_BUFFER_PCT = _overrides.get("entry_buffer_pct", ENTRY_BUFFER_PCT)
     MAX_ENTRY_SLIPPAGE_PCT = _overrides.get("max_entry_slippage_pct", MAX_ENTRY_SLIPPAGE_PCT)
     ENTRY_TIMEOUT_MS = _overrides.get("entry_timeout_ms", ENTRY_TIMEOUT_MS)
@@ -279,24 +221,15 @@ if os.path.exists(_USER_CONFIG_PATH):
 
 
 def is_live_ack_present() -> bool:
-    """True only if the exact required acknowledgement string is set.
-    Never treat presence-of-any-value as sufficient -- must match exactly."""
     return os.environ.get(FNO_LIVE_ACK_ENV_VAR) == FNO_LIVE_ACK_REQUIRED_VALUE
 
 
 def validate_mode():
-    """
-    Raises RuntimeError if MODE=LIVE without the explicit env
-    acknowledgement. Call this once at startup before any broker
-    connection is made. Never silently downgrades LIVE to PAPER/SHADOW
-    -- refuses to start instead (spec #23).
-    """
     if MODE not in ("SHADOW", "PAPER", "LIVE"):
         raise RuntimeError(f"Invalid FNO_MODE={MODE!r}; must be SHADOW, PAPER, or LIVE")
     if UNIVERSE_MODE not in ("SINGLE", "ALL_STOCK_OPTIONS"):
         raise RuntimeError(
-            f"Invalid FNO_UNIVERSE_MODE={UNIVERSE_MODE!r}; "
-            "must be SINGLE or ALL_STOCK_OPTIONS"
+            f"Invalid FNO_UNIVERSE_MODE={UNIVERSE_MODE!r}; must be SINGLE or ALL_STOCK_OPTIONS"
         )
     if MODE == "LIVE" and not is_live_ack_present():
         raise RuntimeError(
