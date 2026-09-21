@@ -39,9 +39,14 @@ def estimate_trade_cost(buy_premium_value: float, sell_premium_value: float) -> 
 
 
 def net_pnl_for_closed_trade(trade: ClosedTrade) -> dict:
-    buy_value = trade.quantity * trade.entry_price
-    sell_value = trade.quantity * trade.exit_price
-    gross_pnl = (trade.exit_price - trade.entry_price) * trade.quantity
+    if getattr(trade, "side", "LONG") == "SHORT":
+        sell_value = trade.quantity * trade.entry_price
+        buy_value = trade.quantity * trade.exit_price
+        gross_pnl = (trade.entry_price - trade.exit_price) * trade.quantity
+    else:
+        buy_value = trade.quantity * trade.entry_price
+        sell_value = trade.quantity * trade.exit_price
+        gross_pnl = (trade.exit_price - trade.entry_price) * trade.quantity
     costs = estimate_trade_cost(buy_value, sell_value)
     return {
         "gross_pnl": round(gross_pnl, 2),
