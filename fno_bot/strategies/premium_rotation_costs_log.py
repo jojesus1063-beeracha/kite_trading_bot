@@ -104,6 +104,10 @@ class RotationAuditLog:
         payload = {"event": "TRADE_CLOSED", **asdict(trade), **pnl}
         self._write(payload)
 
+    def log_eod_summary(self, summary: dict) -> None:
+        """Write one end-of-day attribution record for the paper session."""
+        self._write({"event": "EOD_SUMMARY", **summary})
+
     def log_counterfactual(self, cf: CounterfactualResult) -> None:
         payload = {"event": "COUNTERFACTUAL", **asdict(cf)}
         self._write(payload)
@@ -118,3 +122,32 @@ class RotationAuditLog:
                 if line:
                     out.append(json.loads(line))
         return out
+
+
+def summarize_closed_trades(trades: List[ClosedTrade]) -> dict:
+    """Create compact EOD paper P&L attribution from closed trades only.
+
+    All rupee figures are estimates until the configured charge rates are
+    reconciled against an actual contract note. This summary never claims
+    that paper P&L equals live execution P&L.
+    """
+    rows = [net_pnl_for_closed_trade(t) for t in trades]
+    gross = round(sum(r["gross_pnl"] for r in rows), 2)
+    costs = round(sum(r["estimated_costs"] for r in rows), 2)
+    net = round(sum(r["net_pnl_estimate"] for r in rows), 2)
+    winners = sum(1 for r in rows if r["net_pnl_estimate"] > 0)
+    losers = sum(1 for r in rows if r["net_pnl_estimate"] <= 0)
+    reasons = {}
+    for trade in trades:
+        reason = trade.exit_reason.split(":", 1)[0]
+        reasons[reason] = reasons.get(reason, 0) + 1
+    return {
+        "trade_count": len(trades),
+        "winning_trades": winners,
+        "losing_or_flat_trades": losers,
+        "gross_pnl": gross,
+        "estimated_costs": costs,
+        "net_pnl_estimate": net,
+        "exit_reason_counts": reasons,
+        "cost_disclaimer": COST_DISCLAIMER,
+    }
