@@ -75,9 +75,35 @@ def select_atm_pair(kite, underlying_config: dict, target_date):
     }
 
 def build_session(quantity=1):
+    rotation = RotationParams(
+        ce_momentum_min_pct=1.5,
+        pe_weakness_max_pct=0.25,
+        velocity_min=3.0,
+        both_rising_threshold_pct=2.5,
+        both_falling_threshold_pct=-2.5,
+        underlying_confirm_min_pct=0.05,
+    )
+    entry = EntryParams(
+        score_threshold=cfg.FNO_SCORE_THRESHOLD,
+        dominance_margin=cfg.FNO_DOMINANCE_MARGIN,
+        anti_chase_lookback_seconds=cfg.FNO_ANTI_CHASE_LOOKBACK_SECONDS,
+        anti_chase_max_extension_pct=cfg.FNO_ANTI_CHASE_MAX_EXTENSION_PCT,
+    )
+    exits = ExitParams(
+        stop_loss_pct=cfg.FNO_HARD_STOP_PCT,
+        profit_target_enabled=cfg.FNO_PROFIT_TARGET_ENABLED,
+        trailing_activation_pct=cfg.FNO_TRAILING_ACTIVATION_PCT,
+        trailing_distance_pct=cfg.FNO_TRAILING_DISTANCE_PCT,
+        time_stop_seconds=cfg.FNO_TIME_STOP_SECONDS,
+        time_stop_min_progress_pct=cfg.FNO_TIME_STOP_MIN_PROGRESS_PCT,
+        momentum_exit_min_profit_pct=cfg.FNO_MOMENTUM_EXIT_MIN_PROFIT_PCT,
+        session_cutoff_hhmm=cfg.FNO_EXIT_CUTOFF,
+    )
     return ShadowSession(
-        RotationParams(), EntryParams(), ExitParams(), window_seconds=10.0,
-        confirmation_required_count=3, quantity=quantity, mode=cfg.MODE,
+        rotation, entry, exits,
+        window_seconds=cfg.FNO_WINDOW_SECONDS,
+        confirmation_required_count=cfg.FNO_CONFIRMATION_COUNT,
+        quantity=quantity, mode=cfg.MODE,
         paper_slippage_pct=cfg.PAPER_SLIPPAGE_PCT,
         strategy_mode=getattr(cfg, "OPTION_STRATEGY", "SELL_PREMIUM"),
     )
@@ -127,7 +153,7 @@ def run_shadow_session(underlying_name=None, market_start_hour=9, market_start_m
     while True:
         now_dt = datetime.now(IST)
         now_hhmm = now_dt.strftime("%H:%M")
-        if now_hhmm >= "15:30":
+        if now_hhmm >= "15:10":
             logger.info("Session end, stopping")
             break
         seconds_since_open = (now_dt - market_open).total_seconds()
@@ -140,8 +166,12 @@ def run_shadow_session(underlying_name=None, market_start_hour=9, market_start_m
             continue
         tick = TickSample(elapsed_monotonic, ce_price, pe_price, underlying_price)
         allowed, kill_reason = can_take_new_trade(day_state, kill_params)
-        if now_hhmm >= session.params_exit.session_cutoff_hhmm and session.open_position is None:
-            allowed, kill_reason = False, "session entry cutoff reached"
+        if now_hhmm < cfg.ENTRY_START_TIME:
+            allowed, kill_reason = False, "options entry window has not opened"
+        elif now_hhmm >= cfg.ENTRY_END_TIME and session.open_position is None:
+            allowed, kill_reason = False, "options entry window closed"
+        elif now_hhmm >= session.params_exit.session_cutoff_hhmm and session.open_position is None:
+            allowed, kill_reason = False, "options exit cutoff reached"
         protected = is_within_opening_protection(seconds_since_open, OPENING_PROTECTION_SECONDS)
         record = session.on_tick(tick, now_hhmm=now_hhmm, kill_switch_allowed=allowed,
                                  kill_switch_reason=kill_reason, opening_protected=protected)
