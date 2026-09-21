@@ -19,6 +19,9 @@ class ClosedTrade:
     mae_points: float
     side: str = "LONG"
     underlying_direction: Optional[str] = None
+    # Short-option premium change is logged explicitly so every exit can be
+    # audited without reconstructing it from raw ticks.
+    premium_move_pct: float = 0.0
 
 @dataclass
 class TickRecord:
@@ -139,6 +142,16 @@ class ShadowSession:
         trade_closed = None
         if exit_reason is not None:
             exit_price = self._paper_exit_price(current_price) if self.mode == "PAPER" else current_price
+            premium_move_pct = (
+                (self.open_position.entry_price - exit_price)
+                / self.open_position.entry_price * 100.0
+                if self.open_position.entry_price > 0 and self.open_position.side == "SHORT"
+                else (
+                    (exit_price - self.open_position.entry_price)
+                    / self.open_position.entry_price * 100.0
+                    if self.open_position.entry_price > 0 else 0.0
+                )
+            )
             trade_closed = ClosedTrade(
                 direction=self.open_position.direction,
                 entry_price=self.open_position.entry_price,
@@ -150,6 +163,7 @@ class ShadowSession:
                 mfe_points=self.mfe_points,
                 mae_points=self.mae_points,
                 side=self.open_position.side,
+                premium_move_pct=round(premium_move_pct, 4),
             )
             self.closed_trades.append(trade_closed)
             self.open_position = None
