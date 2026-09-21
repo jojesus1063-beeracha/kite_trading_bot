@@ -63,7 +63,7 @@ MARKET_PROTECTION = -1        # -1 = exchange-automatic protection band (mandato
 # Mode: SHADOW (signals + counterfactuals only, no orders) / PAPER
 # (simulated fills) / LIVE (real broker orders). ALWAYS start SHADOW.
 # ---------------------------------------------------------------------
-MODE = os.environ.get("FNO_MODE", "SHADOW")  # SHADOW | PAPER | LIVE
+MODE = os.environ.get("FNO_MODE", "PAPER")  # PAPER by default; LIVE remains explicitly gated
 
 # LIVE mode refuses to start without this exact acknowledgement string
 # present in the environment -- never silently falls back from
@@ -72,7 +72,12 @@ FNO_LIVE_ACK_ENV_VAR = "FNO_LIVE_ACK"
 FNO_LIVE_ACK_REQUIRED_VALUE = "I_ACCEPT_REAL_FNO_ORDERS"
 
 # Paper-mode fill simulation
-PAPER_SLIPPAGE_PCT = 0.5   # simulated adverse slippage applied to paper fills, % of reference price
+PAPER_SLIPPAGE_PCT = 0.5
+
+# Options-selling strategy: bullish underlying -> sell PE; bearish -> sell CE.
+# One strike step OTM is the initial paper-test setting; this is not a live-trading recommendation.
+OPTION_STRATEGY = os.environ.get("FNO_OPTION_STRATEGY", "SELL_PREMIUM").upper()
+SELL_OTM_STEPS = int(os.environ.get("FNO_SELL_OTM_STEPS", "1"))   # simulated adverse slippage applied to paper fills, % of reference price
 
 # ---------------------------------------------------------------------
 # Opening sequence / timing (all Asia/Kolkata, tz-aware)
@@ -220,6 +225,8 @@ if os.path.exists(_USER_CONFIG_PATH):
     UNDERLYING = _overrides.get("underlying", UNDERLYING)
     UNIVERSE_MODE = _overrides.get("universe_mode", UNIVERSE_MODE).upper()
     MODE = _overrides.get("mode", MODE)
+    OPTION_STRATEGY = _overrides.get("option_strategy", OPTION_STRATEGY).upper()
+    SELL_OTM_STEPS = int(_overrides.get("sell_otm_steps", SELL_OTM_STEPS))
     ENTRY_START_TIME = _overrides.get("entry_start_time", ENTRY_START_TIME)
     ENTRY_END_TIME = _overrides.get("entry_end_time", ENTRY_END_TIME)
     INTRADAY_OPTIONS_ENABLED = _overrides.get("intraday_options_enabled", INTRADAY_OPTIONS_ENABLED)
