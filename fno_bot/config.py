@@ -90,14 +90,14 @@ ENTRY_END_TIME = "14:30:00"     # opening-momentum window closes -- no fresh FIR
 PREPARE_BEFORE_SECONDS = 600     # start PREPARE (auth, contract master, ws connect+subscribe) this many
                                    # seconds before ENTRY_START_TIME, so nothing time-critical happens at 09:15:00 itself
 
-FORCE_SQUARE_OFF_TIME = "15:05"  # mandatory end-of-session exit, same discipline as equity bot
+FORCE_SQUARE_OFF_TIME = "15:30"  # mandatory end-of-session exit, same discipline as equity bot
 
 # PAPER-only second session.  This does not widen the Opening Scalper's
 # authorization; a separate completed-candle/live-flow engine owns this range.
 INTRADAY_OPTIONS_ENABLED = False
 INTRADAY_ENTRY_START_TIME = "09:20:00"
 INTRADAY_ENTRY_END_TIME = "14:30:00"
-INTRADAY_FORCE_EXIT_TIME = "15:05:00"
+INTRADAY_FORCE_EXIT_TIME = "15:30:00"
 INTRADAY_HISTORICAL_SHORTLIST_SIZE = 10
 INTRADAY_HISTORICAL_CACHE_SECONDS = 55
 
@@ -224,7 +224,7 @@ FNO_TIME_STOP_MIN_PROGRESS_PCT = float(os.environ.get("FNO_TIME_STOP_MIN_PROGRES
 FNO_MOMENTUM_EXIT_MIN_PROFIT_PCT = float(os.environ.get("FNO_MOMENTUM_EXIT_MIN_PROFIT_PCT", "3"))
 FNO_STRUCTURE_CONFIRMATIONS = int(os.environ.get("FNO_STRUCTURE_CONFIRMATIONS", "2"))
 FNO_LATE_ENTRY_CUTOFF = os.environ.get("FNO_LATE_ENTRY_CUTOFF", "14:30")
-FNO_EXIT_CUTOFF = os.environ.get("FNO_EXIT_CUTOFF", "15:05")
+FNO_EXIT_CUTOFF = os.environ.get("FNO_EXIT_CUTOFF", "15:30")
 FNO_PAPER_ONLY_DEFAULT = True
 
 # ---------------------------------------------------------------------
