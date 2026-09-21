@@ -153,7 +153,7 @@ def run_shadow_session(underlying_name=None, market_start_hour=9, market_start_m
     while True:
         now_dt = datetime.now(IST)
         now_hhmm = now_dt.strftime("%H:%M")
-        if now_hhmm >= "15:10":
+        if now_hhmm >= "15:35":
             logger.info("Session end, stopping")
             break
         seconds_since_open = (now_dt - market_open).total_seconds()
