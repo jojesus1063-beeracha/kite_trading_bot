@@ -16,7 +16,9 @@ from fno_bot.strategies.premium_rotation_state import (
     load_day_state, save_day_state, KillSwitchParams, can_take_new_trade,
     record_trade_result, is_within_opening_protection, should_reselect_atm, DAY_STATE_PATH,
 )
-from fno_bot.strategies.premium_rotation_costs_log import net_pnl_for_closed_trade, RotationAuditLog
+from fno_bot.strategies.premium_rotation_costs_log import (
+    net_pnl_for_closed_trade, RotationAuditLog, summarize_closed_trades,
+)
 from fno_bot.strategies.options_selling import otm_strike
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("fno.options_selling")
@@ -191,6 +193,22 @@ def run_shadow_session(underlying_name=None, market_start_hour=9, market_start_m
             logger.info("Re-ATM trigger detected; re-selection wiring remains intentionally disabled until paper validation")
         time.sleep(1)
     kws.close()
+    eod_summary = summarize_closed_trades(session.closed_trades)
+    eod_summary.update({
+        "date": today_str,
+        "mode": cfg.MODE,
+        "strategy": getattr(cfg, "OPTION_STRATEGY", "SELL_PREMIUM"),
+        "underlying": underlying_name,
+        "lot_size": quantity,
+        "square_off_time": session.params_exit.session_cutoff_hhmm,
+    })
+    audit_log.log_eod_summary(eod_summary)
+    logger.info(
+        "EOD PAPER SUMMARY trades=%s gross=%s estimated_costs=%s net=%s reasons=%s",
+        eod_summary["trade_count"], eod_summary["gross_pnl"],
+        eod_summary["estimated_costs"], eod_summary["net_pnl_estimate"],
+        eod_summary["exit_reason_counts"],
+    )
 
 def main():
     run_shadow_session(underlying_name=cfg.UNDERLYING)
