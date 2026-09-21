@@ -123,7 +123,11 @@ def run_shadow_session(underlying_name=None, market_start_hour=9, market_start_m
                 selection["strike"], selection["ce_symbol"], selection["ce_strike"],
                 selection["pe_symbol"], selection["pe_strike"], selection["expiry"], selection["lot_size"])
     day_state = load_day_state(DAY_STATE_PATH, today_str)
-    kill_params = KillSwitchParams()
+    kill_params = KillSwitchParams(
+        max_trades_per_day=cfg.MAX_TRADES_PER_DAY,
+        max_daily_loss=cfg.MAX_DAILY_LOSS,
+        max_consecutive_losses=cfg.MAX_CONSECUTIVE_LOSSES,
+    )
     # A short option receives premium; premium-outlay sizing from the old
     # long-option engine is deliberately removed. Paper mode uses exactly
     # one exchange lot so results are interpretable. Real margin is NOT
