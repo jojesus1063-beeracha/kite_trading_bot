@@ -42,23 +42,43 @@ def estimate_cost(entry, exit_price, qty):
     gst=(brokerage+exchange+sebi)*0.18
     return brokerage+exchange+sebi+stamp+stt+gst
 
-def get_initial_stop(t):
-    r=t["raw"]
-    keys=(
-        "el_bethel_v2_initial_logical_stop",
-        "initial_logical_stop",
-        "structural_stop",
-        "stop",
-        "stop_loss",
+def load_3m_context(t, context_dir):
+    p=Path(context_dir)/f'{t["date"]}_{t["exchange"]}_{t["symbol"]}.parquet'
+    if not p.exists():
+        return None
+    df=pd.read_parquet(p)
+    col="timestamp" if "timestamp" in df.columns else "date"
+    df[col]=pd.to_datetime(df[col])
+    if df[col].dt.tz is None:
+        df[col]=df[col].dt.tz_localize("Asia/Kolkata")
+    else:
+        df[col]=df[col].dt.tz_convert("Asia/Kolkata")
+    return df.rename(columns={col:"date"}).sort_values("date").reset_index(drop=True)
+
+def reconstruct_initial_stop(t, context):
+    cutoff=t["entry_time"]
+    hist=context[(context["date"]+pd.Timedelta(minutes=3))<=cutoff].copy()
+    if len(hist)<20:
+        return None, {"reason":"INSUFFICIENT_3M_CONTEXT","bars":len(hist)}
+    decision=el_bethel.evaluate_entry_v2(
+        hist,
+        t["direction"],
+        tick_size=get_tick(t),
     )
-    for k in keys:
-        v=r.get(k)
-        if v is not None:
-            try:
-                x=float(v)
-                if x>0:return x,k
-            except Exception:pass
-    return None,None
+    stop=getattr(decision,"structural_stop",None)
+    meta={
+        "bars":len(hist),
+        "score":getattr(decision,"score",None),
+        "reason":getattr(decision,"reason",None),
+        "breakout_level":getattr(decision,"breakout_level",None),
+        "structure_price":getattr(decision,"structure_price",None),
+        "atr14":getattr(decision,"atr14",None),
+    }
+    try:
+        stop=float(stop) if stop is not None else None
+    except Exception:
+        stop=None
+    return stop, meta
 
 def get_qty(t):
     for k in ("qty","quantity","filled_quantity","requested_quantity"):
@@ -77,13 +97,6 @@ def get_tick(t):
     except Exception:
         return 0.05
 
-def resample_3m(bars):
-    z=bars.copy().set_index("ts").sort_index()
-    # NSE/BSE regular session aligns naturally to 09:15 on a 3-minute grid.
-    r=z.resample("3min",origin="start_day").agg({
-        "open":"first","high":"max","low":"min","close":"last"
-    }).dropna().reset_index()
-    return r.rename(columns={"ts":"date"})
 
 def stop_fill(direction, bar, trigger):
     op=float(bar.open)
@@ -97,16 +110,20 @@ def last_completed_3m_time(minute_ts):
     # A 3m candle starting at t is usable at t+3m.
     return minute_ts.floor("3min") - pd.Timedelta(minutes=3)
 
-def replay_one(t,bars,squareoff):
+def replay_one(t,bars,context,squareoff):
     status,entry_ts,entry_px=armed_decision(
         t,bars,CONFIRM,ADVERSE,CHASE,EXPIRY
     )
     if status!="ENTER":
         return {"status":status,"entered":False}
 
-    initial_stop,stop_source=get_initial_stop(t)
+    initial_stop,recon=reconstruct_initial_stop(t,context)
     if initial_stop is None:
-        return {"status":"NO_INITIAL_STOP","entered":False}
+        return {
+            "status":"STOP_RECON_FAILED",
+            "entered":False,
+            **{f"recon_{k}":v for k,v in recon.items()},
+        }
 
     direction=t["direction"]
     qty=get_qty(t)
@@ -119,7 +136,6 @@ def replay_one(t,bars,squareoff):
         return {"status":"INVALID_INITIAL_STOP","entered":False,
                 "entry_price":entry_px,"initial_stop":initial_stop}
 
-    three=resample_3m(bars)
     current_stop=float(initial_stop)
     developed=False
     development_reason=None
@@ -142,8 +158,8 @@ def replay_one(t,bars,squareoff):
 
         # Apply logical-state update only from fully completed 3m candles
         # available before this minute begins.
-        cutoff=last_completed_3m_time(mts)
-        completed=three[three["date"]<=cutoff]
+        cutoff=mts.floor("3min")
+        completed=context[(context["date"]+pd.Timedelta(minutes=3))<=cutoff]
         if not completed.empty:
             newest=completed.iloc[-1]["date"]
             if last_state_bar is None or newest>last_state_bar:
@@ -196,7 +212,13 @@ def replay_one(t,bars,squareoff):
         "exit_time":str(exit_ts),"exit_price":round(exit_px,6),
         "exit_reason":exit_reason,
         "qty":qty,"initial_stop":round(float(initial_stop),6),
-        "stop_source":stop_source,"final_logical_stop":round(float(current_stop),6),
+        "stop_source":"RECONSTRUCTED_EVALUATE_ENTRY_V2",
+        "recon_score":recon.get("score"),
+        "recon_reason":recon.get("reason"),
+        "recon_breakout_level":recon.get("breakout_level"),
+        "recon_structure_price":recon.get("structure_price"),
+        "recon_atr14":recon.get("atr14"),
+        "final_logical_stop":round(float(current_stop),6),
         "profit_developed":developed,
         "development_reason":development_reason,
         "stop_updates":stop_updates,
@@ -217,6 +239,7 @@ def metrics(rows):
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--trade-history",default="trade_history.jsonl")
+    ap.add_argument("--context-dir",default="runtime/v21_weekend_research/candles_3minute_context")
     ap.add_argument("--out",default="runtime/v21_weekend_research/e2e_replay")
     ap.add_argument("--squareoff",default="15:08")
     args=ap.parse_args()
@@ -232,13 +255,18 @@ def main():
             results.append({**{k:t[k] for k in ("date","symbol","exchange","direction")},
                             "status":"NO_1M_DATA","entered":False})
             continue
+        context=load_3m_context(t,args.context_dir)
+        if context is None:
+            results.append({**{k:t[k] for k in ("date","symbol","exchange","direction")},
+                            "status":"NO_3M_CONTEXT","entered":False})
+            continue
         p,df,tcol,ts=got
         bars=norm_ohlc(df,tcol,ts)
         if bars is None:
             results.append({**{k:t[k] for k in ("date","symbol","exchange","direction")},
                             "status":"BAD_1M_DATA","entered":False})
             continue
-        rr=replay_one(t,bars,sq)
+        rr=replay_one(t,bars,context,sq)
         rr.update({k:t[k] for k in ("date","symbol","exchange","direction")})
         rr["historical_entry"]=t["entry"]
         rr["historical_exit"]=t["exit"]
@@ -264,7 +292,7 @@ def main():
         "metrics":m,
         "caveats":[
             "Uses 1-minute OHLC, not tick-by-tick path.",
-            "Initial structural logical stop is frozen from the original approved candidate.",
+            "Initial structural logical stop is reconstructed with the current evaluate_entry_v2() engine using only 3-minute candles fully completed before the historical entry.",
             "EXIT_V2 state/trailing is recalculated from completed 3-minute candles.",
             "Broker protective-stop fill is conservatively modeled at trigger or worse gap-open.",
             "Charges are estimated with the repository equity-intraday cost model.",
