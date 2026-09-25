@@ -59,16 +59,22 @@ def load_trades(path: Path):
         gap=None
         if plus is not None and minus is not None:
             gap=(plus-minus) if direction=="BUY" else (minus-plus)
-        out.append(dict(raw=r,line=i,symbol=str(sym),direction=direction,entry_time=ts,date=ts.date().isoformat(),
+        exchange=str(r.get("exchange") or "NSE").upper()
+        out.append(dict(raw=r,line=i,symbol=str(sym),exchange=exchange,direction=direction,entry_time=ts,date=ts.date().isoformat(),
                         entry=entry,exit=exitp,gross_pnl=pnl,ref=sig,adx=adx,di_gap=gap))
     return out
 
-def discover_1m(symbol,date):
+def discover_1m(symbol,date,exchange="NSE"):
+    # Prefer the exact cache produced by fetch_v21_trade_1m_candles.py.
+    exact=ROOT/"runtime"/"v21_weekend_research"/"candles_1minute"/f"{date}_{exchange}_{symbol}.parquet"
+    candidates=[]
+    if exact.exists():
+        candidates.append(exact)
     pats=[
+        f"**/{date}_{exchange}_{symbol}.parquet",
         f"**/{symbol}*1minute*.parquet",f"**/{symbol}*.parquet",
         f"**/{symbol}*1minute*.csv",f"**/{symbol}*.csv",
     ]
-    candidates=[]
     for pat in pats:
         candidates.extend(ROOT.glob("runtime/"+pat))
     best=[]
@@ -164,7 +170,7 @@ def main():
     enriched=[]
     misses=[]
     for t in trades:
-        got=discover_1m(t["symbol"],t["date"])
+        got=discover_1m(t["symbol"],t["date"],t["exchange"])
         if not got:
             misses.append((t["date"],t["symbol"]));continue
         p,df,tcol,ts=got
