@@ -1131,11 +1131,46 @@ def run_full_scan(
         signal = candidate["signal"]
         df_5m = candidate["df_5m"]
         _snapshot_row = candidate["snapshot_row"]
+        # Hard freshness gate: once a completed-candle signal has aged beyond
+        # the configured execution budget, do not submit a late order. This
+        # prevents a valid technical signal from becoming a stale chase after
+        # ranking, live-price, margin, or position checks consume the window.
+        try:
+            signal_ts = pd.Timestamp(signal.timestamp)
+            now_ts = pd.Timestamp.now(tz=signal_ts.tz) if signal_ts.tzinfo is not None else pd.Timestamp.now()
+            signal_age_seconds = max(0.0, (now_ts - signal_ts).total_seconds())
+        except Exception as exc:
+            signal_age_seconds = float("inf")
+            logger.error(f"{symbol}: unable to determine signal age; blocking entry: {exc}")
+
+        max_signal_age = float(getattr(cfg, "ENTRY_SIGNAL_MAX_AGE_SECONDS", 8.0))
+        if signal_age_seconds > max_signal_age:
+            logger.warning(
+                f"{symbol}: STALE_SIGNAL_BLOCKED | direction={signal.direction} "
+                f"| age={signal_age_seconds:.3f}s | max={max_signal_age:.3f}s"
+            )
+            status_this_cycle.append({
+                "symbol": symbol,
+                "status": "stale signal blocked before order submission",
+                "signal_age_seconds": round(signal_age_seconds, 3),
+            })
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    **candidate_event_context if "candidate_event_context" in locals() else {"symbol": symbol},
+                    "reason_code": "STALE_SIGNAL",
+                    "reason": "completed-candle signal exceeded execution freshness budget",
+                    "signal_age_seconds": round(signal_age_seconds, 3),
+                    "max_signal_age_seconds": max_signal_age,
+                },
+            )
+            continue
+
         pre_order_timing = build_entry_timing(
             signal.timestamp,
             cfg.ENTRY_TIMEFRAME,
             scan_started_at=scan_started_at,
-            order_submitted_at=scan_started_at,
+            order_submitted_at=datetime.now(),
         )
 
         candidate_event_context = {
