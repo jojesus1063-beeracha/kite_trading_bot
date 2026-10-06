@@ -1157,7 +1157,11 @@ def run_full_scan(
             record_validation_event(
                 "candidate_rejected",
                 {
-                    **candidate_event_context if "candidate_event_context" in locals() else {"symbol": symbol},
+                    "symbol": symbol,
+                    "direction": signal.direction,
+                    "candidate_rank": candidate_rank,
+                    "candidate_count": len(ranked_candidates),
+                    "ranking_score": candidate.get("ranking_score"),
                     "reason_code": "STALE_SIGNAL",
                     "reason": "completed-candle signal exceeded execution freshness budget",
                     "signal_age_seconds": round(signal_age_seconds, 3),
