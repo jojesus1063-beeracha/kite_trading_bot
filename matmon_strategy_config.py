@@ -23,7 +23,7 @@ from __future__ import annotations
 # how many the intraday scan shortlist tracks. Both must agree -- a fresh
 # Top-N pre-open watchlist feeding a launcher configured for a different N
 # is a configuration-drift bug, not a valid state.
-MATMON_WATCHLIST_SIZE = 30
+MATMON_WATCHLIST_SIZE = 120
 
 # REST 3-minute EMA fast/slow period and DI period used for the completed-
 # candle direction/agreement step.
