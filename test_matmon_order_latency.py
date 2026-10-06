@@ -19,3 +19,8 @@ def test_broker_submission_latency_is_instrumented():
     source = Path("executor.py").read_text()
     assert "BROKER_ENTRY_SUBMIT_LATENCY" in source
     assert "broker_submit_started = time.monotonic()" in source
+
+
+def test_live_entry_scan_shortlist_is_top_30():
+    source = Path("config.py").read_text()
+    assert "ENTRY_SCAN_SHORTLIST_SIZE = 30" in source
