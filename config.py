@@ -209,7 +209,7 @@ POSITION_CHECK_SECONDS = 25   # how often to check open positions between scans
 CANDLE_COMPLETION_BUFFER_SECONDS = 0
 SCAN_BUFFER_SECONDS = 2       # minimal completed-candle settlement buffer; keep entry path time-critical
 ENTRY_SIGNAL_MAX_AGE_SECONDS = 8.0  # hard stale-signal cutoff from candle close to broker submission
-ENTRY_SCAN_SHORTLIST_SIZE = 60  # top daily auto-watchlist priorities
+ENTRY_SCAN_SHORTLIST_SIZE = 30  # live entry scan: top 30 from the directional Top-120 universe
 
 # Sanity-check thresholds -- purely observational, log-only. Never skip
 # or alter any trading action based on these; they just surface timing
