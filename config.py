@@ -206,8 +206,9 @@ PAPER_TRADING = False
 # is byte-for-byte identical either way.
 ENABLE_CANDLE_ALIGNED_POLLING = True
 POSITION_CHECK_SECONDS = 25   # how often to check open positions between scans
-CANDLE_COMPLETION_BUFFER_SECONDS = 10
-SCAN_BUFFER_SECONDS = 12      # broker finalisation buffer + 2s safety margin
+CANDLE_COMPLETION_BUFFER_SECONDS = 0
+SCAN_BUFFER_SECONDS = 2       # minimal completed-candle settlement buffer; keep entry path time-critical
+ENTRY_SIGNAL_MAX_AGE_SECONDS = 8.0  # hard stale-signal cutoff from candle close to broker submission
 ENTRY_SCAN_SHORTLIST_SIZE = 60  # top daily auto-watchlist priorities
 
 # Sanity-check thresholds -- purely observational, log-only. Never skip
@@ -219,8 +220,8 @@ SCHEDULER_WARNING_SCAN_SECONDS = 90     # full scan taking longer than this -> W
 SCHEDULER_CRITICAL_SCAN_SECONDS = 120   # full scan taking longer than this -> CRITICAL
 POSITION_CHECK_WARNING_SECONDS = 40     # one position-check pass taking longer than this -> WARNING
 POSITION_CHECK_CRITICAL_SECONDS = 60    # one position-check pass taking longer than this -> CRITICAL
-SCAN_DELAY_WARNING_SECONDS = 30         # scan starting this late vs its target time -> WARNING
-SCAN_DELAY_CRITICAL_SECONDS = 60        # scan starting this late vs its target time -> CRITICAL
+SCAN_DELAY_WARNING_SECONDS = 5         # scan starting this late vs its target time -> WARNING
+SCAN_DELAY_CRITICAL_SECONDS = 15        # scan starting this late vs its target time -> CRITICAL
 
 # ---------------------------------------------------------------------
 # Overrides from the web configuration UI (configure_app.py)
