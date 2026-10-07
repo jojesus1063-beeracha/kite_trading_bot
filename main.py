@@ -1065,11 +1065,10 @@ def run_full_scan(
         cooperative_monitor,
     )
 
+    # Rank only the candidates generated in this scan cycle. The pre-open
+    # watchlist supplies the universe; intraday ranking decides execution
+    # priority so the strongest live setup is handled first.
     ranked_candidates = rank_entry_candidates(entry_candidates)
-    if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False):
-        # Preserve the Momentum/RVOL Top-120 order. Legacy analytical scores
-        # must not influence which simultaneous EMA signal executes first.
-        ranked_candidates = list(entry_candidates)
 
     batch_live_prices = fetch_live_prices(
         kite,
@@ -1137,11 +1136,26 @@ def run_full_scan(
         # ranking, live-price, margin, or position checks consume the window.
         try:
             signal_ts = pd.Timestamp(signal.timestamp)
-            now_ts = pd.Timestamp.now(tz=signal_ts.tz) if signal_ts.tzinfo is not None else pd.Timestamp.now()
-            signal_age_seconds = max(0.0, (now_ts - signal_ts).total_seconds())
+            # Kite timestamps OHLC candles at their START. Freshness must be
+            # measured from the completed candle CLOSE, not from its start.
+            signal_close_ts = signal_ts + pd.Timedelta(
+                minutes=candle_interval_minutes(cfg.ENTRY_TIMEFRAME)
+            )
+            now_ts = (
+                pd.Timestamp.now(tz=signal_close_ts.tz)
+                if signal_close_ts.tzinfo is not None
+                else pd.Timestamp.now()
+            )
+            signal_age_seconds = max(
+                0.0,
+                (now_ts - signal_close_ts).total_seconds(),
+            )
         except Exception as exc:
             signal_age_seconds = float("inf")
-            logger.error(f"{symbol}: unable to determine signal age; blocking entry: {exc}")
+            logger.error(
+                f"{symbol}: unable to determine completed signal age; "
+                f"blocking entry: {exc}"
+            )
 
         max_signal_age = float(getattr(cfg, "ENTRY_SIGNAL_MAX_AGE_SECONDS", 8.0))
         if signal_age_seconds > max_signal_age:
