@@ -348,6 +348,7 @@ def place_entry_order(
         return _rejected(f"intent creation failed: {e}")
 
     transaction_type = kite.TRANSACTION_TYPE_BUY if direction == "BUY" else kite.TRANSACTION_TYPE_SELL
+    broker_submit_started = time.monotonic()
     try:
         order_id = kite.place_order(
             variety=cfg.VARIETY,
@@ -361,6 +362,11 @@ def place_entry_order(
             tag=client_tag,
         )
     except Exception as e:
+        broker_submit_elapsed_ms = (time.monotonic() - broker_submit_started) * 1000.0
+        logger.error(
+            f"BROKER_ENTRY_SUBMIT_LATENCY | {symbol} | "
+            f"{broker_submit_elapsed_ms:.1f}ms | outcome=EXCEPTION"
+        )
         # Submission outcome is genuinely UNCERTAIN -- the network call could
         # have failed after the broker already accepted the order. Never
         # resubmit blindly. The intent stays unresolved (order_id=None) for
@@ -416,6 +422,12 @@ def place_entry_order(
         logger.warning(
             f"Recovered entry order {order_id} for {symbol} using tag={client_tag}"
         )
+
+    broker_submit_elapsed_ms = (time.monotonic() - broker_submit_started) * 1000.0
+    logger.info(
+        f"BROKER_ENTRY_SUBMIT_LATENCY | {symbol} | "
+        f"{broker_submit_elapsed_ms:.1f}ms | outcome=ORDER_ID"
+    )
 
     try:
         attach_broker_order_id(operation_id, order_id)
