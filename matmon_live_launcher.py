@@ -23,6 +23,7 @@ import os
 import runpy
 
 import config as cfg
+from auth import get_kite_client
 import matmon_strategy_config as strategy_def
 import paper_matmon_launcher as paper_matmon
 from paper_contrarian_launcher import LIVE_ACK_ENV, LIVE_ACK_VALUE
@@ -47,6 +48,31 @@ LIVE_MAX_TRADES_PER_DAY = 10
 LIVE_MAX_DAILY_LOSS_PCT = 0.50
 LIVE_DAILY_LOSS_KILL_SWITCH_ENABLED = True
 LIVE_MAX_CONSECUTIVE_LOSSES = 3
+LIVE_ENTRY_SCAN_SHORTLIST_SIZE = 30
+
+
+def _freeze_dynamic_capital(kite) -> float:
+    """Freeze the session capital from Zerodha's live equity net balance."""
+    margins = kite.margins("equity")
+    if not isinstance(margins, dict):
+        raise RuntimeError("Zerodha equity margins response is not a dictionary")
+    net = margins.get("net")
+    try:
+        capital = float(net)
+    except (TypeError, ValueError):
+        raise RuntimeError(f"Invalid Zerodha equity net balance: {net!r}")
+    if capital <= 0:
+        raise RuntimeError(f"Zerodha equity net balance is not positive: {capital}")
+    cfg.CAPITAL = capital
+    cfg.DYNAMIC_CAPITAL_ENABLED = True
+    cfg.DYNAMIC_CAPITAL_SOURCE = "ZERODHA_EQUITY_NET"
+    cfg.DYNAMIC_CAPITAL_FROZEN_FOR_SESSION = True
+    logger.critical(
+        "MATMON DYNAMIC CAPITAL | source=ZERODHA_EQUITY_NET | "
+        "startup_capital=%.2f | frozen_for_session=True",
+        capital,
+    )
+    return capital
 
 
 def enforce_live_limits() -> dict:
@@ -61,8 +87,12 @@ def enforce_live_limits() -> dict:
         )
     if str(getattr(cfg, "PRODUCT", "")).upper() != "MIS":
         raise SystemExit("SAFETY BLOCK: matmon live launcher requires PRODUCT=MIS")
-    if float(getattr(cfg, "CAPITAL", 0.0)) <= 0:
-        raise SystemExit("SAFETY BLOCK: TRADING_CAPITAL must be positive")
+    try:
+        capital = _freeze_dynamic_capital(get_kite_client())
+    except Exception as exc:
+        raise SystemExit(
+            f"SAFETY BLOCK: unable to read Zerodha equity capital: {exc}"
+        ) from exc
     if getattr(cfg, "MARKET_PROTECTION", None) is None:
         raise SystemExit("SAFETY BLOCK: MARKET_PROTECTION must be configured")
     if not bool(getattr(cfg, "ENABLE_WS_CANDLES", False)):
@@ -81,7 +111,13 @@ def enforce_live_limits() -> dict:
     cfg.MATMON_QUOTE_WINDOW_SECONDS = strategy_def.MATMON_QUOTE_WINDOW_SECONDS
     cfg.MATMON_QUOTE_MAX_AGE_SECONDS = strategy_def.MATMON_QUOTE_MAX_AGE_SECONDS
     cfg.ENTRY_TIMEFRAME = strategy_def.MATMON_ENTRY_TIMEFRAME
-    cfg.ENTRY_SCAN_SHORTLIST_SIZE = strategy_def.MATMON_WATCHLIST_SIZE
+    # Keep the canonical 120-name watchlist, but only run expensive intraday
+    # confirmation on its top 30 leaders. This prevents a 120-symbol scan from
+    # consuming the entire 3-minute candle and starving fresh execution.
+    cfg.ENTRY_SCAN_SHORTLIST_SIZE = min(
+        strategy_def.MATMON_WATCHLIST_SIZE,
+        LIVE_ENTRY_SCAN_SHORTLIST_SIZE,
+    )
     cfg.CHECK_MARGIN_BEFORE_ENTRY = True
 
     # Live risk caps.
@@ -106,7 +142,7 @@ def enforce_live_limits() -> dict:
 
     return {
         "strategy": "MATMON_HAELOHIM",
-        "capital": cfg.CAPITAL,
+        "capital": capital,
         "risk_per_trade_pct": cfg.RISK_PER_TRADE_PCT,
         "max_position_size_pct": cfg.MAX_POSITION_SIZE_PCT,
         "max_open_positions": cfg.MAX_OPEN_POSITIONS,

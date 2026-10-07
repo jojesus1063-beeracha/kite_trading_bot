@@ -1065,11 +1065,10 @@ def run_full_scan(
         cooperative_monitor,
     )
 
+    # Rank only the candidates generated in this scan cycle. The pre-open
+    # watchlist supplies the universe; intraday ranking decides execution
+    # priority so the strongest live setup is handled first.
     ranked_candidates = rank_entry_candidates(entry_candidates)
-    if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False):
-        # Preserve the Momentum/RVOL Top-120 order. Legacy analytical scores
-        # must not influence which simultaneous EMA signal executes first.
-        ranked_candidates = list(entry_candidates)
 
     batch_live_prices = fetch_live_prices(
         kite,
@@ -1131,11 +1130,65 @@ def run_full_scan(
         signal = candidate["signal"]
         df_5m = candidate["df_5m"]
         _snapshot_row = candidate["snapshot_row"]
+        # Hard freshness gate: once a completed-candle signal has aged beyond
+        # the configured execution budget, do not submit a late order. This
+        # prevents a valid technical signal from becoming a stale chase after
+        # ranking, live-price, margin, or position checks consume the window.
+        try:
+            signal_ts = pd.Timestamp(signal.timestamp)
+            # Kite timestamps OHLC candles at their START. Freshness must be
+            # measured from the completed candle CLOSE, not from its start.
+            signal_close_ts = signal_ts + pd.Timedelta(
+                minutes=candle_interval_minutes(cfg.ENTRY_TIMEFRAME)
+            )
+            now_ts = (
+                pd.Timestamp.now(tz=signal_close_ts.tz)
+                if signal_close_ts.tzinfo is not None
+                else pd.Timestamp.now()
+            )
+            signal_age_seconds = max(
+                0.0,
+                (now_ts - signal_close_ts).total_seconds(),
+            )
+        except Exception as exc:
+            signal_age_seconds = float("inf")
+            logger.error(
+                f"{symbol}: unable to determine completed signal age; "
+                f"blocking entry: {exc}"
+            )
+
+        max_signal_age = float(getattr(cfg, "ENTRY_SIGNAL_MAX_AGE_SECONDS", 8.0))
+        if signal_age_seconds > max_signal_age:
+            logger.warning(
+                f"{symbol}: STALE_SIGNAL_BLOCKED | direction={signal.direction} "
+                f"| age={signal_age_seconds:.3f}s | max={max_signal_age:.3f}s"
+            )
+            status_this_cycle.append({
+                "symbol": symbol,
+                "status": "stale signal blocked before order submission",
+                "signal_age_seconds": round(signal_age_seconds, 3),
+            })
+            record_validation_event(
+                "candidate_rejected",
+                {
+                    "symbol": symbol,
+                    "direction": signal.direction,
+                    "candidate_rank": candidate_rank,
+                    "candidate_count": len(ranked_candidates),
+                    "ranking_score": candidate.get("ranking_score"),
+                    "reason_code": "STALE_SIGNAL",
+                    "reason": "completed-candle signal exceeded execution freshness budget",
+                    "signal_age_seconds": round(signal_age_seconds, 3),
+                    "max_signal_age_seconds": max_signal_age,
+                },
+            )
+            continue
+
         pre_order_timing = build_entry_timing(
             signal.timestamp,
             cfg.ENTRY_TIMEFRAME,
             scan_started_at=scan_started_at,
-            order_submitted_at=scan_started_at,
+            order_submitted_at=datetime.now(),
         )
 
         candidate_event_context = {
