@@ -201,9 +201,9 @@ def test_16_rejected_candidate_cannot_reach_boundary():
 def test_17_valid_candidate_reaches_dry_run_boundary():
     now = time.time()
     b = _buffer([
-        _tick(now - 3.2, 100.00, 100.10, 100.00, bid_qty=100, ask_qty=90),
-        _tick(now - 1.5, 100.05, 100.15, 100.10, bid_qty=120, ask_qty=80),
-        _tick(now - 0.1, 100.10, 100.20, 100.24, bid_qty=140, ask_qty=70),
+        _tick(now - 3.2, 100.20, 100.30, 100.25, bid_qty=80, ask_qty=120),
+        _tick(now - 1.5, 100.15, 100.25, 100.20, bid_qty=75, ask_qty=125),
+        _tick(now - 0.1, 100.10, 100.20, 100.15, bid_qty=70, ask_qty=130),
     ])
     result = authorize_candidate(
         tick_buffer=b, symbol="ABC", ema3=101, ema15=100,
