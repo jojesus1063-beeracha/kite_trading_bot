@@ -77,14 +77,14 @@ def _trend_df(up=True, rows=40):
     return pd.DataFrame(data)
 
 
-def test_01_ema3_gt_ema15_buy():
+def test_01_bullish_ema_di_becomes_sell():
     d = evaluate_direction(ema3=101, ema15=100, plus_di=30, minus_di=15)
-    assert d.accepted and d.direction == "BUY"
-
-
-def test_02_ema3_lt_ema15_sell():
-    d = evaluate_direction(ema3=99, ema15=100, plus_di=10, minus_di=25)
     assert d.accepted and d.direction == "SELL"
+
+
+def test_02_bearish_ema_di_becomes_buy():
+    d = evaluate_direction(ema3=99, ema15=100, plus_di=10, minus_di=25)
+    assert d.accepted and d.direction == "BUY"
 
 
 def test_03_equal_ema_rejects():
@@ -92,7 +92,7 @@ def test_03_equal_ema_rejects():
     assert not d.accepted and d.direction is None
 
 
-def test_04_di_disagreement_rejects():
+def test_04_bullish_ema_with_bearish_di_rejects():
     d = evaluate_direction(ema3=101, ema15=100, plus_di=10, minus_di=20)
     assert not d.accepted and d.reason == "DI_DISAGREES"
 
@@ -276,17 +276,17 @@ def test_24_microstructure_uses_same_clean_ticks():
     assert clean.confirmed and micro.sample_count == len(clean.ticks)
 
 
-def test_25_paper_signal_is_direct_ema3_15_di14_buy():
+def test_25_paper_signal_is_direct_ema3_15_di14_reversed_sell():
     signal = paper_matmon._matmon_signal("ABC", _trend_df(up=True), _paper_cfg())
-    assert signal is not None and signal.direction == "BUY"
+    assert signal is not None and signal.direction == "SELL"
     detail = signal.price_action_detail["matmon"]
     assert detail["ema3"] > detail["ema15"]
     assert detail["plus_di"] > detail["minus_di"]
 
 
-def test_26_paper_signal_is_direct_ema3_15_di14_sell():
+def test_26_paper_signal_is_direct_ema3_15_di14_reversed_buy():
     signal = paper_matmon._matmon_signal("ABC", _trend_df(up=False), _paper_cfg())
-    assert signal is not None and signal.direction == "SELL"
+    assert signal is not None and signal.direction == "BUY"
     detail = signal.price_action_detail["matmon"]
     assert detail["ema3"] < detail["ema15"]
     assert detail["minus_di"] > detail["plus_di"]
@@ -306,9 +306,6 @@ def test_28_paper_period_contract_is_3_15_14():
 
 
 def test_29_paper_confirmation_requires_microstructure():
-    # install_matmon_policy() delegates to install_matmon_hooks(), which is
-    # also reused unchanged by the live launcher -- inspect where the logic
-    # actually lives.
     source = inspect.getsource(paper_matmon.install_matmon_hooks)
     assert "evaluate_quote_window" in source
     assert "install_matmon_hooks" in inspect.getsource(paper_matmon.install_matmon_policy)
