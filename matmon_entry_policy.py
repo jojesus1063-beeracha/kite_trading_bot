@@ -3,7 +3,11 @@
 
 Strategy authorization stages handled here:
 1. EMA3/EMA15 direction on completed 3-minute candles.
-2. DI14 must agree with that direction.
+2. DI14 must agree with the underlying EMA direction.
+
+This revision intentionally reverses the final trade direction:
+- Bullish EMA +DI alignment -> SELL
+- Bearish EMA -DI alignment -> BUY
 
 Quote CLEAN and microstructure confirmation are handled by dedicated modules.
 This module does not place orders.
@@ -41,9 +45,9 @@ def ema_direction(ema3, ema15):
     if fast is None or slow is None:
         return None
     if fast > slow:
-        return "BUY"
-    if fast < slow:
         return "SELL"
+    if fast < slow:
+        return "BUY"
     return None
 
 
@@ -52,9 +56,12 @@ def di_agrees(direction, plus_di, minus_di):
     mdi = _finite(minus_di)
     if direction not in {"BUY", "SELL"} or pdi is None or mdi is None:
         return False
+
+    # Direction is intentionally contrarian to the underlying EMA/DI trend.
+    # Therefore BUY requires bearish DI alignment, while SELL requires bullish.
     if direction == "BUY":
-        return pdi > mdi
-    return mdi > pdi
+        return mdi > pdi
+    return pdi > mdi
 
 
 def evaluate_direction(*, ema3, ema15, plus_di, minus_di):
@@ -70,5 +77,5 @@ def evaluate_direction(*, ema3, ema15, plus_di, minus_di):
         )
 
     return MatmonDirectionDecision(
-        True, direction, "MATMON_EMA_DI_CONFIRMED", ema3, ema15, plus_di, minus_di
+        True, direction, "MATMON_REVERSED_EMA_DI_CONFIRMED", ema3, ema15, plus_di, minus_di
     )
