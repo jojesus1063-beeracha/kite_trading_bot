@@ -1,0 +1,11 @@
+[Unit]
+Description=Independent Matmon end-of-day square-off
+Wants=network-online.target
+After=network-online.target matmon-stop-live-eod.service
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/kite_trading_bot
+Environment=TZ=Asia/Kolkata
+EnvironmentFile=/home/ubuntu/kite_trading_bot/.env
+ExecStart=/home/ubuntu/kite_trading_bot/venv/bin/python3 /home/ubuntu/kite_trading_bot/matmon_eod_squareoff.py

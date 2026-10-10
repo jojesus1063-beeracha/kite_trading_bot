@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from collections import deque
 
 
@@ -33,37 +34,39 @@ class ApiRateLimiter:
         self._clock = clock or time.monotonic
         self._sleeper = sleeper or time.sleep
         self._calls = deque()
+        self._lock = threading.Lock()
 
     def wait(self) -> float:
         """Wait until one request slot is available and reserve it."""
 
         total_wait = 0.0
 
-        while True:
-            now = self._clock()
+        with self._lock:
+            while True:
+                now = self._clock()
 
-            while (
-                self._calls
-                and now - self._calls[0]
-                >= self.period_seconds
-            ):
-                self._calls.popleft()
+                while (
+                    self._calls
+                    and now - self._calls[0]
+                    >= self.period_seconds
+                ):
+                    self._calls.popleft()
 
-            if len(self._calls) < self.max_calls:
-                self._calls.append(now)
-                return total_wait
+                if len(self._calls) < self.max_calls:
+                    self._calls.append(now)
+                    return total_wait
 
-            delay = max(
-                0.0,
-                self.period_seconds
-                - (now - self._calls[0]),
-            )
+                delay = max(
+                    0.0,
+                    self.period_seconds
+                    - (now - self._calls[0]),
+                )
 
-            if delay <= 0:
-                continue
+                if delay <= 0:
+                    continue
 
-            self._sleeper(delay)
-            total_wait += delay
+                self._sleeper(delay)
+                total_wait += delay
 
 
 # Kite Connect's documented Historical Candle limit is 3 requests/second.

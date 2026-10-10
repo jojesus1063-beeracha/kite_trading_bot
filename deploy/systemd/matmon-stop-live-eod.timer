@@ -1,0 +1,8 @@
+[Unit]
+Description=matmon-stop-live-eod schedule
+[Timer]
+OnCalendar=Mon..Fri *-*-* 15:04:00 Asia/Kolkata
+Persistent=false
+Unit=matmon-stop-live-eod.service
+[Install]
+WantedBy=timers.target

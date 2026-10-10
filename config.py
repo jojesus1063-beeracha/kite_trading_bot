@@ -93,6 +93,21 @@ CHECK_MARGIN_BEFORE_ENTRY = True # verify real Zerodha margin via order_margins(
 MAX_DAILY_LOSS_PCT = 3.0       # kill-switch: stop trading if daily loss exceeds this %
 CAPITAL = float(os.environ.get("TRADING_CAPITAL", "5000"))  # your intraday capital, INR
 
+# Matmon LIVE-only pullback recovery. The normal launcher enables this
+# explicitly; every other launcher/strategy remains unchanged by default.
+MATMON_PULLBACK_WAIT_ENABLED = False
+MATMON_PULLBACK_WAIT_SECONDS = 30.0
+MATMON_PULLBACK_ENTRY_BAND_PCT = 0.10
+MATMON_PULLBACK_REVERSAL_PCT = 0.15
+MATMON_PULLBACK_MAX_QUOTE_AGE_SECONDS = 1.0
+MATMON_PULLBACK_MAX_SPREAD_MULTIPLIER = 1.5
+
+# Live Matmon latency control. Symbols are fetched with the existing bounded
+# prefetch pool, then ranked/confirmed immediately after each micro-batch.
+# Order placement and risk/position mutations remain single-threaded.
+MATMON_IMMEDIATE_BATCH_CONFIRMATION = False
+MATMON_SCAN_BATCH_SIZE = 12
+
 # Stop-loss is placed at the low (long) / high (short) of the signal
 # candle, minus/plus a small buffer to avoid getting stopped out by
 # noise.
@@ -185,7 +200,7 @@ FORCE_SQUARE_OFF_TIME = "15:08"
 
 # Trading window — don't take new entries in the first/last few minutes
 # of the session (high volatility / low liquidity for stops).
-NO_ENTRY_BEFORE = "09:25"
+NO_ENTRY_BEFORE = "09:15"
 NO_ENTRY_AFTER = "15:00"
 
 # Live vs paper mode. ALWAYS start with PAPER_TRADING = False.
@@ -208,7 +223,7 @@ ENABLE_CANDLE_ALIGNED_POLLING = True
 POSITION_CHECK_SECONDS = 25   # how often to check open positions between scans
 CANDLE_COMPLETION_BUFFER_SECONDS = 10
 SCAN_BUFFER_SECONDS = 12      # broker finalisation buffer + 2s safety margin
-ENTRY_SCAN_SHORTLIST_SIZE = 60  # top daily auto-watchlist priorities
+ENTRY_SCAN_SHORTLIST_SIZE = 80  # live Matmon overrides from its central Top-N definition
 
 # Sanity-check thresholds -- purely observational, log-only. Never skip
 # or alter any trading action based on these; they just surface timing
@@ -333,6 +348,13 @@ ENABLE_WS_CANDLES = True
 # material OHLC/volume differences. Promote back to "live" only after a
 # reviewed session demonstrates tolerance compliance.
 WS_CANDLE_MODE = "shadow"  # "shadow" or "live" -- ignored while ENABLE_WS_CANDLES is False
+WS_QUOTE_DEPTH_ONLY = True
+WS_ENABLE_CANDLE_SHADOW_COMPARISON = False
+WS_ENABLE_INDICATOR_SHADOW_COMPARISON = False
+MATMON_ENABLE_DASHBOARD_OBSERVATION = False
+MATMON_ENABLE_TICK_DEADLINE_SHADOW = False
+MATMON_ENABLE_VALUE_SATURATION_SHADOW = False
+MATMON_ENABLE_POST_DI_SHADOW = False
 WS_SECTOR_INDICES = []
 WS_INDICATOR_SHADOW_INTERVAL_MINUTES = 30
 WS_STALE_TICK_SECONDS = 5.0
@@ -349,8 +371,8 @@ MAX_ABSOLUTE_DRIFT_PCT = None
 # frozen equity watchlist's full-mode ticks/depth and creates its own virtual
 # positions from rolling order flow. It never calls an order-placement API and
 # it refuses to start unless PAPER_TRADING is True.
-ENABLE_EQUITY_SOCKET_SHADOW = True
-SOCKET_SHADOW_RECORD_RAW_TICKS = True
+ENABLE_EQUITY_SOCKET_SHADOW = False
+SOCKET_SHADOW_RECORD_RAW_TICKS = False
 SOCKET_SHADOW_OUTPUT_DIR = "runtime/equity_socket_shadow"
 SOCKET_SHADOW_MIN_FREE_DISK_GB = 2.0
 SOCKET_SHADOW_CAPITAL = 5000.0

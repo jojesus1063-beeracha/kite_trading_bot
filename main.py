@@ -30,7 +30,12 @@ from data_feed import (
 from candle_cache import LIVE_CANDLE_CACHE
 import candle_provider
 import matmon_post_di_freeze
-import paper_matmon_launcher
+import matmon_tick_observation_shadow
+import matmon_tick_activity
+import matmon_pullback_wait
+from matmon_candidate_ranking import active_signal_score
+from matmon_scan_prefetch import prefetch_entry_candles
+import matmon_policy
 from watchlist_filters import classify_direction_eligibility, format_watchlist_log, NOT_ENABLED
 from rvol import passes_rvol_threshold, format_rvol_log
 from indicators import add_indicators, atr as atr_indicator
@@ -445,6 +450,26 @@ def run_full_scan(
         market_trend_reason = "FETCH_ERROR"
         market_df_15m = pd.DataFrame()
 
+    prefetched_entry_frames = {}
+    if (
+        bool(getattr(cfg, "MATMON_MODE", False))
+        and bool(getattr(cfg, "ENABLE_CANDLE_ALIGNED_POLLING", False))
+        and int(getattr(cfg, "MATMON_PREFETCH_WORKERS", 1)) > 1
+        and cfg.TREND_TIMEFRAME == cfg.ENTRY_TIMEFRAME
+    ):
+        prefetched_entry_frames = prefetch_entry_candles(
+            kite,
+            shortlisted_symbols,
+            tokens,
+            interval=cfg.ENTRY_TIMEFRAME,
+            lookback_days=max(
+                entry_indicator_lookback_days(cfg),
+                entry_trend_lookback_days(cfg),
+            ),
+            now=scan_started_at,
+            workers=getattr(cfg, "MATMON_PREFETCH_WORKERS", 3),
+        )
+
     for symbol in symbols_to_check:
         _cooperative_position_check_if_due(
             kite,
@@ -509,23 +534,28 @@ def run_full_scan(
             "ENABLE_CANDLE_ALIGNED_POLLING",
             False,
         ):
-            df_15m = LIVE_CANDLE_CACHE.get(
-                kite,
-                token,
-                cfg.TREND_TIMEFRAME,
-                lookback_days=trend_lookback_days,
-                now=candle_fetch_time,
-                fetcher=fetch_candles,
-            )
-            df_5m = LIVE_CANDLE_CACHE.get(
-                kite,
-                token,
-                cfg.ENTRY_TIMEFRAME,
-                lookback_days=entry_lookback_days,
-                now=candle_fetch_time,
-                require_advance=True,
-                fetcher=fetch_candles,
-            )
+            prefetched = prefetched_entry_frames.get(symbol)
+            if prefetched is not None:
+                df_15m = prefetched.copy()
+                df_5m = prefetched.copy()
+            else:
+                df_15m = LIVE_CANDLE_CACHE.get(
+                    kite,
+                    token,
+                    cfg.TREND_TIMEFRAME,
+                    lookback_days=trend_lookback_days,
+                    now=candle_fetch_time,
+                    fetcher=fetch_candles,
+                )
+                df_5m = LIVE_CANDLE_CACHE.get(
+                    kite,
+                    token,
+                    cfg.ENTRY_TIMEFRAME,
+                    lookback_days=entry_lookback_days,
+                    now=candle_fetch_time,
+                    require_advance=True,
+                    fetcher=fetch_candles,
+                )
         else:
             df_15m = fetch_candles(
                 kite,
@@ -562,6 +592,52 @@ def run_full_scan(
         signal = evaluate(symbol, df_15m, df_5m, market_df_15m, cfg)
 
         if signal:
+            # Observation only: independently measure whether the first three
+            # valid post-DI ticks arrive by 3/4/5/7 seconds. This background
+            # observer never returns a decision to the trading pipeline.
+            if bool(getattr(cfg, "MATMON_ENABLE_TICK_DEADLINE_SHADOW", False)):
+                matmon_tick_observation_shadow.maybe_start_observation(
+                    symbol,
+                    signal,
+                    ws_engine=ws_shadow_engine,
+                    cfg=cfg,
+                    di_passed_at=matmon_policy.get_di_passed_at(symbol),
+                )
+
+            # Matmon-only fail-closed activity gate. Do not begin a
+            # three-second capture unless fresh full-depth updates exist.
+            if (
+                bool(getattr(cfg, "MATMON_MODE", False))
+                and str(getattr(signal, "confidence", ""))
+                == "MATMON_EMA_DI"
+            ):
+                activity = matmon_tick_activity.evaluate_tick_activity(
+                    ws_shadow_engine,
+                    symbol,
+                    lookback_seconds=10.0,
+                    minimum_updates=3,
+                    maximum_age_seconds=1.5,
+                )
+
+                logger.info(
+                    "MATMON TICK ACTIVITY | %s | accepted=%s "
+                    "updates=%s latest_age=%s reason=%s",
+                    symbol,
+                    activity.accepted,
+                    activity.valid_updates,
+                    activity.latest_age_seconds,
+                    activity.reason,
+                )
+
+                if not activity.accepted:
+                    status_this_cycle.append(
+                        {
+                            "symbol": symbol,
+                            "status": activity.reason,
+                        }
+                    )
+                    continue
+
             # Matmon-only, no-op for every other strategy/signal: start
             # freezing this symbol's post-DI tick evidence immediately at
             # T0, before any of the intermediate per-symbol checks below
@@ -572,7 +648,7 @@ def run_full_scan(
                 signal,
                 ws_engine=ws_shadow_engine,
                 cfg=cfg,
-                di_passed_at=paper_matmon_launcher.get_di_passed_at(symbol),
+                di_passed_at=matmon_policy.get_di_passed_at(symbol),
             )
             raw_direction = signal.direction
             if bool(getattr(cfg, "DEPTH_RAW_DIRECTION_ONLY", False)):
@@ -972,7 +1048,7 @@ def run_full_scan(
 
 
             ranking_score = (
-                0.0
+                active_signal_score(signal)
                 if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False)
                 else round(
                     float(_base_score)
@@ -1014,6 +1090,8 @@ def run_full_scan(
                     "sector": sector,
                     "sector_trend": sector_trend,
                     "sector_trend_reason": sector_trend_reason,
+                    "detected_at_monotonic": time.monotonic(),
+                    "detected_at": datetime.now().isoformat(),
                 }
             )
 
@@ -1066,11 +1144,6 @@ def run_full_scan(
     )
 
     ranked_candidates = rank_entry_candidates(entry_candidates)
-    if getattr(cfg, "PROPOSED_CLEAN_PIPELINE", False):
-        # Preserve the Momentum/RVOL Top-120 order. Legacy analytical scores
-        # must not influence which simultaneous EMA signal executes first.
-        ranked_candidates = list(entry_candidates)
-
     batch_live_prices = fetch_live_prices(
         kite,
         ranked_candidates,
@@ -1325,7 +1398,9 @@ def run_full_scan(
             f"| rank={candidate_rank}/"
             f"{len(ranked_candidates)} "
             f"| ranking_score="
-            f"{candidate['ranking_score']:.2f}"
+            f"{candidate['ranking_score']:.2f} "
+            f"| detection_to_confirmation_ms="
+            f"{max(0.0, (time.monotonic() - candidate.get('detected_at_monotonic', time.monotonic())) * 1000.0):.1f}"
         )
 
         delayed_confirmation_seconds = (
@@ -1445,6 +1520,85 @@ def run_full_scan(
             signal,
             fresh_live_price,
         )
+
+        if (
+            not fresh_validation.accepted
+            and not cfg.PAPER_TRADING
+            and bool(getattr(cfg, "MATMON_MODE", False))
+            and bool(getattr(cfg, "MATMON_PULLBACK_WAIT_ENABLED", False))
+            and str(getattr(signal, "confidence", "")) == "MATMON_EMA_DI"
+            and matmon_pullback_wait.is_adverse_slippage_only(fresh_validation)
+        ):
+            logger.info(
+                "MATMON PULLBACK WAIT START | %s | direction=%s signal=%s "
+                "live=%s adverse_slippage_pct=%s timeout=%ss",
+                symbol, signal.direction, fresh_validation.signal_price,
+                fresh_validation.live_price,
+                fresh_validation.adverse_slippage_pct,
+                getattr(cfg, "MATMON_PULLBACK_WAIT_SECONDS", 30.0),
+            )
+            pullback = matmon_pullback_wait.wait_for_pullback(
+                ws_shadow_engine,
+                symbol,
+                signal.direction,
+                fresh_validation.signal_price,
+                timeout_seconds=getattr(cfg, "MATMON_PULLBACK_WAIT_SECONDS", 30.0),
+                entry_band_pct=getattr(cfg, "MATMON_PULLBACK_ENTRY_BAND_PCT", 0.10),
+                reversal_pct=getattr(cfg, "MATMON_PULLBACK_REVERSAL_PCT", 0.15),
+                maximum_age_seconds=getattr(
+                    cfg, "MATMON_PULLBACK_MAX_QUOTE_AGE_SECONDS", 1.0
+                ),
+                maximum_spread_multiplier=getattr(
+                    cfg, "MATMON_PULLBACK_MAX_SPREAD_MULTIPLIER", 1.5
+                ),
+                trading_window_fn=within_trading_window,
+                risk_fn=lambda: risk.can_take_new_trade(
+                    current_open_count=len(open_positions)
+                ),
+            )
+            signal_analytics["matmon_pullback_wait"] = pullback.to_dict()
+            logger.info(
+                "MATMON PULLBACK WAIT RESULT | %s | accepted=%s reason=%s "
+                "executable=%s bid=%s ask=%s spread_bps=%s elapsed=%s samples=%s",
+                symbol, pullback.accepted, pullback.reason,
+                pullback.executable_price, pullback.bid, pullback.ask,
+                pullback.spread_bps, pullback.elapsed_seconds, pullback.samples,
+            )
+            if pullback.accepted:
+                refreshed_validation = validate_live_price(
+                    signal, pullback.executable_price
+                )
+                safety_ok = (
+                    refreshed_validation.accepted
+                    and within_trading_window()
+                    and risk.can_take_new_trade(
+                        current_open_count=len(open_positions)
+                    )
+                )
+                capture_started = False
+                if safety_ok:
+                    capture_started = matmon_policy.restart_matmon_confirmation(
+                        symbol,
+                        signal,
+                        ws_engine=ws_shadow_engine,
+                        cfg_obj=cfg,
+                    )
+                if safety_ok and capture_started:
+                    fresh_validation = refreshed_validation
+                    batch_live_prices[symbol] = pullback.executable_price
+                    record_validation_event(
+                        "matmon_pullback_recovered",
+                        {
+                            **candidate_event_context,
+                            **pullback.to_dict(),
+                            "fresh_confirmation_restarted": True,
+                        },
+                    )
+                else:
+                    logger.info(
+                        "MATMON PULLBACK RECONFIRM BLOCK | %s | safety_ok=%s "
+                        "capture_started=%s", symbol, safety_ok, capture_started,
+                    )
 
         if not fresh_validation.accepted:
             record_pipeline_event(
@@ -1921,6 +2075,80 @@ def run_full_scan(
                 f"Sector fetches: {sector_fetches}\nSector cache hits: {sector_cache_hits}\n"
                 f"Symbols scanned: {len(symbols_to_check)}\nMarket trend: {market_trend}")
     return status_this_cycle
+
+
+def run_incremental_scan(
+    kite,
+    symbols,
+    tokens,
+    exchange_map,
+    open_positions,
+    risk,
+    *,
+    scan_started_at=None,
+    ws_shadow_engine=None,
+):
+    """Scan and confirm bounded micro-batches instead of one monolithic list.
+
+    Candle fetching inside each batch still uses Matmon's existing bounded
+    prefetch pool.  Confirmation, risk checks, and order placement remain
+    serialized inside ``run_full_scan``.  This deliberately avoids
+    concurrent writes to positions/risk/order state while ensuring a signal
+    waits for at most one small batch rather than the complete watchlist.
+    """
+    scan_started_at = scan_started_at or datetime.now()
+    batch_size = max(1, int(getattr(cfg, "MATMON_SCAN_BATCH_SIZE", len(symbols) or 1)))
+    if not bool(getattr(cfg, "MATMON_IMMEDIATE_BATCH_CONFIRMATION", False)):
+        batch_size = max(1, len(symbols))
+
+    batches = [symbols[index:index + batch_size] for index in range(0, len(symbols), batch_size)]
+    if not batches:
+        batches = [[]]
+
+    logger.info(
+        "MATMON INCREMENTAL SCAN START | symbols=%s batch_size=%s batches=%s "
+        "prefetch_workers=%s confirmation=SERIALIZED_AFTER_EACH_BATCH",
+        len(symbols), batch_size, len(batches),
+        getattr(cfg, "MATMON_PREFETCH_WORKERS", 1),
+    )
+
+    combined_status = []
+    cycle_seen = set()
+    for batch_number, batch_symbols in enumerate(batches, start=1):
+        batch_started = time.monotonic()
+        unique_batch = []
+        for symbol in batch_symbols:
+            if symbol in cycle_seen:
+                continue
+            cycle_seen.add(symbol)
+            unique_batch.append(symbol)
+        if not unique_batch:
+            continue
+
+        logger.info(
+            "MATMON SCAN BATCH START | batch=%s/%s symbols=%s",
+            batch_number, len(batches), len(unique_batch),
+        )
+        combined_status.extend(
+            run_full_scan(
+                kite,
+                unique_batch,
+                tokens,
+                exchange_map,
+                open_positions,
+                risk,
+                scan_started_at=scan_started_at,
+                ws_shadow_engine=ws_shadow_engine,
+            )
+        )
+        logger.info(
+            "MATMON SCAN BATCH COMPLETE | batch=%s/%s elapsed=%.3fs "
+            "open_positions=%s",
+            batch_number, len(batches), time.monotonic() - batch_started,
+            len(open_positions),
+        )
+
+    return combined_status
 
 
 def _market_structure_broken(df_5m, direction, lookback=10):
@@ -4743,6 +4971,8 @@ def recover_unresolved_force_exits(
 
 
 def run():
+    if not getattr(cfg, "MATMON_MODE", False) or getattr(evaluate, "__name__", "") != "evaluate_matmon":
+        raise RuntimeError("Use matmon_live_launcher.py; this installation supports only MATMON_HAELOHIM")
     start_time = time.time()
     kite = get_kite_client()
     risk = RiskManager(cfg)
@@ -4824,7 +5054,8 @@ def run():
         f"symbols_loaded={len(symbols)} | "
         f"mode={'PAPER' if cfg.PAPER_TRADING else 'LIVE'} | "
         f"candle_aligned_polling={cfg.ENABLE_CANDLE_ALIGNED_POLLING} | "
-        f"market_alignment_filter={getattr(cfg, 'ENABLE_MARKET_ALIGNMENT_FILTER', False)} | "
+        f"market_alignment_configured={getattr(cfg, 'ENABLE_MARKET_ALIGNMENT_FILTER', False)} | "
+        f"market_alignment_effective={bool(getattr(cfg, 'ENABLE_MARKET_ALIGNMENT_FILTER', False) and not getattr(cfg, 'PROPOSED_CLEAN_PIPELINE', False))} | "
         f"auth_ok={auth_ok}"
     )
 
@@ -5056,7 +5287,7 @@ def run():
                     f"last completed candle: {current_candle.strftime('%H:%M')}"
                 )
                 scan_start = time.time()
-                status_this_cycle = run_full_scan(kite, symbols, tokens, exchange_map, open_positions, risk, ws_shadow_engine=ws_shadow_engine)
+                status_this_cycle = run_incremental_scan(kite, symbols, tokens, exchange_map, open_positions, risk, ws_shadow_engine=ws_shadow_engine)
                 scan_elapsed = time.time() - scan_start
                 try:
                     todays_trades = load_todays_trades(datetime.now().strftime("%Y-%m-%d"))

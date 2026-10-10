@@ -11,22 +11,28 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from auth import get_kite_client
-from paper_full_universe_top60_selector import (
+from equity_universe import (
     cleaned_equity_instruments,
     fetch_selector_quotes,
 )
+import matmon_strategy_config as strategy_def
+import matmon_watchlist_scoring as scoring
+from matmon_value_saturation_shadow import add_preopen_value_shadow
 
 IST = ZoneInfo("Asia/Kolkata")
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "user_config.json"
 RUNTIME = ROOT / "runtime" / "matmon" / "preopen"
-TOP_N = 60
+# STRATEGY definition -- single source of truth (was a bare literal here
+# before centralization; the patch that fixed this repo-wide didn't apply
+# cleanly to this file since it had already been hand-edited to 60).
+TOP_N = strategy_def.MATMON_WATCHLIST_SIZE
 
 # Broad safety/liquidity constraints only.
-MIN_PRICE = 20.0
-MAX_PRICE = 2200.0
-MAX_SPREAD_PCT = 0.50
-MIN_DEPTH_VALUE = 1000.0
+MIN_PRICE = 50.0
+MAX_PRICE = 5000.0
+MAX_SPREAD_PCT = 0.25
+MIN_DEPTH_VALUE = 100_000.0
 
 
 def num(v, default=0.0):
@@ -47,107 +53,22 @@ def depth_side_value(levels):
 
 
 def evaluate(row, quote):
-    if not isinstance(quote, dict):
-        return None
-
-    last = num(quote.get("last_price"))
-
-    if not (MIN_PRICE <= last <= MAX_PRICE):
-        return None
-
-    depth = quote.get("depth") or {}
-    buys = depth.get("buy") or []
-    sells = depth.get("sell") or []
-
-    if not buys or not sells:
-        return None
-
-    bid = num(buys[0].get("price"))
-    ask = num(sells[0].get("price"))
-
-    if bid <= 0 or ask <= 0 or ask < bid:
-        return None
-
-    mid = (bid + ask) / 2.0
-
-    if mid <= 0:
-        return None
-
-    spread_pct = ((ask - bid) / mid) * 100.0
-
-    if spread_pct > MAX_SPREAD_PCT:
-        return None
-
-    buy_value = depth_side_value(buys)
-    sell_value = depth_side_value(sells)
-    depth_value = buy_value + sell_value
-
-    if depth_value < MIN_DEPTH_VALUE:
-        return None
-
-    # 0..1: total visible depth / liquidity.
-    liquidity_raw = math.log1p(depth_value)
-
-    # 0..1: absolute directional imbalance.
-    imbalance = (
-        abs(buy_value - sell_value) / depth_value
-        if depth_value > 0 else 0.0
+    """Hard eligibility only -- delegates to matmon_watchlist_scoring so
+    eligibility logic has one source of truth shared with the offline
+    replay/comparison tooling. Identical pass/fail behavior to before this
+    delegation; the returned dict gains a few extra observational fields
+    (signed imbalance, suspicious-quote flag, CAS passthrough) that no
+    ranking here depends on.
+    """
+    candidate, _reason = scoring.hard_eligibility(
+        row,
+        quote,
+        min_price=MIN_PRICE,
+        max_price=MAX_PRICE,
+        max_spread_pct=MAX_SPREAD_PCT,
+        min_depth_value=MIN_DEPTH_VALUE,
     )
-
-    # Tighter spread is better.
-    spread_quality = max(
-        0.0,
-        1.0 - (spread_pct / MAX_SPREAD_PCT),
-    )
-
-    volume = num(quote.get("volume"))
-    volume_raw = math.log1p(max(0.0, volume))
-
-    ohlc = quote.get("ohlc") or {}
-    prev_close = num(ohlc.get("close"))
-
-    gap_pct = (
-        ((last - prev_close) / prev_close) * 100.0
-        if prev_close > 0 else 0.0
-    )
-
-    return {
-        "symbol": row["symbol"],
-        "exchange": row["exchange"],
-        "last_price": round(last, 4),
-        "bid": round(bid, 4),
-        "ask": round(ask, 4),
-        "spread_pct": round(spread_pct, 6),
-        "buy_depth_value": round(buy_value, 2),
-        "sell_depth_value": round(sell_value, 2),
-        "depth_value": round(depth_value, 2),
-        "imbalance": round(imbalance, 6),
-        "volume": int(volume),
-        "gap_pct": round(gap_pct, 6),
-
-        # Raw values normalized after the complete universe is collected.
-        "_liq": liquidity_raw,
-        "_vol": volume_raw,
-        "_spread": spread_quality,
-        "_imbalance": imbalance,
-    }
-
-
-def normalize(rows, key):
-    values = [num(x.get(key)) for x in rows]
-
-    if not values:
-        return
-
-    lo = min(values)
-    hi = max(values)
-
-    for row in rows:
-        value = num(row.get(key))
-        row[key + "_norm"] = (
-            (value - lo) / (hi - lo)
-            if hi > lo else 0.0
-        )
+    return candidate
 
 
 def main():
@@ -155,10 +76,10 @@ def main():
 
     cfg = json.loads(CONFIG.read_text())
 
-    if cfg.get("paper_trading") is not True:
-        raise SystemExit(
-            "ABORT: user_config.json is not PAPER"
-        )
+    paper = cfg.get("paper_trading") is True
+    mode = "PAPER" if paper else "LIVE"
+    print(f"MATMON_PREOPEN_MODE={mode}")
+    # Watchlist selection only — no orders. Allowed in both PAPER and LIVE.
 
     kite = get_kite_client()
 
@@ -190,26 +111,19 @@ def main():
             f"ABORT: only {len(candidates)} valid pre-open candidates"
         )
 
-    normalize(candidates, "_liq")
-    normalize(candidates, "_vol")
-
+    # PRE-OPEN DISCOVERY ONLY. Direction is deliberately NOT used to select
+    # or gate entries here -- BUY/SELL remains exclusively Matmon's
+    # EMA3/15 -> DI14 -> 3s CLEAN quote confirmation.
+    #
+    # Model A (current production formula) drives the actual selection
+    # below -- unchanged behavior. Model B is computed alongside it purely
+    # for research/observational persistence; nothing here selects on it.
+    scoring.score_model_a(candidates)
+    scoring.score_model_b(candidates)
+    # Observation only: adds fields but never changes model_a_score or sorting.
+    add_preopen_value_shadow(candidates)
     for c in candidates:
-        # PRE-OPEN DISCOVERY ONLY.
-        #
-        # Liquidity/activity dominate.
-        # Book imbalance helps rank active names.
-        # Direction is deliberately NOT used here.
-        #
-        # BUY/SELL remains exclusively Matmon:
-        # EMA3/15 -> DI14 -> 3s repricing.
-
-        c["preopen_score"] = round(
-            45.0 * c["_liq_norm"]
-            + 25.0 * c["_vol_norm"]
-            + 20.0 * c["_spread"]
-            + 10.0 * c["_imbalance"],
-            6,
-        )
+        c["preopen_score"] = c["model_a_score"]
 
     # Deduplicate the same symbol if available on both exchanges.
     candidates.sort(
@@ -250,42 +164,37 @@ def main():
     if len({x["symbol"] for x in watchlist}) != TOP_N:
         raise SystemExit("ABORT: duplicate symbols")
 
-    # Preserve complete previous configuration.
+    # Auto-approve: write Top-N into user_config.json and keep a report.
+    now_ist = datetime.now(IST)
+    stamp = now_ist.strftime("%Y%m%d_%H%M%S")
+    selection_date = now_ist.date().isoformat()
+
+    # Preserve previous config
     backup_dir = RUNTIME / "config_backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-
-    stamp = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
-
-    backup = (
-        backup_dir /
-        f"user_config_before_preopen_{stamp}.json"
-    )
-
+    backup = backup_dir / f"user_config_before_preopen_{stamp}.json"
     shutil.copy2(CONFIG, backup)
 
     updated = dict(cfg)
     updated["watchlist"] = watchlist
+    updated["entry_scan_shortlist_size"] = TOP_N
+    # Do not force paper_trading here — leave LIVE/PAPER as already configured
 
     tmp = CONFIG.with_suffix(".json.tmp")
-
-    tmp.write_text(
-        json.dumps(updated, indent=2) + "\n"
-    )
-
+    tmp.write_text(json.dumps(updated, indent=2) + "\n")
     tmp.replace(CONFIG)
 
-    # Read-back verification.
     check = json.loads(CONFIG.read_text())
-
-    if check.get("paper_trading") is not True:
-        raise RuntimeError("POST-WRITE PAPER CHECK FAILED")
-
     if check.get("watchlist") != watchlist:
         raise RuntimeError("POST-WRITE WATCHLIST CHECK FAILED")
 
     report = {
-        "generated_at": datetime.now(IST).isoformat(),
-        "strategy": "MATMON_PREOPEN_TOP60",
+        "generated_at": now_ist.isoformat(),
+        "selection_date": selection_date,
+        "status": "AUTO_APPROVED",
+        "target_count": TOP_N,
+        "config_backup": str(backup),
+        "strategy": f"MATMON_PREOPEN_TOP{TOP_N}",
         "cleaning": cleaning,
         "valid_candidates": len(candidates),
         "selected_count": len(selected),
@@ -298,10 +207,18 @@ def main():
             }
             for x in selected
         ],
-        "config_backup": str(backup),
+        "value_shadow_note": (
+            "rupee_turnover_shadow/percentile and low_value_shadow are "
+            "OBSERVATION-ONLY; production ranking remains model_a_score"
+        ),
+        "model_b_note": (
+            "model_b_score/component scores are RESEARCH-ONLY and do not "
+            "affect selection above -- see matmon_watchlist_scoring.py"
+        ),
+        "full_ranked_universe_file": f"{stamp}_full_ranked.json",
     }
 
-    report_path = RUNTIME / f"top120_{stamp}.json"
+    report_path = RUNTIME / f"top{TOP_N}_{stamp}.json"
 
     report_path.write_text(
         json.dumps(report, indent=2) + "\n"
@@ -311,12 +228,37 @@ def main():
         json.dumps(report, indent=2) + "\n"
     )
 
-    print("MATMON PREOPEN TOP-60")
+    candidate_path = RUNTIME / f"pending_top{TOP_N}_candidate.json"
+    candidate_path.write_text(
+        json.dumps(report, indent=2) + "\n"
+    )
+
+    # Research-only: the COMPLETE eligible ranked universe (not just the
+    # operational Top-N), with both Model A and Model B scores, for later
+    # counterfactual analysis (Would Top-30 have been better? Top-80?)
+    # without needing to change the live trading universe to find out.
+    full_ranked = {
+        "generated_at": report["generated_at"],
+        "note": (
+            "Full eligible universe, ranked by model_a_score (current "
+            "production ordering) with model_b_score/components attached "
+            "for offline comparison. Not the operational watchlist."
+        ),
+        "candidates": [
+            {k: v for k, v in x.items() if not k.startswith("_")}
+            for x in candidates
+        ],
+    }
+    full_ranked_path = RUNTIME / f"{stamp}_full_ranked.json"
+    full_ranked_path.write_text(json.dumps(full_ranked, indent=2) + "\n")
+
+
+    print(f"MATMON PREOPEN TOP-{TOP_N}")
     print("Clean universe :", len(rows))
     print("Valid candidates:", len(candidates))
     print("Selected       :", len(selected))
     print("Unique         :", len(seen))
-    print("Backup         :", backup)
+    print("Candidate      :", candidate_path)
     print("Report         :", report_path)
 
     print()
@@ -333,8 +275,9 @@ def main():
         )
 
     print()
-    print("MATMON_PREOPEN_TOP60=PASS")
-    print("PAPER_ONLY=TRUE")
+    print(f"MATMON_PREOPEN_TOP{TOP_N}=PASS")
+    print("AUTO_APPROVED=TRUE")
+    print("WATCHLIST_INSTALLED=TRUE")
     print("NO_ORDERS_PLACED")
 
 

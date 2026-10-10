@@ -1,0 +1,5 @@
+[Unit]
+Description=Stop Matmon scanner before independent square-off
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl stop matmon-live.service

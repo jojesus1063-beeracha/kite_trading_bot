@@ -14,10 +14,17 @@ This module has no entry/exit/order authority.
 from __future__ import annotations
 
 import math
+import json
+import logging
+import threading
 import time
+from pathlib import Path
 
 from matmon_microstructure import weighted_5_imbalance
 from matmon_observation_log import append_observation
+
+logger = logging.getLogger("matmon_dashboard_observation")
+LIVE_SNAPSHOT = Path("runtime/matmon/observations/live_snapshot.json")
 
 
 def _number(value):
@@ -272,3 +279,79 @@ def record_dashboard_observation(
     except Exception:
         # Telemetry must never influence Matmon.
         return False
+
+
+class DashboardObservationPublisher:
+    """Publish a bounded latest snapshot for every subscribed symbol.
+
+    This runs independently of signal confirmation and has no order authority.
+    One atomic JSON file is replaced each interval, avoiding an unbounded
+    per-tick journal and keeping the dashboard read inexpensive.
+    """
+
+    def __init__(self, tick_buffer, symbols, *, interval_seconds=5.0,
+                 lookback_seconds=10.0, output_path=LIVE_SNAPSHOT):
+        self.tick_buffer = tick_buffer
+        self.symbols = tuple(dict.fromkeys(symbols))
+        self.interval_seconds = max(1.0, float(interval_seconds))
+        self.lookback_seconds = max(self.interval_seconds, float(lookback_seconds))
+        self.output_path = Path(output_path)
+        self._stop = threading.Event()
+        self._thread = None
+
+    def snapshot(self, *, now=None):
+        now = time.time() if now is None else float(now)
+        stocks = []
+        for symbol in self.symbols:
+            ticks = self.tick_buffer.ticks_received_since(
+                symbol, now - self.lookback_seconds
+            ) or []
+            evidence = build_quote_evidence(ticks[-20:])
+            stocks.append({
+                "symbol": symbol,
+                "direction": None,
+                "recorded_at_epoch": now,
+                "quote_evidence": evidence,
+                "observation_only": True,
+            })
+        return {
+            "schema_version": 1,
+            "generated_at_epoch": now,
+            "observation_only": True,
+            "stocks": stocks,
+        }
+
+    def publish_once(self, *, now=None):
+        payload = self.snapshot(now=now)
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.output_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(self.output_path)
+        return payload
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                self.publish_once()
+            except Exception:
+                logger.exception("MATMON DASHBOARD SNAPSHOT FAILED | OBSERVATION_ONLY=True")
+            self._stop.wait(self.interval_seconds)
+
+    def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="matmon-dashboard-observer",
+        )
+        self._thread.start()
+
+    def stop(self, timeout=2.0):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)

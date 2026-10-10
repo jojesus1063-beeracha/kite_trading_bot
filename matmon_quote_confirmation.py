@@ -69,50 +69,68 @@ def _full_path_clean(rows, direction):
         for prev, cur in zip(rows, rows[1:])
     )
 
-def _evaluate_from_frozen(frozen_ticks, direction, *, window_seconds=3.0):
-    """Same windowing + full-path-CLEAN logic as the live path, applied to an
-    already-frozen, already-fresh tick batch. No wall-clock staleness check:
-    that check exists in the live path solely to detect a query that arrived
-    "now" too long after the last tick -- it has no meaning for a batch that
-    was captured synchronously during its own live window."""
+def _evaluate_from_frozen(
+    frozen_ticks,
+    direction,
+    *,
+    window_seconds=3.0,
+):
+    """Evaluate exactly the first three valid frozen post-DI ticks."""
     if direction not in {"BUY", "SELL"}:
-        return QuoteEvidence(False, False, "MATMON_INVALID_DIRECTION")
+        return QuoteEvidence(
+            False,
+            False,
+            "MATMON_INVALID_DIRECTION",
+        )
 
-    window_seconds = max(0.1, float(window_seconds))
     valid = []
+
     for tick in frozen_ticks or ():
         quote = _best_quote(tick)
         received = _number((tick or {}).get("received_at"))
+
         if quote is None or received is None or received <= 0:
             continue
+
         valid.append((received, quote[0], quote[1], tick))
 
-    if not valid:
-        return QuoteEvidence(False, False, "MATMON_NO_POST_DI_TICKS")
-
     valid.sort(key=lambda row: row[0])
-    last = valid[-1]
-    cutoff = last[0] - window_seconds
-    first_indexes = [i for i, row in enumerate(valid) if row[0] <= cutoff]
-    if not first_indexes:
-        return QuoteEvidence(False, False, "MATMON_INSUFFICIENT_QUOTE_WINDOW")
 
-    start = first_indexes[-1]
-    window = valid[start:]
-    if len(window) < 2:
-        return QuoteEvidence(False, False, "MATMON_INSUFFICIENT_QUOTE_WINDOW")
+    if len(valid) < 3:
+        return QuoteEvidence(
+            False,
+            False,
+            "MATMON_INSUFFICIENT_QUOTE_TICKS",
+        )
 
-    clean_rows = [(row[0], row[1], row[2]) for row in window]
+    window = valid[:3]
+    clean_rows = [
+        (row[0], row[1], row[2])
+        for row in window
+    ]
+
     confirmed = _full_path_clean(clean_rows, direction)
     first = window[0]
     last = window[-1]
+
     return QuoteEvidence(
         True,
         confirmed,
-        "MATMON_QUOTE_CONFIRMED" if confirmed else "MATMON_QUOTE_NOT_CLEAN",
-        first[0], last[0], first[1], first[2], last[1], last[2],
+        (
+            "MATMON_QUOTE_CONFIRMED"
+            if confirmed
+            else "MATMON_QUOTE_NOT_CLEAN"
+        ),
+        first[0],
+        last[0],
+        first[1],
+        first[2],
+        last[1],
+        last[2],
         tuple(row[3] for row in window),
     )
+
+
 def evaluate_quote_window(
     tick_buffer,
     symbol,

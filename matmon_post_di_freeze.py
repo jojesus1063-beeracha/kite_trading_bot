@@ -57,24 +57,80 @@ def _tick_within_window(tick, start, end):
     return start <= received_at <= end
 
 
-def _capture_worker(entry, tick_buffer, window_seconds, poll_seconds, sleep_fn, now_fn):
+def _valid_depth_tick(tick):
+    """Return True only for a timestamped tick with valid best bid/ask."""
+    try:
+        received_at = float((tick or {}).get("received_at"))
+        depth = (tick or {}).get("depth") or {}
+        buys = depth.get("buy") or []
+        sells = depth.get("sell") or []
+        bid = float(buys[0].get("price"))
+        ask = float(sells[0].get("price"))
+    except (TypeError, ValueError, AttributeError, IndexError):
+        return False
+
+    return (
+        received_at > 0
+        and bid > 0
+        and ask > 0
+        and ask >= bid
+    )
+
+
+def _capture_worker(
+    entry,
+    tick_buffer,
+    window_seconds,
+    poll_seconds,
+    sleep_fn,
+    now_fn,
+):
+    """Capture the first three valid post-DI ticks within the timeout."""
+    required_ticks = 3
     deadline = entry.di_passed_at + window_seconds
+    frozen = ()
+
     try:
         while True:
+            rows = tick_buffer.ticks_received_since(
+                entry.symbol,
+                entry.di_passed_at,
+            )
+
+            valid = [
+                tick for tick in (rows or ())
+                if _tick_within_window(
+                    tick,
+                    entry.di_passed_at,
+                    deadline,
+                )
+                and _valid_depth_tick(tick)
+            ]
+
+            valid.sort(
+                key=lambda tick: float(tick.get("received_at"))
+            )
+
+            if len(valid) >= required_ticks:
+                frozen = tuple(valid[:required_ticks])
+                entry.reason = "CAPTURED_FIRST_3_TICKS"
+                break
+
             remaining = deadline - now_fn()
             if remaining <= 0:
+                frozen = tuple(valid)
+                entry.reason = "CAPTURE_INSUFFICIENT_TICKS"
                 break
+
             sleep_fn(min(poll_seconds, remaining))
 
-        rows = tick_buffer.ticks_received_since(entry.symbol, entry.di_passed_at)
-        frozen = tuple(
-            tick for tick in (rows or ())
-            if _tick_within_window(tick, entry.di_passed_at, deadline)
-        )
         entry.ticks = frozen
-        entry.reason = "CAPTURED" if frozen else "CAPTURE_EMPTY"
-    except Exception:  # pragma: no cover - defensive; never crash the scan loop
-        logger.exception("MATMON_FREEZE_CAPTURE_FAILED | %s", entry.symbol)
+
+    except Exception:  # pragma: no cover
+        logger.exception(
+            "MATMON_FREEZE_CAPTURE_FAILED | %s",
+            entry.symbol,
+        )
         entry.reason = "CAPTURE_FAILED"
     finally:
         entry.ready.set()
@@ -157,8 +213,12 @@ def pop_frozen_evidence(symbol, di_passed_at, *, wait_timeout=DEFAULT_WAIT_TIMEO
         if _entries.get(symbol) is entry:
             _entries.pop(symbol, None)
 
-    if entry.reason != "CAPTURED":
-        logger.info("MATMON_FREEZE_UNAVAILABLE | %s | reason=%s", symbol, entry.reason)
+    if entry.reason not in {"CAPTURED", "CAPTURED_FIRST_3_TICKS"}:
+        logger.info(
+            "MATMON_FREEZE_UNAVAILABLE | %s | reason=%s",
+            symbol,
+            entry.reason,
+        )
         return None
 
     return entry.ticks
