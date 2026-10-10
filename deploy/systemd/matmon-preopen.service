@@ -1,0 +1,11 @@
+[Unit]
+Description=MATMON_HAELOHIM pre-open 120-stock selection
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/kite_trading_bot
+Environment=TZ=Asia/Kolkata
+EnvironmentFile=/home/ubuntu/kite_trading_bot/.env
+ExecStart=/bin/bash /home/ubuntu/kite_trading_bot/deploy/matmon_preopen_auto.sh

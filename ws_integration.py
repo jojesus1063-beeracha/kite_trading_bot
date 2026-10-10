@@ -28,6 +28,7 @@ HOW_TO_APPLY.md.
 """
 
 import logging
+import math
 import time
 from datetime import datetime
 from typing import Optional
@@ -47,6 +48,14 @@ from data_feed import fetch_candles
 from scheduler import candle_interval_minutes
 
 logger = logging.getLogger("ws_integration")
+
+
+def _finite_float(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 class WSShadowEngine:
@@ -104,6 +113,8 @@ class WSShadowEngine:
         self._validated_5m_dates = self._validated_entry_dates
 
         self.ws_ticker = None
+        self._dashboard_publisher = None
+        self.quote_depth_only = bool(getattr(cfg, "WS_QUOTE_DEPTH_ONLY", False))
 
     def seed_from_history(self):
         """Seeds every symbol's indicator state from REST history before any tick is processed."""
@@ -144,6 +155,9 @@ class WSShadowEngine:
         so an exception here can never propagate into KiteTicker's
         thread or, transitively, disrupt the main REST-based loop.
         """
+        if self.quote_depth_only:
+            return
+
         builder = self.candle_builders_entry.get(symbol)
         if builder is None:
             return
@@ -155,7 +169,9 @@ class WSShadowEngine:
         token = self.tokens.get(symbol)
 
         # -- entry-candle shadow comparison -----------------------------
-        if token is not None:
+        if token is not None and bool(
+            getattr(cfg, "WS_ENABLE_CANDLE_SHADOW_COMPARISON", False)
+        ):
             try:
                 comparison = self.candle_shadow.compare_entry_candle(
                     symbol,
@@ -224,7 +240,11 @@ class WSShadowEngine:
         # -- periodic full-indicator shadow comparison --------------------
         now = time.time()
         last_check = self._last_indicator_check.get(symbol, 0)
-        if now - last_check >= self._indicator_check_interval_sec and token is not None:
+        if (
+            bool(getattr(cfg, "WS_ENABLE_INDICATOR_SHADOW_COMPARISON", False))
+            and now - last_check >= self._indicator_check_interval_sec
+            and token is not None
+        ):
             self._last_indicator_check[symbol] = now
             self._run_indicator_shadow_comparison(symbol, token)
 
@@ -360,10 +380,15 @@ class WSShadowEngine:
                 lookback_days=entry_indicator_lookback_days(cfg),
             )
             if not df_15m.empty:
+                vwap_values = vwap(df_15m)
                 batch_15m = {
                     f"ema_{cfg.TREND_EMA_FAST}": float(ema(df_15m, cfg.TREND_EMA_FAST).iloc[-1]),
                     f"ema_{cfg.TREND_EMA_SLOW}": float(ema(df_15m, cfg.TREND_EMA_SLOW).iloc[-1]),
-                    "vwap": float(vwap(df_15m).iloc[-1]) if not vwap(df_15m).empty else None,
+                    "vwap": (
+                        _finite_float(vwap_values.iloc[-1])
+                        if not vwap_values.empty
+                        else None
+                    ),
                     "adx": float(adx(df_15m, getattr(cfg, "ADX_PERIOD", 14)).iloc[-1]),
                 }
                 inc_state = self.indicator_state_15m[symbol]
@@ -401,7 +426,8 @@ class WSShadowEngine:
         from ws_ticker import WSTicker, build_token_map
 
         try:
-            self.seed_from_history()
+            if not self.quote_depth_only:
+                self.seed_from_history()
 
             token_to_symbol = {tok: sym for sym, tok in self.tokens.items() if sym in self.symbols}
             sector_indices = getattr(cfg, "WS_SECTOR_INDICES", [])
@@ -425,10 +451,20 @@ class WSShadowEngine:
 
             self.ws_ticker = WSTicker(api_key, access_token, token_to_symbol, on_tick=_safe_on_tick)
             self.ws_ticker.start(threaded=True)
+            if bool(getattr(cfg, "MATMON_ENABLE_DASHBOARD_OBSERVATION", False)):
+                from matmon_dashboard_observation import DashboardObservationPublisher
+                self._dashboard_publisher = DashboardObservationPublisher(
+                    self.ws_ticker.tick_buffer,
+                    self.symbols,
+                )
+                self._dashboard_publisher.start()
             connected = self.ws_ticker.wait_until_connected(timeout=10.0)
             if connected:
-                logger.info(f"ws_integration: WS shadow engine started, mode={cfg.WS_CANDLE_MODE}, "
-                            f"{len(token_to_symbol)} instruments subscribed")
+                logger.info(
+                    "ws_integration: WS quote/depth buffer started, "
+                    f"quote_depth_only={self.quote_depth_only}, "
+                    f"{len(token_to_symbol)} instruments subscribed"
+                )
             else:
                 logger.warning("ws_integration: WS did not confirm connection within 10s -- "
                                 "it may still connect via its own reconnect logic; REST loop unaffected either way")
@@ -437,6 +473,11 @@ class WSShadowEngine:
                               "REST-based trading loop is completely unaffected by this failure")
 
     def stop(self):
+        if self._dashboard_publisher is not None:
+            try:
+                self._dashboard_publisher.stop()
+            except Exception:
+                logger.exception("ws_integration: error stopping dashboard observer")
         try:
             self._log_augmentation_summary()
         except Exception:

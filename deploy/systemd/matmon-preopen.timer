@@ -1,0 +1,8 @@
+[Unit]
+Description=matmon-preopen schedule
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:02:00 Asia/Kolkata
+Persistent=false
+Unit=matmon-preopen.service
+[Install]
+WantedBy=timers.target

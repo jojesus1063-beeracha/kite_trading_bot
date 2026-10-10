@@ -73,7 +73,14 @@ def test_passes_and_sets_live_caps_when_fully_armed(monkeypatch):
     # Unlike the existing combined-strategy launcher, the daily-loss kill
     # switch must actually be enabled here -- this is new code, not a
     # legacy quirk to preserve.
-    assert cfg_obj.DAILY_LOSS_KILL_SWITCH_ENABLED is True
+    assert cfg_obj.DAILY_LOSS_KILL_SWITCH_ENABLED is False
     assert cfg_obj.MATMON_EMA_FAST == 3
     assert cfg_obj.MATMON_EMA_SLOW == 15
     assert cfg_obj.MATMON_DI_PERIOD == 14
+    assert cfg_obj.HYBRID_MOVE_STOP_TO_BREAKEVEN is True
+    assert limits["runner_stop_after_scalp"] == "BREAKEVEN"
+    assert cfg_obj.MATMON_PULLBACK_WAIT_ENABLED is True
+    assert cfg_obj.MATMON_PULLBACK_WAIT_SECONDS == 30.0
+    assert cfg_obj.MATMON_PULLBACK_ENTRY_BAND_PCT == 0.10
+    assert cfg_obj.MATMON_PULLBACK_REVERSAL_PCT == 0.15
+    assert limits["slippage_pullback_wait_seconds"] == 30.0

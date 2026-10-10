@@ -1,98 +1,125 @@
-# Kite intraday candle + MA trading bot
+# MATMON_HAELOHIM
 
-Strategy: 15-min trend filter (9/35 EMA + VWAP) confirms direction,
-3-min pullback/rejection/confirmation candles + entry EMA + volume
-triggers entry, strict stop-loss with a minimum 1:2 reward:risk.
+Single supported equity strategy, recovered from the September 10, 2026
+09:57 IST deployment archive and checked against its service journal.
 
-## Before anything else
+The entry sequence is completed REST 3-minute EMA3/EMA15 direction, DI14
+agreement, the first three valid post-DI ticks within three seconds,
+strict CLEAN or flat-with-pressure, LTP velocity and weighted five-level
+book direction/strengthening. This does not require three seconds between
+the first and last of those three ticks. Adverse execution-price movement
+can trigger a 30-second pullback wait followed by a new confirmation.
+The scanner uses 12-symbol batches and three prefetch workers.
 
-1. **This is not financial advice.** This code automates a strategy you
-   design — it does not know whether the strategy is profitable. Backtest
-   thoroughly, then paper-trade (`config.PAPER_TRADING = True`) for at
-   least a few weeks before risking real capital.
-2. **Compliance:** SEBI's retail algo trading framework (fully mandatory
-   since April 2026) permits self-use — automating trades for your own
-   account without third-party registration — but requires things like
-   static IP whitelisting and 2FA on your API access. Rules have been
-   evolving; check the current requirements directly on
-   [Kite Connect's developer docs](https://kite.trade/docs/connect/v3/)
-   and your Zerodha console before going live.
-3. **Kite Connect is a separate paid subscription** from your regular
-   Zerodha account — subscribe at https://developers.kite.trade.
-4. **Static IP is mandatory for order placement**, effective since April 1,
-   2026 — this applies to every API user regardless of order volume,
-   including personal self-use. Data/websocket endpoints are unaffected;
-   it's specifically order placement/modification/cancellation calls.
-   Home broadband is almost always a *dynamic* IP, so if you're running
-   this on your laptop over regular home internet, orders will start
-   getting rejected whenever your IP changes. Options:
-   - Ask your ISP if they offer a static IP add-on
-   - Route only the order-placement calls through a static-IP proxy/VPN
-     service, keeping the bot itself on your laptop
-   - Whatever IP you land on, add it in the Kite Connect developer
-     console (Profile → static IP) — you get one mandatory primary and
-     one optional secondary
-   This does **not** stop you from running the bot itself on your
-   laptop — it's specifically about the IP your orders originate from.
+## Authoritative policy
 
-## Setup
+`matmon_strategy_config.py` contains the strategy and live risk values.
+The launcher applies them after loading operational configuration so old
+stop/exit switches cannot silently change the recovered policy.
+
+- Universe: 120 ordinary equities across NSE/BSE, selected before trading.
+- Capital: fixed INR 5,000, as logged on September 10; not dynamic balance.
+- Planned risk per trade: 2%; maximum positions: 3; daily trades: 10.
+- Maximum position-size setting: 50%; broker margin check retained.
+- Consecutive loss limit: 3. Daily loss threshold 0.5% is **disabled**, matching
+  the historical launcher. These are historical settings, not a new recommendation.
+- Initial stop: 1% from confirmed fill, corroborated by all three September 10
+  entry logs; the archived Python default was 0.45%, overridden at runtime.
+- Exit: half at 1R, remainder at 2R, runner stop to breakeven after the partial
+  fill is confirmed. Quantity rounding and broker protection remain in the
+  recovered execution modules.
+- Session defaults from recovered source: entry 09:15–15:00, local square-off
+  15:08. The independent EOD supervisor added on September 10 stops the scanner
+  at 15:04 and squares off at 15:05. Its final reconciliation deadline is 15:10.
+
+`config.py` still provides shared execution settings and loads the existing
+`user_config.json`. Credentials and local operational state are never committed.
+The code retains shared analytics/helpers required by the recovered engine;
+it removes other executable strategy launchers and the generic entry evaluator.
+Disabled research modules that are still imported remain dependencies, not
+additional supported strategies. This is not a rewrite of the broker engine.
+
+## Runtime entry points
+
+- `matmon_live_launcher.py`: the sole trading launcher. Requires live config,
+  `KITE_LIVE_COMBINED_ACK=I_ACCEPT_REAL_ORDERS`, and valid broker credentials.
+  The historical acknowledgement variable name is retained for compatibility.
+- `matmon_live_preflight.py --check-broker-flat`: read-only checks.
+- `matmon_preopen_top120.py`: current-day universe selection, no orders.
+- `matmon_eod_squareoff.py`: independent protective exit/reconciliation.
+- `auth.py`: interactive daily authentication.
+
+`matmon_policy.py` holds shared signal/confirmation functions. Running `main.py`
+directly is blocked before broker access. The old `paper_matmon_launcher.py`,
+FNO/EL-BETHEL/combined/contrarian launchers and unrelated research scripts have
+been removed from the current tree. Git history remains the recovery record.
+
+## Validation
+
+Run `python -m pip install -r requirements-dev.txt` followed by
+`python -m pytest -q`. Tests are offline, use simulated broker responses and do
+not place orders. See `RECOVERY_MANIFEST.json` for source provenance.
+A passing test suite does not establish strategy profitability or broker readiness.
+
+## Server migration
+
+Use a separate checkout of this release, outside `/home/ubuntu/kite_trading_bot`.
+Do not pull it over the running server directory or use `git clean -fdx`.
+
+1. Stop all existing bot scanning services during maintenance and verify broker
+   exposure is flat. Keep exit protection operational until exposure is cleared.
+2. Run `python3 tools/install_matmon.py` from the separate checkout. This only
+   writes a plan with exact file hashes and unit names. Review the printed plan.
+3. In a shell with the existing Kite credentials available, execute the printed
+   `--apply-plan` command. It verifies source hashes, unchanged inventory, stopped
+   services, local state and broker flatness. It disables old bot units, makes a
+   private rollback archive, installs the release and removes scoped legacy code.
+   It does not start or enable the live bot.
+4. Preserve `user_config.json`, credentials, histories, runtime data, `.git` and
+   the existing venv. Reinstall requirements if needed. Run the tests and preflight
+   on the server. Authentication may need refreshing before preflight.
+5. New unit templates are in `deploy/systemd`. They reference `.env` and optional
+   `matmon-live.env`, do not embed secrets, and use `matmon-live.service` to avoid
+   old launcher drop-ins. Install the templates only after inspecting local
+   credentials/environment paths. EOD units must be in place before live startup.
+6. The installer deliberately leaves FNO deployments outside the target directory,
+   unknown data directories and old Git branches intact. Inventory those separately
+   before removing their code; export their histories first. Do not confuse this
+   scoped source cleanup with erasure of all historical records.
+
+The rollback archive contains files replaced/deleted and the original unit
+inventory. It remains on the server with mode 0600. Live startup is a separate
+manual step after deployment checks. No automatic live-start timer is supplied.
+
+## Exact deployment commands
+
+Fetch into a separate directory and generate the inventory first:
 
 ```bash
-pip install -r requirements.txt
+cd /home/ubuntu
+git clone --branch cleanup/matmon-sept10-only --single-branch https://github.com/jojesus1063-beeracha/kite_trading_bot.git matmon_sept10_release
+cd /home/ubuntu/matmon_sept10_release
+python3 tools/install_matmon.py
 ```
 
-Set your credentials as environment variables (don't hardcode them):
+The printed plan is read-only. Apply its exact command during a maintenance
+window with scanning services stopped, broker exposure reconciled, and existing
+Kite environment variables loaded. The installer refuses active services or
+unresolved exposure. Do not stop exit protection while positions are open.
+
+After successful installation, install the new unit templates:
 
 ```bash
-export KITE_API_KEY="your_key"
-export KITE_API_SECRET="your_secret"
-export TRADING_CAPITAL="100000"   # your intraday capital in INR
+sudo cp /home/ubuntu/kite_trading_bot/deploy/systemd/* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now matmon-preopen.timer matmon-stop-live-eod.timer matmon-eod-squareoff.timer
+cd /home/ubuntu/kite_trading_bot
+venv/bin/python3 -m pip install -r requirements-dev.txt
+venv/bin/python3 -m pytest -q
 ```
 
-Edit `config.py` to set your watchlist, risk parameters, and confirm
-`PAPER_TRADING = True` for your first runs.
-
-## Daily workflow
-
-```bash
-# 1. Generate today's access token (manual login step, Kite requires this daily)
-python auth.py
-
-# 2. Run the bot
-python main.py
-```
-
-## Backtest before trading live
-
-```bash
-python backtest.py RELIANCE 2026-06-01 2026-07-01
-```
-
-## Project layout
-
-| File | Purpose |
-|---|---|
-| `config.py` | All tunable settings — watchlist, EMAs, risk, timeframes |
-| `auth.py` | Daily Kite Connect login/token generation |
-| `data_feed.py` | Historical candle fetching |
-| `indicators.py` | EMA, VWAP, rolling average volume |
-| `patterns.py` | Bullish/bearish engulfing detection |
-| `strategy.py` | Combines trend + entry + volume into buy/sell signals |
-| `risk_manager.py` | Position sizing, daily loss kill-switch, trade count cap |
-| `executor.py` | Places entry/exit orders (or logs them in paper mode) |
-| `main.py` | Live/paper trading loop |
-| `backtest.py` | Historical strategy validation |
-
-## What still needs your judgment
-
-- **Watchlist** — the 4 placeholder symbols in `config.py` are examples, not
-  recommendations.
-- **Position persistence** — `main.py` tracks open positions in memory only.
-  If the script restarts mid-day, it loses track of any open position. For
-  anything beyond paper-trading, add a small state file or DB.
-- **Order/network failure handling** — the executor doesn't yet retry or
-  reconcile against actual broker positions after a crash. Add that before
-  trading real size.
-- **Algo tagging** — if your broker requires an Algo ID/strategy tag on
-  orders once registered, add it in `executor.py` (commented placeholder
-  included).
+These commands enable selection and exit schedulers, not live entry. Before
+manual live startup, verify the current-day watchlist, refreshed credentials,
+`paper_trading=false`, the acknowledgement in the service environment, and a
+successful `matmon_live_preflight.py --check-broker-flat` using that same
+environment. No live-start command is included in the cleanup procedure.

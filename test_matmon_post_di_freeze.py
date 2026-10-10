@@ -123,7 +123,7 @@ def test_frozen_evidence_survives_arbitrarily_delayed_processing():
             sleep_fn=fake_sleep, now_fn=lambda: t0 + 3.0,
         )
         frozen = freeze.pop_frozen_evidence("ABC", t0, wait_timeout=2.0)
-        assert frozen is not None and len(frozen) == len(ticks)
+        assert frozen is not None and len(frozen) == 3
 
         result = evaluate_quote_window(
             buffer, "ABC", "BUY",
@@ -172,7 +172,7 @@ def test_capture_only_freezes_ticks_inside_the_post_di_window():
     frozen = freeze.pop_frozen_evidence("PQR", t0, wait_timeout=2.0)
     assert frozen is not None
     timestamps = sorted(t["received_at"] for t in frozen)
-    assert timestamps == [t0 + 0.0, t0 + 1.0, t0 + 2.0, t0 + 3.0]
+    assert timestamps == [t0 + 0.0, t0 + 1.0, t0 + 2.0]
 
 
 def test_maybe_start_capture_is_noop_for_non_matmon_signal():
@@ -204,7 +204,7 @@ def test_maybe_start_capture_starts_for_matmon_signal_with_engine():
     )
     assert entry is not None
     entry.ready.wait(timeout=2.0)
-    assert entry.reason in {"CAPTURED", "CAPTURE_EMPTY"}
+    assert entry.reason in {"CAPTURED_FIRST_3_TICKS", "CAPTURE_INSUFFICIENT_TICKS"}
 
 
 def test_pop_frozen_evidence_times_out_gracefully_if_never_ready():
